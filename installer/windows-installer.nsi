@@ -7,6 +7,9 @@ RequestExecutionLevel user
 !ifndef INPUT_EXE
   !error "INPUT_EXE is required"
 !endif
+!ifndef APP_ICON
+  !error "APP_ICON is required"
+!endif
 !ifndef NODE_LICENSE
   !error "NODE_LICENSE is required"
 !endif
@@ -16,6 +19,8 @@ RequestExecutionLevel user
 
 Name "Codex Quota Injector"
 OutFile "${OUTPUT_EXE}"
+Icon "${APP_ICON}"
+UninstallIcon "${APP_ICON}"
 InstallDir "$LOCALAPPDATA\Programs\Codex Quota Injector"
 InstallDirRegKey HKCU "Software\Codex Quota Injector" "InstallDir"
 SetCompressor /SOLID lzma

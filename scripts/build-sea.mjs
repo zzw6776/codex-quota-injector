@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import process from "node:process";
 
 import { build } from "esbuild";
+import { Data, NtExecutable, NtExecutableResource, Resource } from "resedit";
 
 const options = parseOptions(process.argv.slice(2));
 const root = resolve(import.meta.dirname, "..");
@@ -48,6 +49,8 @@ if (process.platform === "darwin") {
   execFileSync("/usr/bin/codesign", ["--remove-signature", output], {
     stdio: "ignore",
   });
+} else if (process.platform === "win32") {
+  await replaceWindowsIcon(output, resolve(root, "assets", "AppIcon.ico"));
 }
 
 const postjectCli = resolve(root, "node_modules", "postject", "dist", "cli.js");
@@ -99,4 +102,26 @@ async function patchWindowsGuiSubsystem(path) {
   }
   image.writeUInt16LE(2, optionalHeaderOffset + 68);
   await writeFile(path, image);
+}
+
+async function replaceWindowsIcon(executablePath, iconPath) {
+  const executable = NtExecutable.from(await readFile(executablePath), { ignoreCert: true });
+  const resources = NtExecutableResource.from(executable);
+  const iconFile = Data.IconFile.from(await readFile(iconPath));
+  const icons = iconFile.icons.map((item) => item.data);
+  const iconGroups = Resource.IconGroupEntry.fromEntries(resources.entries);
+  const targets = iconGroups.length > 0
+    ? iconGroups.map(({ id, lang }) => ({ id, lang }))
+    : [{ id: 1, lang: 1033 }];
+
+  for (const { id, lang } of targets) {
+    Resource.IconGroupEntry.replaceIconsForResource(
+      resources.entries,
+      id,
+      lang,
+      icons,
+    );
+  }
+  resources.outputResource(executable);
+  await writeFile(executablePath, Buffer.from(executable.generate()));
 }

@@ -16,6 +16,7 @@ await mkdir(outputDir, { recursive: true });
 execFileSync(options.makensis, [
   `/DVERSION=${packageJson.version}`,
   `/DINPUT_EXE=${resolve(options.inputExecutable)}`,
+  `/DAPP_ICON=${resolve(root, "assets", "AppIcon.ico")}`,
   `/DNODE_LICENSE=${resolve(options.nodeLicense)}`,
   `/DOUTPUT_EXE=${output}`,
   resolve(root, "installer", "windows-installer.nsi"),
