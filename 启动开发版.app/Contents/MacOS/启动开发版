@@ -1,0 +1,12 @@
+#!/bin/zsh
+
+bundle_dir="$(cd -- "$(dirname -- "$0")/../.." && pwd)"
+project_dir="$(cd -- "$bundle_dir/.." && pwd)"
+launcher="$project_dir/启动开发版.command"
+
+if [[ ! -x "$launcher" ]]; then
+  /usr/bin/osascript -e 'display alert "无法启动开发版" message "未找到可执行的 启动开发版.command，请确认应用仍位于项目根目录。" as critical'
+  exit 1
+fi
+
+exec /usr/bin/open -a "/System/Applications/Utilities/Terminal.app" "$launcher"

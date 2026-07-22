@@ -67,7 +67,7 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。W
 
 GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 
-- 推送到 `master`：自动构建 macOS Universal DMG 和 Windows x64 Setup，并上传到 Actions Artifacts；
+- 每次提交到 `master`：自动构建 macOS Universal DMG 和 Windows x64 Setup，创建 `build-提交短 SHA` 预发布 Release，并同时上传到 Actions Artifacts；
 - 推送 `v*` 标签：在构建成功后自动创建 GitHub Release 并上传两个安装包；
 - 支持在 Actions 页面手动触发。
 
@@ -82,7 +82,12 @@ npm install
 npm run launch
 ```
 
-Windows 也可以直接双击项目根目录的 `启动开发版.cmd`。脚本会切换到项目目录，首次运行时自动安装依赖，停止已运行的安装版或开发版注入器，然后以前台方式启动当前开发版；它不会关闭官方 Codex。关闭命令窗口即可停止注入器。
+也可以直接双击项目根目录中的开发版启动入口：
+
+- macOS：`启动开发版.app`（Finder、QSpace Pro 均推荐）或 `启动开发版.command`
+- Windows：`启动开发版.cmd`
+
+脚本会切换到项目目录，首次运行时自动安装依赖，停止已运行的安装版或开发版注入器，然后以前台方式启动当前开发版；它不会关闭官方 Codex。关闭终端窗口即可停止注入器。
 
 其他命令：
 

@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: packages-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   NODE_RUNTIME_VERSION: 22.23.1
@@ -142,8 +142,8 @@ jobs:
           path: release/windows/*.exe
 
   release:
-    name: Publish tagged release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish release
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
     needs:
       - macos
       - windows
@@ -164,11 +164,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+            release_title="Codex Quota Injector ${GITHUB_REF_NAME}"
+            release_kind="stable"
           else
-            gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            short_sha="${GITHUB_SHA:0:7}"
+            release_tag="build-${short_sha}"
+            release_title="Codex Quota Injector build ${short_sha}"
+            release_kind="development"
+          fi
+
+          if gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${release_tag}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
+          elif [[ "${release_kind}" == "stable" ]]; then
+            gh release create "${release_tag}" release-assets/* \
               --generate-notes \
-              --title "Codex Quota Injector ${GITHUB_REF_NAME}" \
+              --title "${release_title}" \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${release_tag}" release-assets/* \
+              --prerelease \
+              --target "${GITHUB_SHA}" \
+              --title "${release_title}" \
+              --notes "Automated package build for master commit ${GITHUB_SHA}." \
               --repo "${GITHUB_REPOSITORY}"
           fi
