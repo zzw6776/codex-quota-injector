@@ -1,11 +1,10 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-const DEFAULT_CODEX_BINARY =
-  "/Applications/ChatGPT.app/Contents/Resources/codex";
+import { resolveCodexCliBinary } from "./platform.mjs";
 
 export class AppServerClient {
-  constructor({ binary = DEFAULT_CODEX_BINARY, requestTimeoutMs = 15_000 } = {}) {
+  constructor({ binary = null, requestTimeoutMs = 15_000 } = {}) {
     this.binary = binary;
     this.requestTimeoutMs = requestTimeoutMs;
     this.nextId = 1;
@@ -16,6 +15,8 @@ export class AppServerClient {
 
   async start() {
     if (this.process) return;
+
+    if (!this.binary) this.binary = await resolveCodexCliBinary();
 
     const child = spawn(this.binary, ["app-server", "--stdio"], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -216,5 +217,3 @@ function formatWindow(minutes) {
   if (minutes % 60 === 0) return `${minutes / 60}h`;
   return `${minutes}m`;
 }
-
-export { DEFAULT_CODEX_BINARY };

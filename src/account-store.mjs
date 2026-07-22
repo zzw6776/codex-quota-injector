@@ -3,15 +3,10 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { defaultAccountDataDir } from "./platform.mjs";
+
 const STORE_VERSION = 1;
 const ENCRYPTION_ALGORITHM = "AES-256-GCM";
-
-export function defaultAccountDataDir() {
-  return (
-    process.env.CODEX_QUOTA_DATA_DIR ??
-    join(homedir(), "Library", "Application Support", "Codex Quota Injector")
-  );
-}
 
 export class AccountStore {
   constructor({

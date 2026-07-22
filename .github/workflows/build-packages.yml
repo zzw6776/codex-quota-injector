@@ -1,0 +1,174 @@
+name: Build Packages
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_RUNTIME_VERSION: 22.23.1
+
+jobs:
+  macos:
+    name: macOS Universal DMG
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install build dependencies
+        run: npm ci
+
+      - name: Download official Node.js runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/node-runtimes
+          cd build/node-runtimes
+          base="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}"
+          curl -fL --retry 3 -O "${base}/SHASUMS256.txt"
+          for arch in arm64 x64; do
+            archive="node-v${NODE_RUNTIME_VERSION}-darwin-${arch}.tar.gz"
+            curl -fL --retry 3 -O "${base}/${archive}"
+            grep " ${archive}$" SHASUMS256.txt | shasum -a 256 -c -
+            tar -xzf "${archive}"
+          done
+
+      - name: Build native injector slices
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build:sea -- \
+            --node-binary "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-arm64/bin/node" \
+            --output "build/native/Codex Quota Injector-arm64"
+          npm run build:sea -- \
+            --node-binary "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-x64/bin/node" \
+            --output "build/native/Codex Quota Injector-x64"
+
+      - name: Package universal DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run package:macos -- \
+            --arm64-executable "build/native/Codex Quota Injector-arm64" \
+            --x64-executable "build/native/Codex Quota Injector-x64" \
+            --node-license "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-arm64/LICENSE" \
+            --output-dir "release/macos"
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-quota-injector-macos
+          retention-days: 30
+          if-no-files-found: error
+          path: release/macos/*.dmg
+
+  windows:
+    name: Windows x64 Setup
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install build dependencies
+        run: npm ci
+
+      - name: Download official Node.js runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $base = "https://nodejs.org/dist/v$env:NODE_RUNTIME_VERSION"
+          $archive = "node-v$env:NODE_RUNTIME_VERSION-win-x64.zip"
+          New-Item -ItemType Directory -Force -Path "build/node-runtimes" | Out-Null
+          Invoke-WebRequest "$base/SHASUMS256.txt" -OutFile "build/node-runtimes/SHASUMS256.txt"
+          Invoke-WebRequest "$base/$archive" -OutFile "build/node-runtimes/$archive"
+          $line = Select-String -Path "build/node-runtimes/SHASUMS256.txt" -Pattern " $archive$" | Select-Object -First 1
+          if (-not $line) { throw "Node.js checksum not found" }
+          $expected = ($line.Line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash "build/node-runtimes/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Node.js checksum mismatch" }
+          Expand-Archive "build/node-runtimes/$archive" -DestinationPath "build/node-runtimes" -Force
+
+      - name: Build background executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run build:sea -- `
+            --node-binary "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/node.exe" `
+            --output "build/native/Codex Quota Injector.exe"
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --yes --no-progress
+
+      - name: Package Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run package:windows -- `
+            --input-executable "build/native/Codex Quota Injector.exe" `
+            --node-license "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/LICENSE" `
+            --output-dir "release/windows" `
+            --makensis "C:\Program Files (x86)\NSIS\makensis.exe"
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-quota-injector-windows
+          retention-days: 30
+          if-no-files-found: error
+          path: release/windows/*.exe
+
+  release:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - macos
+      - windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codex-quota-injector-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${GITHUB_REF_NAME}" release-assets/* \
+              --generate-notes \
+              --title "Codex Quota Injector ${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}"
+          fi

@@ -1,7 +1,8 @@
 import { access } from "node:fs/promises";
-import { AppServerClient, DEFAULT_CODEX_BINARY, selectQuotaWindows, toWidgetQuotas } from "./app-server.mjs";
+import { AppServerClient, selectQuotaWindows, toWidgetQuotas } from "./app-server.mjs";
 import { findCodexTarget } from "./cdp-client.mjs";
 import { DEFAULT_PORT, runInjector } from "./injector.mjs";
+import { resolveCodexCliBinary } from "./platform.mjs";
 
 const command = process.argv[2] ?? "doctor";
 const port = Number(process.env.CODEX_QUOTA_CDP_PORT ?? DEFAULT_PORT);
@@ -26,8 +27,9 @@ try {
 }
 
 async function doctor(cdpPort) {
-  await access(DEFAULT_CODEX_BINARY);
-  console.log(`Codex binary: ${DEFAULT_CODEX_BINARY}`);
+  const codexBinary = await resolveCodexCliBinary();
+  await access(codexBinary);
+  console.log(`Codex binary: ${codexBinary}`);
   try {
     const target = await findCodexTarget(cdpPort);
     console.log(target ? `CDP: ready (${target.url})` : "CDP: ready, Codex page not found");

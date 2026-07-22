@@ -1,65 +1,96 @@
 # Codex Quota Injector
 
-给 macOS Codex 客户端动态注入多账号额度面板，不修改 `ChatGPT.app`、不解包 `app.asar`、不破坏 OpenAI 签名。
+为 macOS 和 Windows 版 Codex 客户端动态注入多账号额度面板。程序没有独立界面，双击入口后会直接启动官方 Codex，并在后台完成注入。
 
-面板支持：
+## 功能
 
-- 同时查看所有账号的 5 小时/周额度、重置时间、套餐和订阅到期时间；
-- 一键切换账号，写入 Codex 官方 `auth.json` 与 macOS Keychain 后自动重启客户端；
+- 同时查看全部账号的 5 小时/周额度、重置时间、套餐和订阅到期时间；
+- 一键切换账号，写入 Codex 官方凭据后自动重启客户端；
 - 通过 OpenAI OAuth、Token/JSON、本机 Codex 登录或 API Key 添加账号；
-- 点击额度标签固定展开，或直接从标签向上移动鼠标进入悬浮框；
-- 每 60 秒后台刷新全部 OAuth 账号的额度。
+- 每 60 秒后台刷新全部 OAuth 账号额度；
+- 单实例运行，重复双击不会产生多个注入进程；
+- 退出 Codex 后，后台注入进程同步退出；
+- 不修改官方客户端，不依赖 Cockpit，不要求用户安装 Node.js。
 
-## 使用
+## 安装与使用
 
-双击 `启动 Codex 额度悬浮框.app`（推荐）。也可以在终端执行 `./start-codex-quota.command`。启动器会：
+### macOS
 
-1. 正常退出当前 Codex；
-2. 仅在本机 `127.0.0.1:9229` 开启 Chromium 调试端口；
-3. 重新启动官方 `/Applications/ChatGPT.app`；
-4. 启动后台注入器，在左下角用户名右侧显示当前账号的 `xx%`；同时存在 5 小时与周窗口时显示 `xx% · xx%`；
-5. 鼠标悬停或点击额度标签，查看全部账号并执行添加、刷新和切换。
+1. 从 GitHub Actions Artifacts 或 GitHub Releases 下载 `macos-universal.dmg`；
+2. 将 `Codex Quota Injector.app` 拖入“应用程序”；
+3. 双击 `Codex Quota Injector`，它会直接启动官方 Codex；
+4. 额度入口显示在 Codex 左下角账号区域。
 
-注入成功后会复用现有 CDP 连接，不再重复查找 Codex target。退出 Codex 后，后台注入器会在连接断开时同步退出；LaunchAgent 不会自动将它重新拉起。重复打开启动器时，会先停止已有注入器，再启动唯一的新实例。
+安装包同时覆盖 Apple Silicon 和 Intel Mac。当前自动构建使用 ad-hoc 签名，没有 Apple Developer ID 公证；首次打开若被 Gatekeeper 拦截，可在“系统设置 → 隐私与安全性”中允许打开。
 
-后台进程在 macOS“活动监视器”中显示为 `Codex Quota Injector`。启动器会为 Codex 内置 Node 创建同名硬链接，因此不复制二进制文件，并会在每次启动时重新生成以跟随 Codex 更新。
+### Windows
 
-停止注入器可在终端执行 `./stop-injector.command`。悬浮框在刷新或重启 Codex 后消失。
+1. 从 GitHub Actions Artifacts 或 GitHub Releases 下载 `windows-x64-setup.exe`；
+2. 运行安装程序；
+3. 双击桌面或开始菜单中的 `Codex Quota Injector`；
+4. 程序会直接启动 Microsoft Store 安装的 ChatGPT / Codex，并在后台注入额度面板。
 
-## 数据与安全
+当前自动构建未配置 Authenticode 证书，Windows SmartScreen 可能提示未知发布者。
 
-- 本项目拥有独立的账户库，运行时不依赖 Cockpit 的源码、进程、安装包或数据目录。
-- 独立数据目录为 `~/Library/Application Support/Codex Quota Injector/`。
-- 第一次启动且独立账户库为空时，会从 `~/.antigravity_cockpit/` 复制一次已有账号；复制完成后即独立运行，Cockpit 可关闭或卸载。
-- 账号详情使用 AES-256-GCM 加密保存，账户文件、索引和本地密钥权限均收紧为当前用户可读写。
-- OAuth 额度来自 ChatGPT 官方 `backend-api/wham/usage`，订阅信息来自官方 accounts/check 与 subscriptions 接口。
-- 没有已添加账号时，当前账号额度会降级使用客户端自带的 `codex app-server` 正式协议 `account/rateLimits/read`。
-- CDP 只绑定到 `127.0.0.1`，不会监听局域网地址。
-- 不修改 `/Applications/ChatGPT.app`，客户端自动更新不受影响。
+## 运行机制
 
-API Key 账号可以保存和切换，但 ChatGPT 订阅额度接口不适用于 API Key，因此不会显示订阅额度。
+启动器会：
 
-## 添加与切换账号
+1. 获取本机单实例锁；
+2. 查找官方 Codex 安装位置；
+3. 如果当前 Codex 没有本地 CDP 调试端口，则先关闭再重新启动；
+4. 只在 `127.0.0.1:9229` 开启 Chromium 调试端口；
+5. 连接 Codex 页面并注入额度组件；
+6. 在连接成功后停止目标查找轮询；
+7. 在 Codex 退出后结束自身进程。
 
-打开额度悬浮框后，可选择：
+macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。Windows 支持 Microsoft Store 的 `OpenAI.ChatGPT`、`OpenAI.Codex`、`ChatGPT.exe` 和 `Codex.exe`。
 
-1. `OpenAI OAuth`：在系统浏览器完成授权，最适合日常添加账号；
-2. `导入本机登录`：读取当前 `~/.codex/auth.json`；
-3. `Token / JSON`：支持完整 `auth.json`、tokens JSON、access token 或 refresh token；
-4. `API Key`：保存一个 API Key 账号。
+## 数据目录
 
-切换账号会正常退出并重启 Codex，当前任务由客户端自行恢复。后台注入器不会重启，因此新客户端打开后悬浮框会自动重新注入。
+项目拥有独立账户库，第一次启动且账户库为空时，可以从 `~/.antigravity_cockpit/` 一次性迁移已有 Codex 账号，迁移后不再依赖 Cockpit。
 
-## CLI
+- macOS：`~/Library/Application Support/Codex Quota Injector/`
+- Windows：`%APPDATA%\Codex Quota Injector\`
+
+账号详情使用 AES-256-GCM 加密保存。OAuth 额度、订阅和账号信息来自 OpenAI 官方接口；CDP 仅绑定本机回环地址。
+
+日志目录：
+
+- macOS：`~/Library/Logs/Codex Quota Injector/injector.log`
+- Windows：`%LOCALAPPDATA%\Codex Quota Injector\Logs\injector.log`
+
+## 自动打包
+
+GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
+
+- 推送到 `master`：自动构建 macOS Universal DMG 和 Windows x64 Setup，并上传到 Actions Artifacts；
+- 推送 `v*` 标签：在构建成功后自动创建 GitHub Release 并上传两个安装包；
+- 支持在 Actions 页面手动触发。
+
+自动打包不运行测试，安装后的实际功能由使用者手动确认。
+
+## 本地开发
+
+需要 Node.js 22 或更高版本：
+
+```bash
+npm install
+npm run launch
+```
+
+其他命令：
 
 ```bash
 npm run doctor
 npm run read-quota
 npm run inject
+npm run preview
 ```
-
-日志位于 `~/Library/Logs/Codex Quota Injector/injector.log`。
 
 ## 限制
 
-必须通过 `start-codex-quota.command` 启动 Codex，普通方式启动的客户端没有 CDP 端口，无法动态注入。客户端更新若改变左下角账户按钮的无障碍标签，需要同步调整 `src/widget.mjs` 中的定位规则。OAuth 登录依赖系统浏览器能够访问 OpenAI 授权页面。
+- 必须通过 `Codex Quota Injector` 启动官方 Codex；普通方式启动的客户端没有 CDP 端口，无法注入；
+- 账号切换会重启官方 Codex，当前任务由客户端自身恢复；
+- API Key 账号可以保存和切换，但 ChatGPT 订阅额度接口不适用于 API Key；
+- Codex 更新若修改账号区域的 DOM 或无障碍标签，需要同步更新 `src/widget.mjs` 的定位规则。

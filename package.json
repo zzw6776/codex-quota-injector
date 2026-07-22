@@ -8,9 +8,17 @@
     "doctor": "node src/cli.mjs doctor",
     "read-quota": "node src/cli.mjs read-quota",
     "inject": "node src/cli.mjs inject",
-    "preview": "node src/preview-server.mjs"
+    "launch": "node src/launcher.mjs",
+    "preview": "node src/preview-server.mjs",
+    "build:sea": "node scripts/build-sea.mjs",
+    "package:macos": "node scripts/package-macos.mjs",
+    "package:windows": "node scripts/package-windows.mjs"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "postject": "1.0.0-alpha.6"
   }
 }
