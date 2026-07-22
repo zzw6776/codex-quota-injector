@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Quota Injector Preview</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --token-foreground: #f4f4f7;
+        --token-main-surface-primary: #191923;
+        --token-border: rgba(255,255,255,.07);
+        --token-text-primary: #eeeef3;
+        --token-text-secondary: #aaaab5;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; overflow: hidden; color: #f3f3f5; background: #202127; }
+      .app { display: grid; min-height: 100vh; grid-template-columns: 292px 1fr; }
+      .sidebar { display: flex; min-height: 100vh; flex-direction: column; border-right: 1px solid rgba(255,255,255,.07); background: #2a2b32; }
+      .traffic { height: 52px; -webkit-app-region: drag; }
+      .nav { padding: 8px 12px; color: #c9c9cf; }
+      .nav-item { margin-bottom: 5px; padding: 9px 11px; border-radius: 9px; background: rgba(255,255,255,.04); }
+      .spacer { flex: 1; }
+      .footer { display: flex; align-items: center; gap: 5px; padding: 11px 12px 14px; border-top: 1px solid rgba(255,255,255,.06); }
+      .profile { display: flex; height: 38px; min-width: 0; flex: 1; cursor: pointer; align-items: center; gap: 9px; border: 0; border-radius: 9px; padding: 0 8px; color: inherit; background: transparent; font: inherit; }
+      .profile:hover { background: rgba(255,255,255,.06); }
+      .avatar { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; color: #d9b8ff; background: rgba(217,184,255,.13); font-size: 10px; font-weight: 700; }
+      .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+      .help { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid rgba(255,255,255,.2); border-radius: 50%; color: #aaaab2; font-size: 17px; }
+      .content { display: grid; place-items: center; color: #81828b; }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <aside class="sidebar">
+        <div class="traffic"></div>
+        <nav class="nav">
+          <div class="nav-item">新任务</div>
+          <div class="nav-item">任务列表</div>
+        </nav>
+        <div class="spacer"></div>
+        <footer class="footer">
+          <button class="profile" type="button" aria-label="打开个人资料菜单">
+            <span class="avatar">ZZ</span><span class="name">zhangzhengwei</span>
+          </button>
+          <span class="help">?</span>
+        </footer>
+      </aside>
+      <section class="content">额度悬浮框独立预览</section>
+    </main>
+    <script type="module">
+      import { installQuotaWidget } from "/src/widget.mjs";
+      installQuotaWidget();
+      const now = Math.floor(Date.now() / 1000);
+      window.__codexQuotaWidget.update({
+        currentAccountId: "account-1",
+        accounts: [
+          {
+            id: "account-1", email: "current@example.com", authMode: "oauth",
+            planType: "plus", current: true,
+            subscriptionActiveUntil: new Date(Date.now() + 18 * 86400000).toISOString(),
+            windows: [
+              { label: "5h", remainingPercent: 92, resetsAt: now + 2 * 3600 },
+              { label: "Weekly", remainingPercent: 86, resetsAt: now + 3 * 86400 },
+            ],
+          },
+          {
+            id: "account-2", email: "backup@example.com", authMode: "oauth",
+            planType: "plus", current: false,
+            subscriptionActiveUntil: new Date(Date.now() + 6 * 86400000).toISOString(),
+            windows: [
+              { label: "5h", remainingPercent: 64, resetsAt: now + 4 * 3600 },
+              { label: "Weekly", remainingPercent: 17, resetsAt: now + 5 * 86400 },
+            ],
+          },
+          {
+            id: "account-3", email: "expired-session@example.com", authMode: "oauth",
+            planType: "plus", current: false,
+            subscriptionActiveUntil: new Date(Date.now() - 86400000).toISOString(),
+            windows: [], quotaError: "登录已过期，需要重新添加或授权",
+          },
+        ],
+        windows: [
+          { label: "5h", remainingPercent: 92, resetsAt: now + 2 * 3600 },
+          { label: "Weekly", remainingPercent: 86, resetsAt: now + 3 * 86400 },
+        ],
+        operation: null,
+      });
+    </script>
+  </body>
+</html>

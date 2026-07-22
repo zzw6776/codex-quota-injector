@@ -1,0 +1,16 @@
+{
+  "name": "codex-quota-injector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Inject a standalone multi-account quota, expiry and account-switching panel into the Codex macOS client.",
+  "scripts": {
+    "doctor": "node src/cli.mjs doctor",
+    "read-quota": "node src/cli.mjs read-quota",
+    "inject": "node src/cli.mjs inject",
+    "preview": "node src/preview-server.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
