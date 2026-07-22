@@ -151,6 +151,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
@@ -165,29 +168,28 @@ jobs:
         run: |
           set -euo pipefail
 
+          package_version="$(node -p "require('./package.json').version")"
+          release_tag="v${package_version}"
+          release_title="Codex Quota Injector ${release_tag}"
+
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            release_tag="${GITHUB_REF_NAME}"
-            release_title="Codex Quota Injector ${GITHUB_REF_NAME}"
-            release_kind="stable"
-          else
-            short_sha="${GITHUB_SHA:0:7}"
-            release_tag="build-${short_sha}"
-            release_title="Codex Quota Injector build ${short_sha}"
-            release_kind="development"
+            if [[ "${GITHUB_REF_NAME}" != "${release_tag}" ]]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match package version ${release_tag}." >&2
+              exit 1
+            fi
           fi
 
           if gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${release_tag}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
-          elif [[ "${release_kind}" == "stable" ]]; then
-            gh release create "${release_tag}" release-assets/* \
-              --generate-notes \
+            gh release edit "${release_tag}" \
+              --latest \
               --title "${release_title}" \
               --repo "${GITHUB_REPOSITORY}"
           else
             gh release create "${release_tag}" release-assets/* \
-              --prerelease \
+              --generate-notes \
+              --latest \
               --target "${GITHUB_SHA}" \
               --title "${release_title}" \
-              --notes "Automated package build for master commit ${GITHUB_SHA}." \
               --repo "${GITHUB_REPOSITORY}"
           fi

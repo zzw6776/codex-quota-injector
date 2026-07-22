@@ -67,8 +67,8 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。W
 
 GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 
-- 每次提交到 `master`：自动构建 macOS Universal DMG 和 Windows x64 Setup，创建 `build-提交短 SHA` 预发布 Release，并同时上传到 Actions Artifacts；
-- 推送 `v*` 标签：在构建成功后自动创建 GitHub Release 并上传两个安装包；
+- 每次提交到 `master`：读取 `package.json` 版本，自动构建对应版本的 macOS Universal DMG 和 Windows x64 Setup，创建或更新 `v版本号` 正式 Release、标记为 Latest，并同时上传到 Actions Artifacts；
+- 推送 `v*` 标签：标签必须与 `package.json` 版本一致，构建成功后更新同版本 GitHub Release；
 - 支持在 Actions 页面手动触发。
 
 自动打包不运行测试，安装后的实际功能由使用者手动确认。
