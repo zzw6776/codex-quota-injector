@@ -28,8 +28,8 @@ UninstPage instfiles
 Section "Install"
   SetShellVarContext current
   SetOutPath "$INSTDIR"
-  File /oname="Codex Quota Injector.exe" "${INPUT_EXE}"
-  File /oname="NODE_LICENSE.txt" "${NODE_LICENSE}"
+  File "/oname=Codex Quota Injector.exe" "${INPUT_EXE}"
+  File "/oname=NODE_LICENSE.txt" "${NODE_LICENSE}"
 
   WriteRegStr HKCU "Software\Codex Quota Injector" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex Quota Injector" "DisplayName" "Codex Quota Injector"
