@@ -13,7 +13,7 @@ export function installQuotaWidget(
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
   const PLACEHOLDER_ID = "codex-quota-injector-placeholder";
-  const VERSION = 10;
+  const VERSION = 11;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -97,11 +97,12 @@ export function installQuotaWidget(
     .btn.primary { border-color: rgba(217,184,255,.24); color: #e5cdfd; background: rgba(217,184,255,.1); }
     .btn:disabled { cursor: default; opacity: .45; }
     .empty { padding: 18px 8px; text-align: center; color: var(--token-text-secondary, #aaaab5); font-size: 12px; }
-    .operation { margin-top: 9px; padding: 8px 10px; border-radius: 9px; background: rgba(255,255,255,.045); color: var(--token-text-secondary, #b5b5bf); font-size: 11px; }
+    .operation { margin-top: 9px; padding: 8px 10px; border-radius: 9px; overflow-wrap: anywhere; background: rgba(255,255,255,.045); color: var(--token-text-secondary, #b5b5bf); font-size: 11px; }
     .operation.success { color: #7ecb9b; background: rgba(52,168,92,.09); }
     .operation.error { color: #ef8e86; background: rgba(220,76,63,.09); }
     .add-panel { margin-top: 11px; padding-top: 11px; border-top: 1px solid rgba(255,255,255,.07); }
     .add-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .toolbar-actions { display: flex; align-items: center; gap: 7px; }
     .add-title { font-size: 12px; font-weight: 650; }
     .add-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
     details { grid-column: 1 / -1; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; }
@@ -202,7 +203,7 @@ export function installQuotaWidget(
         <div class="account-list">${accountHtml}</div>
         ${operation}
         <section class="add-panel">
-          <div class="add-toolbar"><span class="add-title">添加账号</span><button class="btn refresh-all" type="button" ${busy ? "disabled" : ""}>刷新全部</button></div>
+          <div class="add-toolbar"><span class="add-title">账号管理</span><span class="toolbar-actions"><button class="btn export-all" type="button" title="导出文件包含完整登录凭据，请妥善保管" ${busy || accounts.length === 0 ? "disabled" : ""}>导出全部</button><button class="btn refresh-all" type="button" ${busy ? "disabled" : ""}>刷新全部</button></span></div>
           <div class="add-options">
             <button class="btn primary oauth-add" type="button" ${busy ? "disabled" : ""}>OpenAI OAuth</button>
             <button class="btn local-import" type="button" ${busy ? "disabled" : ""}>导入本机登录</button>
@@ -294,6 +295,7 @@ export function installQuotaWidget(
     wrap.querySelectorAll(".switch-account").forEach((button) => button.addEventListener("click", () => enqueue({ type: "switch-account", accountId: button.dataset.accountId })));
     wrap.querySelector(".oauth-add")?.addEventListener("click", () => enqueue({ type: "oauth-add" }));
     wrap.querySelector(".local-import")?.addEventListener("click", () => enqueue({ type: "local-import" }));
+    wrap.querySelector(".export-all")?.addEventListener("click", () => enqueue({ type: "export-all" }));
     wrap.querySelector(".refresh-all")?.addEventListener("click", () => enqueue({ type: "refresh-all" }));
     wrap.querySelector(".token-form")?.addEventListener("submit", (event) => {
       event.preventDefault();

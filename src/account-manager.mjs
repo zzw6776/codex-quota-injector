@@ -31,6 +31,8 @@ export class AccountManager {
 
   async initialize() {
     await this.store.initialize();
+    await this.#importOfficialAccountIfStoreEmpty();
+    await this.#syncCurrentAccountFromOfficialCredentials();
     return this.getViewModel();
   }
 
@@ -43,7 +45,7 @@ export class AccountManager {
     return {
       accounts,
       currentAccountId: current?.id ?? null,
-      windows: current?.windows ?? fallbackQuota?.windows ?? [],
+      windows: current?.windows?.length ? current.windows : fallbackQuota?.windows ?? [],
       operation: this.operation,
     };
   }
@@ -90,8 +92,10 @@ export class AccountManager {
 
   async importTokenInput(input) {
     return this.#withOperation("正在导入 Token…", async () => {
-      const candidates = parseTokenInput(input);
-      if (candidates.length === 0) throw new Error("没有识别到可导入的 Token");
+      const { tokens: candidates, apiKeys } = parseCredentialInput(input);
+      if (candidates.length === 0 && apiKeys.length === 0) {
+        throw new Error("没有识别到可导入的账号凭据");
+      }
       const imported = [];
       for (const candidate of candidates) {
         const tokens = candidate.refreshToken && !candidate.accessToken
@@ -99,10 +103,32 @@ export class AccountManager {
           : candidate;
         imported.push(await this.#upsertOAuthTokens(tokens));
       }
+      for (const candidate of apiKeys) {
+        imported.push(await this.#upsertApiKey(candidate.apiKey, candidate.name));
+      }
       await Promise.allSettled(imported.map((account) => this.refreshAccount(account.id, {
         forceSubscription: true,
       })));
       return `已导入 ${imported.length} 个账号`;
+    });
+  }
+
+  async exportAccounts() {
+    return this.#withOperation("正在导出全部账号…", async () => {
+      const accounts = this.store.list();
+      if (accounts.length === 0) throw new Error("暂无可导出的账号");
+      const exportedAt = new Date();
+      const fileName = `codex-quota-accounts-${exportedAt.toISOString()
+        .replace(/[:.]/g, "-")}.json`;
+      const exportPath = join(homedir(), "Downloads", fileName);
+      const payload = {
+        version: 1,
+        exportedAt: exportedAt.toISOString(),
+        currentAccountId: this.store.index.currentAccountId,
+        accounts: accounts.map(toExportAccount),
+      };
+      await atomicWrite(exportPath, `${JSON.stringify(payload, null, 2)}\n`);
+      return `已导出 ${accounts.length} 个账号到 ${exportPath}`;
     });
   }
 
@@ -125,18 +151,8 @@ export class AccountManager {
   }
 
   async addApiKey(apiKey, accountName = "API Key") {
-    const key = String(apiKey ?? "").trim();
-    if (!key) throw new Error("API Key 不能为空");
     return this.#withOperation("正在添加 API Key…", async () => {
-      const id = `apikey_${sha256(key).slice(0, 32)}`;
-      await this.store.upsert({
-        id,
-        email: String(accountName ?? "API Key").trim() || "API Key",
-        authMode: "apiKey",
-        openaiApiKey: key,
-        planType: "API_KEY",
-        tokens: {},
-      });
+      await this.#upsertApiKey(apiKey, accountName);
       return "API Key 已添加";
     });
   }
@@ -213,6 +229,69 @@ export class AccountManager {
     return this.store.upsert(account);
   }
 
+  async #importOfficialAccountIfStoreEmpty() {
+    if (this.store.list().length > 0) return;
+
+    let credentials;
+    try {
+      credentials = JSON.parse(await readFile(join(this.codexHome, "auth.json"), "utf8"));
+    } catch {
+      return;
+    }
+
+    try {
+      const apiKey = typeof credentials.OPENAI_API_KEY === "string"
+        ? credentials.OPENAI_API_KEY.trim()
+        : "";
+      let account;
+      if (apiKey) {
+        account = await this.store.upsert({
+          id: `apikey_${sha256(apiKey).slice(0, 32)}`,
+          email: "Local API Key",
+          authMode: "apiKey",
+          openaiApiKey: apiKey,
+          planType: "API_KEY",
+          tokens: {},
+        });
+      } else {
+        const candidates = parseTokenInput(JSON.stringify(credentials));
+        if (candidates.length === 0) return;
+        const candidate = candidates[0];
+        const tokens = candidate.refreshToken && !candidate.accessToken
+          ? await refreshTokens(candidate.refreshToken, candidate.idToken)
+          : candidate;
+        account = await this.#upsertOAuthTokens(tokens);
+      }
+
+      await this.store.setCurrent(account.id);
+      console.log(`[accounts] 已从 Codex 当前登录导入账号: ${account.email}`);
+    } catch (error) {
+      console.error(`[accounts] Codex 当前登录导入失败: ${error.message}`);
+    }
+  }
+
+  async #syncCurrentAccountFromOfficialCredentials() {
+    let credentials;
+    try {
+      credentials = JSON.parse(await readFile(join(this.codexHome, "auth.json"), "utf8"));
+    } catch {
+      return;
+    }
+
+    const accounts = this.store.list();
+    const matched = matchOfficialAccount(credentials, accounts);
+    if (matched === undefined) return;
+    const currentAccountId = matched?.id ?? null;
+    if (currentAccountId === this.store.index.currentAccountId) return;
+
+    await this.store.setCurrent(currentAccountId);
+    console.log(
+      matched
+        ? `[accounts] 已识别 Codex 当前账号: ${matched.email}`
+        : "[accounts] Codex 当前登录未在账号库中，已清除当前账号标记",
+    );
+  }
+
   async #upsertOAuthTokens(tokens) {
     if (!tokens.accessToken) throw new Error("OAuth 凭据缺少 access_token");
     const idClaims = decodeJwt(tokens.idToken) ?? {};
@@ -244,6 +323,19 @@ export class AccountManager {
       organizationId: organizationId ?? existing?.organizationId ?? null,
       planType: auth.chatgpt_plan_type ?? existing?.planType ?? null,
       tokenGeneration: (existing?.tokenGeneration ?? 0) + 1,
+    });
+  }
+
+  async #upsertApiKey(apiKey, accountName = "API Key") {
+    const key = String(apiKey ?? "").trim();
+    if (!key) throw new Error("API Key 不能为空");
+    return this.store.upsert({
+      id: `apikey_${sha256(key).slice(0, 32)}`,
+      email: String(accountName ?? "API Key").trim() || "API Key",
+      authMode: "apiKey",
+      openaiApiKey: key,
+      planType: "API_KEY",
+      tokens: {},
     });
   }
 
@@ -454,6 +546,26 @@ function toPublicAccount(account, current) {
   };
 }
 
+function toExportAccount(account) {
+  const common = {
+    id: account.id,
+    email: account.email,
+    authMode: account.authMode,
+  };
+  if (account.authMode === "apiKey") {
+    return { ...common, OPENAI_API_KEY: account.openaiApiKey };
+  }
+  return {
+    ...common,
+    tokens: {
+      id_token: account.tokens.idToken,
+      access_token: account.tokens.accessToken,
+      refresh_token: account.tokens.refreshToken ?? "",
+      account_id: account.accountId,
+    },
+  };
+}
+
 function normalizeUsageWindow(window) {
   const used = clampPercent(window.used_percent);
   const minutes = Number.isFinite(window.limit_window_seconds)
@@ -519,27 +631,97 @@ function parseAccountCheck(payload, preferredAccountId) {
   };
 }
 
-function parseTokenInput(rawInput) {
+function parseCredentialInput(rawInput) {
   const input = String(rawInput ?? "").trim();
-  if (!input) return [];
+  if (!input) return { tokens: [], apiKeys: [] };
   let value;
   try {
     value = JSON.parse(input);
   } catch {
     if (input.startsWith("at-") || input.split(".").length === 3) {
-      return [{ idToken: "", accessToken: input, refreshToken: null }];
+      return {
+        tokens: [{ idToken: "", accessToken: input, refreshToken: null }],
+        apiKeys: [],
+      };
     }
-    return [{ idToken: "", accessToken: "", refreshToken: input }];
+    return {
+      tokens: [{ idToken: "", accessToken: "", refreshToken: input }],
+      apiKeys: [],
+    };
   }
-  const items = Array.isArray(value) ? value : [value];
-  return items.flatMap((item) => {
+  const items = Array.isArray(value)
+    ? value
+    : Array.isArray(value?.accounts)
+      ? value.accounts
+      : [value];
+  const parsed = { tokens: [], apiKeys: [] };
+  for (const item of items) {
+    const apiKey = item?.OPENAI_API_KEY ?? item?.openaiApiKey ?? item?.openai_api_key;
+    if (typeof apiKey === "string" && apiKey.trim()) {
+      parsed.apiKeys.push({
+        apiKey: apiKey.trim(),
+        name: String(item?.email ?? item?.name ?? item?.accountName ?? "API Key"),
+      });
+    }
     const tokens = item?.tokens ?? item?.auth?.tokens ?? item;
     const personal = item?.personal_access_token ?? item?.accessToken;
     const accessToken = tokens?.access_token ?? tokens?.accessToken ?? personal ?? "";
     const idToken = tokens?.id_token ?? tokens?.idToken ?? "";
     const refreshToken = tokens?.refresh_token ?? tokens?.refreshToken ?? null;
-    return accessToken || refreshToken ? [{ idToken, accessToken, refreshToken }] : [];
-  });
+    if (accessToken || refreshToken) {
+      parsed.tokens.push({ idToken, accessToken, refreshToken });
+    }
+  }
+  return parsed;
+}
+
+function parseTokenInput(rawInput) {
+  return parseCredentialInput(rawInput).tokens;
+}
+
+function matchOfficialAccount(credentials, accounts) {
+  if (!credentials || typeof credentials !== "object") return undefined;
+
+  const apiKey = typeof credentials.OPENAI_API_KEY === "string"
+    ? credentials.OPENAI_API_KEY.trim()
+    : "";
+  if (apiKey) {
+    return accounts.find((account) =>
+      account.authMode === "apiKey" && account.openaiApiKey === apiKey
+    ) ?? null;
+  }
+
+  const tokens = credentials.tokens && typeof credentials.tokens === "object"
+    ? credentials.tokens
+    : {};
+  const idToken = tokens.id_token ?? tokens.idToken ?? "";
+  const accessToken =
+    tokens.access_token ?? tokens.accessToken ?? credentials.personal_access_token ?? "";
+  const idClaims = decodeJwt(idToken) ?? {};
+  const accessClaims = decodeJwt(accessToken) ?? {};
+  const auth = idClaims["https://api.openai.com/auth"] ??
+    accessClaims["https://api.openai.com/auth"] ?? {};
+  const profile = accessClaims["https://api.openai.com/profile"] ?? {};
+  const accountId = tokens.account_id ?? tokens.accountId ?? auth.chatgpt_account_id ?? null;
+  const email = idClaims.email ?? profile.email ?? auth.email ?? null;
+
+  if (!accountId && !email && !accessToken) return undefined;
+
+  if (accountId) {
+    const byAccountId = accounts.find((account) => account.accountId === accountId);
+    if (byAccountId) return byAccountId;
+  }
+  if (email) {
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const byEmail = accounts.find((account) =>
+      account.email.trim().toLowerCase() === normalizedEmail
+    );
+    if (byEmail) return byEmail;
+  }
+  if (accessToken) {
+    return accounts.find((account) => account.tokens.accessToken === accessToken) ?? null;
+  }
+  return null;
 }
 
 function decodeJwt(token) {

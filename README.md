@@ -7,6 +7,7 @@
 - 同时查看全部账号的 5 小时/周额度、重置时间、套餐和订阅到期时间；
 - 一键切换账号，写入 Codex 官方凭据后自动重启客户端；
 - 通过 OpenAI OAuth、Token/JSON、本机 Codex 登录或 API Key 添加账号；
+- 一键将全部账号导出为可再次导入的 JSON 备份；
 - 每 60 秒后台刷新全部 OAuth 账号额度；
 - 单实例运行，重复双击不会产生多个注入进程；
 - 退出 Codex 后，后台注入进程同步退出；
@@ -55,6 +56,8 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。W
 
 账号详情使用 AES-256-GCM 加密保存。OAuth 额度、订阅和账号信息来自 OpenAI 官方接口；CDP 仅绑定本机回环地址。
 
+面板中的“导出全部”会在系统“下载”目录生成 JSON 文件。该文件包含完整 OAuth Token 或 API Key，属于明文敏感凭据，请仅存放在可信设备中并妥善保管；需要恢复时，可将文件内容粘贴到“Token / JSON”入口。
+
 日志目录：
 
 - macOS：`~/Library/Logs/Codex Quota Injector/injector.log`
@@ -78,6 +81,8 @@ GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 npm install
 npm run launch
 ```
+
+Windows 也可以直接双击项目根目录的 `启动开发版.cmd`。脚本会切换到项目目录，首次运行时自动安装依赖，停止已运行的安装版或开发版注入器，然后以前台方式启动当前开发版；它不会关闭官方 Codex。关闭命令窗口即可停止注入器。
 
 其他命令：
 

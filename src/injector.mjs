@@ -40,12 +40,15 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
   process.once("SIGTERM", stopAndExit);
 
   async function refreshQuotas() {
+    try {
+      const response = await appServer.readRateLimits();
+      fallbackQuota = toWidgetQuotas(selectQuotaWindows(response));
+    } catch (error) {
+      console.error(`[quota] Codex 当前账号额度读取失败: ${error.message}`);
+    }
     if (accountManager.store.list().length > 0) {
       await accountManager.refreshAll();
-      return;
     }
-    const response = await appServer.readRateLimits();
-    fallbackQuota = toWidgetQuotas(selectQuotaWindows(response));
   }
 
   async function connectAndInject() {
@@ -82,6 +85,9 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
           break;
         case "local-import":
           await accountManager.importLocalAccount();
+          break;
+        case "export-all":
+          await accountManager.exportAccounts();
           break;
         case "refresh-all":
           await accountManager.refreshAllWithOperation();
