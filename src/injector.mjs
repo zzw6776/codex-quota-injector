@@ -25,10 +25,15 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
   let restartingCodex = false;
   let hasSeenCodexProcess = false;
   let stopped = false;
+  let quotaRefreshTimer = null;
+  let quotaRefreshPromise = null;
+  let quotaRefreshRequested = false;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
 
   const stop = () => {
     stopped = true;
+    clearTimeout(quotaRefreshTimer);
+    quotaRefreshTimer = null;
     cdp?.close();
     appServer.close();
   };
@@ -44,11 +49,44 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
       const response = await appServer.readRateLimits();
       fallbackQuota = toWidgetQuotas(selectQuotaWindows(response));
     } catch (error) {
+      fallbackQuota = null;
       console.error(`[quota] Codex 当前账号额度读取失败: ${error.message}`);
     }
     if (accountManager.store.list().length > 0) {
       await accountManager.refreshAll();
     }
+  }
+
+  function scheduleQuotaRefresh(delayMs = QUOTA_REFRESH_MS) {
+    clearTimeout(quotaRefreshTimer);
+    if (stopped) return;
+    quotaRefreshTimer = setTimeout(() => {
+      quotaRefreshTimer = null;
+      void runQuotaRefresh({ repeatIfRunning: true });
+    }, delayMs);
+  }
+
+  async function runQuotaRefresh({ repeatIfRunning = false } = {}) {
+    if (quotaRefreshPromise) {
+      if (repeatIfRunning) quotaRefreshRequested = true;
+      return quotaRefreshPromise;
+    }
+    const task = (async () => {
+      do {
+        quotaRefreshRequested = false;
+        try {
+          await refreshQuotas();
+        } catch (error) {
+          console.error(`[quota] ${error.message}`);
+        }
+      } while (quotaRefreshRequested && !stopped);
+    })()
+      .finally(() => {
+        if (quotaRefreshPromise === task) quotaRefreshPromise = null;
+        scheduleQuotaRefresh();
+      });
+    quotaRefreshPromise = task;
+    return task;
   }
 
   async function connectAndInject() {
@@ -91,6 +129,10 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
           break;
         case "refresh-all":
           await accountManager.refreshAllWithOperation();
+          appServer.close();
+          appServer = new AppServerClient();
+          fallbackQuota = null;
+          await runQuotaRefresh({ repeatIfRunning: true });
           break;
         case "switch-account":
           restartingCodex = true;
@@ -98,11 +140,13 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
             await accountManager.switchAccount(action.accountId);
             appServer.close();
             appServer = new AppServerClient();
+            fallbackQuota = null;
             await restartCodex(port);
             cdp?.close();
             cdp = null;
             targetId = null;
             lastPushedJson = null;
+            scheduleQuotaRefresh(0);
           } finally {
             restartingCodex = false;
           }
@@ -115,12 +159,7 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
     }
   }
 
-  try {
-    await refreshQuotas();
-  } catch (error) {
-    console.error(`[quota] ${error.message}`);
-  }
-  let nextRefresh = Date.now() + QUOTA_REFRESH_MS;
+  await runQuotaRefresh();
   while (!stopped) {
     if (!cdp?.isConnected && !restartingCodex) {
       const codexRunning = await isCodexRunning();
@@ -131,14 +170,6 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
         stopAndExit();
         break;
       }
-    }
-    if (Date.now() >= nextRefresh) {
-      try {
-        await refreshQuotas();
-      } catch (error) {
-        console.error(`[quota] ${error.message}`);
-      }
-      nextRefresh = Date.now() + QUOTA_REFRESH_MS;
     }
     try {
       const injected = await connectAndInject();

@@ -1,6 +1,8 @@
 export class CdpClient {
-  constructor(webSocketDebuggerUrl) {
+  constructor(webSocketDebuggerUrl, { connectTimeoutMs = 5_000, requestTimeoutMs = 5_000 } = {}) {
     this.url = webSocketDebuggerUrl;
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.requestTimeoutMs = requestTimeoutMs;
     this.socket = null;
     this.nextId = 1;
     this.pending = new Map();
@@ -14,17 +16,39 @@ export class CdpClient {
     if (this.isConnected) return;
     const socket = new WebSocket(this.url);
     this.socket = socket;
-    await new Promise((resolve, reject) => {
-      socket.addEventListener("open", resolve, { once: true });
-      socket.addEventListener("error", reject, { once: true });
-    });
+    try {
+      await new Promise((resolve, reject) => {
+        const finish = (callback, value) => {
+          clearTimeout(timer);
+          socket.removeEventListener("open", onOpen);
+          socket.removeEventListener("error", onError);
+          socket.removeEventListener("close", onClose);
+          callback(value);
+        };
+        const onOpen = () => finish(resolve);
+        const onError = () => finish(reject, new Error("CDP connection failed"));
+        const onClose = () => finish(reject, new Error("CDP connection closed before ready"));
+        const timer = setTimeout(() => {
+          finish(reject, new Error(`CDP connection timed out after ${this.connectTimeoutMs}ms`));
+          socket.close();
+        }, this.connectTimeoutMs);
+        socket.addEventListener("open", onOpen, { once: true });
+        socket.addEventListener("error", onError, { once: true });
+        socket.addEventListener("close", onClose, { once: true });
+      });
+    } catch (error) {
+      if (this.socket === socket) this.socket = null;
+      try {
+        socket.close();
+      } catch {
+        // Socket may already be closed by the runtime.
+      }
+      throw error;
+    }
     socket.addEventListener("message", (event) => this.#handle(event.data));
     socket.addEventListener("close", () => {
       if (this.socket === socket) this.socket = null;
-      for (const { reject } of this.pending.values()) {
-        reject(new Error("CDP connection closed"));
-      }
-      this.pending.clear();
+      this.#rejectPending(new Error("CDP connection closed"));
     });
   }
 
@@ -33,12 +57,21 @@ export class CdpClient {
       throw new Error("CDP is not connected");
     }
     const id = this.nextId++;
+    const socket = this.socket;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        pending.reject(new Error(`CDP request timed out after ${this.requestTimeoutMs}ms: ${method}`));
+        if (this.socket === socket) this.close();
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
       try {
-        this.socket.send(JSON.stringify({ id, method, params }));
+        socket.send(JSON.stringify({ id, method, params }));
       } catch (error) {
         this.pending.delete(id);
+        clearTimeout(timer);
         reject(error);
       }
     });
@@ -61,8 +94,14 @@ export class CdpClient {
   }
 
   close() {
-    this.socket?.close();
+    const socket = this.socket;
     this.socket = null;
+    this.#rejectPending(new Error("CDP connection closed"));
+    try {
+      socket?.close();
+    } catch {
+      // Socket may already be closed by the runtime.
+    }
   }
 
   #handle(raw) {
@@ -76,16 +115,27 @@ export class CdpClient {
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
+    clearTimeout(pending.timer);
     if (message.error) {
       pending.reject(new Error(message.error.message ?? "CDP request failed"));
     } else {
       pending.resolve(message.result);
     }
   }
+
+  #rejectPending(error) {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    this.pending.clear();
+  }
 }
 
 export async function findCodexTarget(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+    signal: AbortSignal.timeout(3_000),
+  });
   if (!response.ok) throw new Error(`CDP target list returned ${response.status}`);
   const targets = await response.json();
   return (

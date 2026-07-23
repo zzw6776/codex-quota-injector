@@ -37,15 +37,18 @@ export class AccountManager {
   }
 
   getViewModel({ fallbackQuota = null } = {}) {
-    const accounts = this.store.list().map((account) => toPublicAccount(
-      account,
-      account.id === this.store.index.currentAccountId,
-    ));
+    const officialWindows = fallbackQuota?.windows?.length ? fallbackQuota.windows : null;
+    const accounts = this.store.list().map((account) => {
+      const current = account.id === this.store.index.currentAccountId;
+      const publicAccount = toPublicAccount(account, current);
+      if (current && officialWindows) publicAccount.windows = officialWindows;
+      return publicAccount;
+    });
     const current = accounts.find((account) => account.current) ?? null;
     return {
       accounts,
       currentAccountId: current?.id ?? null,
-      windows: current?.windows?.length ? current.windows : fallbackQuota?.windows ?? [],
+      windows: officialWindows ?? current?.windows ?? [],
       operation: this.operation,
     };
   }
