@@ -125,6 +125,57 @@ export async function isCodexRunning() {
   return (await listCodexProcessIds()).length > 0;
 }
 
+export async function stopOtherInjectorProcesses({ timeoutMs = 5_000 } = {}) {
+  const processIds = (await listInjectorProcessIds()).filter((processId) => processId !== process.pid);
+  if (processIds.length === 0) return;
+
+  if (process.platform === "win32") {
+    for (const processId of processIds) {
+      await execFileAsync("taskkill.exe", ["/PID", String(processId), "/T"], {
+        windowsHide: true,
+      }).catch(() => undefined);
+    }
+  } else {
+    for (const processId of processIds) {
+      try {
+        process.kill(processId, "SIGTERM");
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+    }
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await listInjectorProcessIds()).every((processId) => processId === process.pid)) return;
+    await delay(250);
+  }
+
+  const remaining = (await listInjectorProcessIds()).filter((processId) => processId !== process.pid);
+  if (process.platform === "win32") {
+    for (const processId of remaining) {
+      await execFileAsync("taskkill.exe", ["/PID", String(processId), "/T", "/F"], {
+        windowsHide: true,
+      }).catch(() => undefined);
+    }
+  } else {
+    for (const processId of remaining) {
+      try {
+        process.kill(processId, "SIGKILL");
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+    }
+  }
+
+  const forceDeadline = Date.now() + timeoutMs;
+  while (Date.now() < forceDeadline) {
+    if ((await listInjectorProcessIds()).every((processId) => processId === process.pid)) return;
+    await delay(250);
+  }
+  throw new Error("旧注入器进程未能在超时内退出");
+}
+
 export async function stopCodex({ timeoutMs = 10_000 } = {}) {
   const processIds = await listCodexProcessIds();
   if (processIds.length === 0) return;
@@ -215,6 +266,30 @@ Start-Process -FilePath $target -ArgumentList @(${argumentList}) -ErrorAction St
 export async function restartCodex(port) {
   await stopCodex();
   await launchCodex(port);
+}
+
+async function listInjectorProcessIds() {
+  if (process.platform === "darwin") {
+    const { stdout } = await execFileAsync("/usr/bin/pgrep", ["-x", "Codex Quota Injector"])
+      .catch(() => ({ stdout: "" }));
+    return stdout
+      .split(/\r?\n/)
+      .map((value) => Number(value.trim()))
+      .filter((value) => Number.isInteger(value) && value > 0);
+  }
+  if (process.platform === "win32") {
+    const script = `
+Get-CimInstance Win32_Process |
+  Where-Object { $_.Name -eq 'Codex Quota Injector.exe' } |
+  ForEach-Object { Write-Output $_.ProcessId }
+`;
+    const stdout = await runPowerShell(script).catch(() => "");
+    return stdout
+      .split(/\r?\n/)
+      .map((value) => Number(value.trim()))
+      .filter((value) => Number.isInteger(value) && value > 0);
+  }
+  return [];
 }
 
 function parseProcessList(processList, executable) {

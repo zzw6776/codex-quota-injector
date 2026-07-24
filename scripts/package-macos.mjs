@@ -11,6 +11,10 @@ const appPath = resolve(releaseDir, "Codex Quota Injector.app");
 const contents = resolve(appPath, "Contents");
 const executable = resolve(contents, "MacOS", "Codex Quota Injector");
 const resources = resolve(contents, "Resources");
+const worker = resolve(resources, "Codex Quota Injector Worker");
+const launcherSource = resolve(root, "src", "macos-launcher.swift");
+const launcherArm64 = resolve(root, "build", "macos-launcher-arm64");
+const launcherX64 = resolve(root, "build", "macos-launcher-x64");
 const dmgPath = resolve(
   releaseDir,
   `Codex-Quota-Injector-${packageJson.version}-macos-universal.dmg`,
@@ -25,6 +29,25 @@ execFileSync("/usr/bin/lipo", [
   resolve(options.arm64Executable),
   resolve(options.x64Executable),
   "-output",
+  worker,
+], { stdio: "inherit" });
+
+for (const [architecture, output] of [["arm64", launcherArm64], ["x86_64", launcherX64]]) {
+  execFileSync("/usr/bin/xcrun", [
+    "swiftc",
+    "-target",
+    `${architecture}-apple-macos12.0`,
+    "-O",
+    launcherSource,
+    "-o",
+    output,
+  ], { stdio: "inherit" });
+}
+execFileSync("/usr/bin/lipo", [
+  "-create",
+  launcherArm64,
+  launcherX64,
+  "-output",
   executable,
 ], { stdio: "inherit" });
 
@@ -35,7 +58,7 @@ await cp(
 await cp(resolve(options.nodeLicense), resolve(resources, "NODE_LICENSE.txt"));
 await writeFile(resolve(contents, "Info.plist"), infoPlist(packageJson.version));
 
-execFileSync("/bin/chmod", ["755", executable]);
+execFileSync("/bin/chmod", ["755", executable, worker]);
 execFileSync("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", appPath], {
   stdio: "inherit",
 });
