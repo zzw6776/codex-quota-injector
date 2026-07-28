@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -75,21 +75,6 @@ export async function resolveCodexExecutable({ refresh = false } = {}) {
     );
   }
   cachedCodexExecutable = resolved;
-  return resolved;
-}
-
-export async function resolveCodexCliBinary() {
-  const executable = await resolveCodexExecutable();
-  const appDir = dirname(executable);
-  const candidates = process.platform === "darwin"
-    ? [join(appDir, "..", "Resources", "codex")]
-    : [
-        join(appDir, "resources", "codex.exe"),
-        join(appDir, "Resources", "codex.exe"),
-        join(appDir, "resources", "codex"),
-      ];
-  const resolved = await firstExisting(candidates);
-  if (!resolved) throw new Error("未找到 Codex 自带的 app-server 可执行文件");
   return resolved;
 }
 

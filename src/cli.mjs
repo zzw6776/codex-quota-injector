@@ -1,8 +1,6 @@
-import { access } from "node:fs/promises";
-import { AppServerClient, selectQuotaWindows, toWidgetQuotas } from "./app-server.mjs";
+import { AccountManager } from "./account-manager.mjs";
 import { findCodexTarget } from "./cdp-client.mjs";
 import { DEFAULT_PORT, runInjector } from "./injector.mjs";
-import { resolveCodexCliBinary } from "./platform.mjs";
 
 const command = process.argv[2] ?? "doctor";
 const port = Number(process.env.CODEX_QUOTA_CDP_PORT ?? DEFAULT_PORT);
@@ -27,9 +25,6 @@ try {
 }
 
 async function doctor(cdpPort) {
-  const codexBinary = await resolveCodexCliBinary();
-  await access(codexBinary);
-  console.log(`Codex binary: ${codexBinary}`);
   try {
     const target = await findCodexTarget(cdpPort);
     console.log(target ? `CDP: ready (${target.url})` : "CDP: ready, Codex page not found");
@@ -46,11 +41,17 @@ async function readQuota() {
 }
 
 async function getQuota() {
-  const client = new AppServerClient();
+  const accountManager = new AccountManager();
   try {
-    const response = await client.readRateLimits();
-    return toWidgetQuotas(selectQuotaWindows(response));
+    await accountManager.initialize();
+    await accountManager.refreshAll();
+    const viewModel = accountManager.getViewModel();
+    const current = viewModel.accounts.find((account) => account.current);
+    if (viewModel.windows.length === 0 && current?.quotaError) {
+      throw new Error(current.quotaError);
+    }
+    return { windows: viewModel.windows };
   } finally {
-    client.close();
+    accountManager.close();
   }
 }

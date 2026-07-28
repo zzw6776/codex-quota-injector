@@ -1,5 +1,4 @@
 import { AccountManager } from "./account-manager.mjs";
-import { AppServerClient, selectQuotaWindows, toWidgetQuotas } from "./app-server.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { isCodexRunning, restartCodex } from "./platform.mjs";
 import {
@@ -16,10 +15,8 @@ const STARTUP_GRACE_MS = 30_000;
 export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
   const accountManager = new AccountManager();
   await accountManager.initialize();
-  let appServer = new AppServerClient();
   let cdp = null;
   let targetId = null;
-  let fallbackQuota = null;
   let lastPushedJson = null;
   let activeAction = null;
   let restartingCodex = false;
@@ -36,7 +33,6 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
     clearTimeout(quotaRefreshTimer);
     quotaRefreshTimer = null;
     cdp?.close();
-    appServer.close();
     accountManager.close();
   };
   const stopAndExit = async () => {
@@ -52,16 +48,6 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
   process.once("SIGTERM", () => void stopAndExit());
 
   async function refreshQuotas() {
-    try {
-      const response = await appServer.readRateLimits();
-      const nextOfficialQuota = toWidgetQuotas(selectQuotaWindows(response));
-      if (nextOfficialQuota.windows.length === 0) {
-        throw new Error("Codex 官方接口未返回可显示的额度窗口");
-      }
-      fallbackQuota = nextOfficialQuota;
-    } catch (error) {
-      console.error(`[quota] Codex 当前账号额度读取失败: ${error.message}`);
-    }
     if (accountManager.store.list().length > 0) {
       await accountManager.refreshAll();
     }
@@ -110,7 +96,7 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
       lastPushedJson = null;
     }
     await cdp.evaluate(widgetInstallExpression());
-    const viewModel = accountManager.getViewModel({ fallbackQuota });
+    const viewModel = accountManager.getViewModel();
     const viewJson = JSON.stringify(viewModel);
     if (viewJson !== lastPushedJson) {
       await cdp.evaluate(widgetUpdateExpression(viewModel));
@@ -142,17 +128,11 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
           break;
         case "refresh-all":
           await accountManager.refreshAllWithOperation();
-          appServer.close();
-          appServer = new AppServerClient();
-          await runQuotaRefresh({ repeatIfRunning: true });
           break;
         case "switch-account":
           restartingCodex = true;
           try {
             await accountManager.switchAccount(action.accountId);
-            appServer.close();
-            appServer = new AppServerClient();
-            fallbackQuota = null;
             await restartCodex(port);
             cdp?.close();
             cdp = null;
@@ -214,7 +194,7 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
 
   if (once) {
     stop();
-    return accountManager.getViewModel({ fallbackQuota });
+    return accountManager.getViewModel();
   }
   stop();
 }

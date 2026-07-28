@@ -94,8 +94,7 @@ export class AccountManager {
     }
   }
 
-  getViewModel({ fallbackQuota = null } = {}) {
-    const officialWindows = fallbackQuota?.windows?.length ? fallbackQuota.windows : null;
+  getViewModel() {
     const accounts = this.store.list().map((account) => toPublicAccount(
       account,
       account.id === this.store.index.currentAccountId,
@@ -104,7 +103,7 @@ export class AccountManager {
     return {
       accounts,
       currentAccountId: current?.id ?? null,
-      windows: officialWindows ?? [],
+      windows: current?.windows ?? [],
       operation: this.operation,
     };
   }
