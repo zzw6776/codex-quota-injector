@@ -39,7 +39,7 @@ await writeFile(configPath, JSON.stringify({
   useCodeCache: false,
 }, null, 2));
 
-execFileSync(process.execPath, ["--experimental-sea-config", configPath], {
+execFileSync(nodeBinary, ["--experimental-sea-config", configPath], {
   cwd: root,
   stdio: "inherit",
 });
