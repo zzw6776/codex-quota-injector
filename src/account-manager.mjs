@@ -19,7 +19,7 @@ const SUBSCRIPTIONS_URL = "https://chatgpt.com/backend-api/subscriptions";
 const OAUTH_CALLBACK_PORT = 1455;
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_REFRESH_MS = 12 * 60 * 60 * 1000;
-const TOKEN_REFRESH_LEAD_SECONDS = 24 * 60 * 60;
+const TOKEN_REFRESH_LEAD_SECONDS = 5 * 60;
 const OFFICIAL_SYNC_DEBOUNCE_MS = 250;
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
@@ -261,7 +261,9 @@ export class AccountManager {
         if (latest.authStatus === "needsReauth") {
           throw new Error(`${latest.email} 的登录凭证已失效，需要重新授权后才能切换`);
         }
-        return latest.authMode === "oauth" ? this.#ensureFreshTokens(latest) : latest;
+        return latest.authMode === "oauth"
+          ? this.#ensureFreshTokens(latest, { refreshIfExpirationUnknown: true })
+          : latest;
       });
       await writeOfficialCredentials(this.codexHome, account);
       await this.store.setCurrent(account.id);
@@ -298,21 +300,28 @@ export class AccountManager {
       try {
         quota = await fetchQuota(account);
       } catch (error) {
-        if (!isCurrent || error?.status !== 401) throw error;
-        const previousAccessToken = account.tokens.accessToken;
-        await this.syncCurrentAccountFromOfficialCredentials();
-        const synced = this.store.get(accountId);
-        if (!synced || synced.tokens.accessToken === previousAccessToken) {
-          throw new Error(`${account.email} 的 Codex 登录尚未完成 Token 续期`);
+        if (error?.status !== 401) throw error;
+        if (!isCurrent) {
+          account = await this.#refreshStoredTokens(account);
+          quota = await fetchQuota(account);
+        } else {
+          const previousAccessToken = account.tokens.accessToken;
+          await this.syncCurrentAccountFromOfficialCredentials();
+          const synced = this.store.get(accountId);
+          if (!synced || synced.tokens.accessToken === previousAccessToken) {
+            throw new Error(`${account.email} 的 Codex 登录尚未完成 Token 续期`);
+          }
+          account = synced;
+          quota = await fetchQuota(account);
         }
-        account = synced;
-        quota = await fetchQuota(account);
       }
-      account.quota = quota;
-      account.quotaUpdatedAt = Math.floor(Date.now() / 1000);
-      account.quotaError = null;
-      account.authStatus = "active";
-      if (quota.planType) account.planType = quota.planType;
+      const updates = {
+        quota,
+        quotaUpdatedAt: Math.floor(Date.now() / 1000),
+        quotaError: null,
+        authStatus: "active",
+      };
+      if (quota.planType) updates.planType = quota.planType;
 
       const subscriptionStale =
         !account.subscriptionUpdatedAt ||
@@ -320,49 +329,60 @@ export class AccountManager {
       if (forceSubscription || !account.subscriptionActiveUntil || subscriptionStale) {
         try {
           const subscription = await fetchSubscription(account);
-          if (subscription.accountId) account.accountId = subscription.accountId;
-          if (subscription.planType) account.planType = subscription.planType;
+          if (subscription.accountId) updates.accountId = subscription.accountId;
+          if (subscription.planType) updates.planType = subscription.planType;
           if (subscription.subscriptionActiveUntil) {
-            account.subscriptionActiveUntil = subscription.subscriptionActiveUntil;
+            updates.subscriptionActiveUntil = subscription.subscriptionActiveUntil;
           }
-          account.subscriptionUpdatedAt = Math.floor(Date.now() / 1000);
+          updates.subscriptionUpdatedAt = Math.floor(Date.now() / 1000);
         } catch (error) {
-          account.quotaError = `订阅刷新失败：${error.message}`;
+          updates.quotaError = `订阅刷新失败：${error.message}`;
           console.error(`[subscription] ${account.email}: ${error.message}`);
         }
       }
-      return await this.store.upsert(account);
+      return await this.store.update(accountId, updates);
     } catch (error) {
+      const updates = {};
       if (!isCurrent && isPermanentRefreshError(error)) {
-        account.authStatus = "needsReauth";
-        account.quotaError = `登录凭证已失效，需要重新授权（${error.code ?? error.message}）`;
+        updates.authStatus = "needsReauth";
+        updates.quotaError = `登录凭证已失效，需要重新授权（${error.code ?? error.message}）`;
       } else {
-        account.quotaError = error.message;
+        updates.quotaError = error.message;
       }
-      await this.store.upsert(account);
+      await this.store.update(accountId, updates);
       throw error;
     }
   }
 
-  async #ensureFreshTokens(account) {
+  async #ensureFreshTokens(account, { refreshIfExpirationUnknown = false } = {}) {
     if (account.authStatus === "needsReauth") {
       throw new Error(`${account.email} 的登录凭证已失效，需要重新授权`);
     }
     const expiration = jwtExpiration(account.tokens.accessToken);
-    if (
-      expiration == null ||
-      expiration > Math.floor(Date.now() / 1000) + TOKEN_REFRESH_LEAD_SECONDS
-    ) {
+    if (expiration == null) {
+      if (refreshIfExpirationUnknown && account.tokens.refreshToken) {
+        return this.#refreshStoredTokens(account);
+      }
       return account;
     }
+    if (expiration > Math.floor(Date.now() / 1000) + TOKEN_REFRESH_LEAD_SECONDS) {
+      return account;
+    }
+    return this.#refreshStoredTokens(account);
+  }
+
+  async #refreshStoredTokens(account) {
     if (!account.tokens.refreshToken) {
-      throw new Error(`${account.email} 的登录已过期，需要重新添加或授权`);
+      const error = new Error(`${account.email} 的登录已过期，需要重新添加或授权`);
+      error.code = "refresh_token_missing";
+      throw error;
     }
     const tokens = await refreshTokens(account.tokens.refreshToken, account.tokens.idToken);
-    account.tokens = tokens;
-    account.authStatus = "active";
-    account.tokenGeneration = (account.tokenGeneration ?? 0) + 1;
-    return this.store.upsert(account);
+    return this.store.update(account.id, (latest) => ({
+      tokens,
+      authStatus: "active",
+      tokenGeneration: (latest.tokenGeneration ?? 0) + 1,
+    }));
   }
 
   async #importOfficialAccountIfStoreEmpty() {
@@ -942,6 +962,7 @@ function isPermanentRefreshError(error) {
   const code = String(error?.code ?? "").toLowerCase();
   return code === "refresh_token_reused" ||
     code === "invalid_grant" ||
+    code === "refresh_token_missing" ||
     (error?.status === 401 && String(error?.message ?? "").startsWith("Token 刷新失败"));
 }
 
@@ -1025,8 +1046,10 @@ function openExternal(url) {
     spawn("/usr/bin/open", [url], { detached: true, stdio: "ignore" }).unref();
     return;
   }
-  const command = process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const command = process.platform === "win32" ? "rundll32.exe" : "xdg-open";
+  const args = process.platform === "win32"
+    ? ["url.dll,FileProtocolHandler", url]
+    : [url];
   spawn(command, args, { detached: true, stdio: "ignore" }).unref();
 }
 

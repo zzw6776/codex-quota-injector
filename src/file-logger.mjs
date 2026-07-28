@@ -15,8 +15,14 @@ export function installFileLogger() {
   console.log = (...values) => write("info", values);
   console.warn = (...values) => write("warn", values);
   console.error = (...values) => write("error", values);
-  process.on("uncaughtException", (error) => write("fatal", [error?.stack ?? error]));
-  process.on("unhandledRejection", (error) => write("fatal", [error?.stack ?? error]));
+  process.on("uncaughtException", (error) => {
+    write("fatal", [error?.stack ?? error]);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (error) => {
+    write("fatal", [error?.stack ?? error]);
+    process.exit(1);
+  });
   return logPath;
 }
 

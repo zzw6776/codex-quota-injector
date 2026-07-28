@@ -13,7 +13,7 @@ export function installQuotaWidget(
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
   const PLACEHOLDER_ID = "codex-quota-injector-placeholder";
-  const VERSION = 14;
+  const VERSION = 15;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -84,6 +84,7 @@ export function installQuotaWidget(
     .badge { padding: 2px 6px; border-radius: 999px; background: rgba(255,255,255,.07); color: var(--token-text-secondary, #aaaab5); font-size: 10px; line-height: 16px; }
     .badge.current { color: #d9b8ff; background: rgba(217,184,255,.12); }
     .expiry { margin-top: 5px; color: var(--token-text-secondary, #aaaab5); font-size: 11px; line-height: 16px; }
+    .account-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; white-space: nowrap; }
     .window-list { display: grid; gap: 7px; margin-top: 9px; }
     .window-row { display: grid; grid-template-columns: 58px 42px minmax(70px, 1fr); align-items: center; gap: 8px; font-size: 11px; }
     .window-label { color: var(--token-text-secondary, #aaaab5); }
@@ -267,9 +268,8 @@ export function installQuotaWidget(
         ? '<span class="badge">需要重新授权</span>'
         : `<button class="btn primary account-switch switch-account" type="button" data-account-id="${escapeHtml(account.id)}" ${busy ? "disabled" : ""}>切换到此账号</button>`;
     return `<article class="account-card ${account.current ? "current" : ""}">
-      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span>${switchControl}</span></div>
-      <div class="expiry">订阅：${escapeHtml(expiry)}</div>
-      <div class="expiry">最后刷新：${escapeHtml(updatedAt)}</div>
+      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}${switchControl}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
+      <div class="expiry account-meta"><span>订阅：${escapeHtml(expiry)}</span><span>最后刷新：${escapeHtml(updatedAt)}</span></div>
       ${quotaHtml}
       ${account.quotaError ? `<div class="quota-error">刷新异常：${escapeHtml(account.quotaError)}</div>` : ""}
     </article>`;

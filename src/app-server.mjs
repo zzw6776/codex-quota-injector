@@ -29,14 +29,14 @@ export class AppServerClient {
       if (this.stderr.length > 20) this.stderr.shift();
     });
 
+    child.once("error", (error) => {
+      this.#handleProcessTermination(child, new Error(`app-server 启动失败: ${error.message}`));
+    });
     child.on("exit", (code, signal) => {
-      const reason = `app-server exited (code=${code}, signal=${signal ?? "none"})`;
-      for (const { reject, timer } of this.pending.values()) {
-        clearTimeout(timer);
-        reject(new Error(reason));
-      }
-      this.pending.clear();
-      this.process = null;
+      this.#handleProcessTermination(
+        child,
+        new Error(`app-server exited (code=${code}, signal=${signal ?? "none"})`),
+      );
     });
 
     const lines = createInterface({ input: child.stdout });
@@ -85,9 +85,10 @@ export class AppServerClient {
   }
 
   close() {
-    if (!this.process) return;
-    this.process.kill("SIGTERM");
+    const child = this.process;
     this.process = null;
+    this.#rejectPending(new Error("app-server 已关闭"));
+    child?.kill("SIGTERM");
   }
 
   #write(message) {
@@ -119,6 +120,20 @@ export class AppServerClient {
       return;
     }
     pending.resolve(message.result);
+  }
+
+  #handleProcessTermination(child, error) {
+    if (this.process !== child) return;
+    this.process = null;
+    this.#rejectPending(error);
+  }
+
+  #rejectPending(error) {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    this.pending.clear();
   }
 }
 

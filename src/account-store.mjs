@@ -20,6 +20,8 @@ export class AccountStore {
     this.keyPath = join(dataDir, "account-storage.key");
     this.index = emptyIndex();
     this.accounts = new Map();
+    this.encryptionKey = null;
+    this.writeQueue = Promise.resolve();
   }
 
   async initialize() {
@@ -54,6 +56,25 @@ export class AccountStore {
   }
 
   async upsert(account) {
+    return this.#enqueueWrite(() => this.#upsertOnce(account));
+  }
+
+  async update(accountId, patch) {
+    return this.#enqueueWrite(() => {
+      const previous = this.accounts.get(accountId);
+      if (!previous) throw new Error(`账号不存在: ${accountId}`);
+      const changes = typeof patch === "function"
+        ? patch(structuredClone(previous))
+        : patch;
+      return this.#upsertOnce({
+        ...previous,
+        ...changes,
+        id: accountId,
+      });
+    });
+  }
+
+  async #upsertOnce(account) {
     const previous = this.accounts.get(account.id);
     const now = Math.floor(Date.now() / 1000);
     const next = normalizeAccount({
@@ -69,6 +90,10 @@ export class AccountStore {
   }
 
   async setCurrent(accountId) {
+    return this.#enqueueWrite(() => this.#setCurrentOnce(accountId));
+  }
+
+  async #setCurrentOnce(accountId) {
     if (accountId != null && !this.accounts.has(accountId)) {
       throw new Error(`账号不存在: ${accountId}`);
     }
@@ -89,7 +114,7 @@ export class AccountStore {
       currentAccountId: index.currentAccountId ?? null,
       accounts: index.accounts,
     };
-    const key = await this.#readOrCreateKey();
+    const key = await this.#readOrCreateKey({ allowCreate: index.accounts.length === 0 });
     for (const summary of index.accounts) {
       const path = join(this.accountsDir, `${safeFileId(summary.id)}.json`);
       try {
@@ -183,14 +208,31 @@ export class AccountStore {
     await atomicWrite(this.indexPath, `${JSON.stringify(this.index, null, 2)}\n`, 0o600);
   }
 
-  async #readOrCreateKey() {
+  async #readOrCreateKey({ allowCreate = true } = {}) {
+    if (this.encryptionKey) return this.encryptionKey;
     try {
-      return decodeKey(await readFile(this.keyPath, "utf8"));
-    } catch {
+      this.encryptionKey = decodeKey(await readFile(this.keyPath, "utf8"));
+      return this.encryptionKey;
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new Error(`账号加密密钥无效，已停止读取以保护现有账号数据：${error.message}`);
+      }
+      if (!allowCreate) {
+        throw new Error("账号加密密钥已丢失，已停止启动以避免用新密钥覆盖现有账号数据");
+      }
       const key = randomBytes(32);
       await atomicWrite(this.keyPath, `${key.toString("base64")}\n`, 0o600);
+      this.encryptionKey = key;
       return key;
     }
+  }
+
+  async #enqueueWrite(callback) {
+    const task = this.writeQueue
+      .catch(() => undefined)
+      .then(callback);
+    this.writeQueue = task;
+    return task;
   }
 }
 

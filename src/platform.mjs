@@ -57,7 +57,9 @@ export async function resolveCodexExecutable({ refresh = false } = {}) {
 
   let resolved = null;
   if (process.platform === "darwin") {
-    resolved = await firstExisting(MACOS_EXECUTABLES);
+    resolved =
+      await detectRunningMacCodexExecutable() ??
+      await firstExisting(MACOS_EXECUTABLES);
   } else if (process.platform === "win32") {
     resolved =
       await detectRunningWindowsCodexExecutable() ??
@@ -312,6 +314,14 @@ Get-CimInstance Win32_Process |
 `;
   const stdout = await runPowerShell(script).catch(() => "");
   return firstNonEmptyLine(stdout);
+}
+
+async function detectRunningMacCodexExecutable() {
+  const { stdout } = await execFileAsync("/bin/ps", ["-axww", "-o", "pid=,comm="])
+    .catch(() => ({ stdout: "" }));
+  return MACOS_EXECUTABLES.find((executable) =>
+    parseProcessList(stdout, executable).length > 0
+  ) ?? null;
 }
 
 async function detectWindowsStoreCodexExecutable() {
