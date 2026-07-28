@@ -243,6 +243,9 @@ function normalizeAccount(raw) {
   const id = String(raw.id ?? "").trim();
   if (!id) throw new Error("账号缺少 id");
   const tokens = raw.tokens && typeof raw.tokens === "object" ? raw.tokens : {};
+  const quotaError = raw.quotaError ?? raw.quota_error?.message ?? null;
+  const authStatus = raw.authStatus ?? raw.auth_status ??
+    (String(quotaError ?? "").includes("refresh_token_reused") ? "needsReauth" : "active");
   return {
     id,
     email: String(raw.email ?? raw.accountName ?? id),
@@ -263,7 +266,8 @@ function normalizeAccount(raw) {
       Number(raw.subscriptionUpdatedAt ?? raw.subscription_query_last_success_at) || null,
     quota: normalizeQuota(raw.quota),
     quotaUpdatedAt: Number(raw.quotaUpdatedAt ?? raw.usage_updated_at) || null,
-    quotaError: raw.quotaError ?? raw.quota_error?.message ?? null,
+    quotaError,
+    authStatus: authStatus === "needsReauth" ? "needsReauth" : "active",
     tokenGeneration: Number(raw.tokenGeneration ?? raw.token_generation) || 0,
     createdAt: Number(raw.createdAt ?? raw.created_at) || Math.floor(Date.now() / 1000),
     lastUsed: Number(raw.lastUsed ?? raw.last_used) || Math.floor(Date.now() / 1000),

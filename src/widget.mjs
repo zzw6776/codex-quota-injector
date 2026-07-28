@@ -13,7 +13,7 @@ export function installQuotaWidget(
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
   const PLACEHOLDER_ID = "codex-quota-injector-placeholder";
-  const VERSION = 11;
+  const VERSION = 14;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -91,13 +91,16 @@ export function installQuotaWidget(
     .window-track { height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.08); }
     .window-track i { display: block; height: 100%; border-radius: inherit; background: #d9b8ff; }
     .window-reset { grid-column: 2 / 4; margin-top: -3px; color: var(--token-text-secondary, #8f8f9b); font-size: 10px; }
-    .account-actions { display: flex; justify-content: flex-end; margin-top: 9px; }
     .btn { appearance: none; border: 1px solid rgba(255,255,255,.11); border-radius: 8px; cursor: pointer; padding: 5px 9px; color: inherit; background: rgba(255,255,255,.045); font-size: 11px; }
     .btn:hover { background: rgba(255,255,255,.09); }
     .btn.primary { border-color: rgba(217,184,255,.24); color: #e5cdfd; background: rgba(217,184,255,.1); }
     .btn:disabled { cursor: default; opacity: .45; }
+    .account-switch { padding: 2px 7px; border-radius: 999px; line-height: 16px; white-space: nowrap; }
     .empty { padding: 18px 8px; text-align: center; color: var(--token-text-secondary, #aaaab5); font-size: 12px; }
     .operation { margin-top: 9px; padding: 8px 10px; border-radius: 9px; overflow-wrap: anywhere; background: rgba(255,255,255,.045); color: var(--token-text-secondary, #b5b5bf); font-size: 11px; }
+    .operation.has-action { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .operation.has-action span { min-width: 0; }
+    .operation .oauth-cancel { flex: 0 0 auto; padding: 3px 7px; }
     .operation.success { color: #7ecb9b; background: rgba(52,168,92,.09); }
     .operation.error { color: #ef8e86; background: rgba(220,76,63,.09); }
     .add-panel { margin-top: 11px; padding-top: 11px; border-top: 1px solid rgba(255,255,255,.07); }
@@ -192,8 +195,11 @@ export function installQuotaWidget(
     const accountHtml = accounts.length
       ? accounts.map(renderAccount).join("")
       : '<div class="empty">暂无账号，点击下方按钮添加</div>';
+    const oauthCancellable =
+      state.data.operation?.state === "loading" &&
+      state.data.operation?.cancellable === "oauth";
     const operation = state.data.operation
-      ? `<div class="operation ${escapeHtml(state.data.operation.state)}">${escapeHtml(state.data.operation.message)}</div>`
+      ? `<div class="operation ${escapeHtml(state.data.operation.state)} ${oauthCancellable ? "has-action" : ""}"><span>${escapeHtml(state.data.operation.message)}</span>${oauthCancellable ? '<button class="btn oauth-cancel" type="button">取消授权</button>' : ""}</div>`
       : "";
     const busy = state.data.operation?.state === "loading";
     wrap.innerHTML = `
@@ -252,13 +258,20 @@ export function installQuotaWidget(
       ? `<div class="window-list">${windows.map(renderWindow).join("")}</div>`
       : '<div class="expiry">暂无额度数据</div>';
     const expiry = formatExpiry(account.subscriptionActiveUntil);
+    const updatedAt = formatUpdatedAt(account.quotaUpdatedAt);
     const busy = state.data.operation?.state === "loading";
+    const needsReauth = account.authStatus === "needsReauth";
+    const switchControl = account.current
+      ? ""
+      : needsReauth
+        ? '<span class="badge">需要重新授权</span>'
+        : `<button class="btn primary account-switch switch-account" type="button" data-account-id="${escapeHtml(account.id)}" ${busy ? "disabled" : ""}>切换到此账号</button>`;
     return `<article class="account-card ${account.current ? "current" : ""}">
-      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
+      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span>${switchControl}</span></div>
       <div class="expiry">订阅：${escapeHtml(expiry)}</div>
+      <div class="expiry">最后刷新：${escapeHtml(updatedAt)}</div>
       ${quotaHtml}
-      ${account.quotaError ? `<div class="quota-error">${escapeHtml(account.quotaError)}</div>` : ""}
-      <div class="account-actions">${account.current ? "" : `<button class="btn primary switch-account" type="button" data-account-id="${escapeHtml(account.id)}" ${busy ? "disabled" : ""}>切换到此账号</button>`}</div>
+      ${account.quotaError ? `<div class="quota-error">刷新异常：${escapeHtml(account.quotaError)}</div>` : ""}
     </article>`;
   }
 
@@ -294,6 +307,7 @@ export function installQuotaWidget(
     });
     wrap.querySelectorAll(".switch-account").forEach((button) => button.addEventListener("click", () => enqueue({ type: "switch-account", accountId: button.dataset.accountId })));
     wrap.querySelector(".oauth-add")?.addEventListener("click", () => enqueue({ type: "oauth-add" }));
+    wrap.querySelector(".oauth-cancel")?.addEventListener("click", () => enqueue({ type: "oauth-cancel" }));
     wrap.querySelector(".local-import")?.addEventListener("click", () => enqueue({ type: "local-import" }));
     wrap.querySelector(".export-all")?.addEventListener("click", () => enqueue({ type: "export-all" }));
     wrap.querySelector(".refresh-all")?.addEventListener("click", () => enqueue({ type: "refresh-all" }));
@@ -352,6 +366,20 @@ export function installQuotaWidget(
     const days = Math.ceil((date.getTime() - Date.now()) / 86_400_000);
     const prefix = days < 0 ? "已到期" : days === 0 ? "今天到期" : `${days} 天后`;
     return `${prefix}（${new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" }).format(date)}）`;
+  }
+
+  function formatUpdatedAt(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return "从未成功刷新";
+    const date = new Date(numeric > 1_000_000_000_000 ? numeric : numeric * 1000);
+    if (Number.isNaN(date.getTime())) return "从未成功刷新";
+    return new Intl.DateTimeFormat(undefined, {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(date);
   }
 
   function formatPlan(value) {

@@ -9,8 +9,13 @@
 - 通过 OpenAI OAuth、Token/JSON、本机 Codex 登录或 API Key 添加账号；
 - 一键将全部账号导出为可再次导入的 JSON 备份；
 - 每 60 秒独立刷新全部 OAuth 账号额度，不受页面注入或重连影响；
-- 当前账号优先显示 Codex 官方 app-server 的实时额度，读取失败时自动回退到账号接口缓存；
-- macOS 使用原生无界面启动器接收 Finder 的重复打开事件；每次双击都会结束旧注入器和 Codex，再自动拉起全新实例；
+- 外层百分比只显示 Codex 官方 app-server 额度，读取失败时保留最后一次成功值；
+- 悬浮框内所有账号均显示账号接口刷新后写入本地账户库的额度缓存；
+- 悬浮框为每个账号显示最后成功刷新时间；Token、额度或订阅刷新异常会保留旧额度并直接显示错误；
+- 当前账号的 Token 由 Codex 管理并实时同步回账户库；非当前账号由注入器在不足 24 小时或已过期时续期，切换前先完成凭证交接；
+- OpenAI OAuth 等待状态提供“取消授权”，取消后立即关闭本地回调服务并恢复面板操作；
+- OpenAI OAuth 使用客户端登记的固定回调地址 `http://localhost:1455/auth/callback`；
+- macOS 使用原生无界面启动器接收 Finder 的重复打开事件；重复双击会接管旧注入器，Codex 已开放调试端口时保留当前客户端；
 - 退出 Codex 后，后台注入工作进程同步退出；macOS 原生入口保持无界面待命，以便下次 Finder 双击重新启动；
 - 不修改官方客户端，不依赖 Cockpit，不要求用户安装 Node.js。
 
@@ -41,11 +46,12 @@
 1. macOS 原生启动器接收首次启动和重复双击事件，并唤起后台注入器；
 2. 后台注入器获取本机单实例锁；重复启动时由旧实例交接并完整重启；
 3. 查找官方 Codex 安装位置；
-4. 每次启动都先结束现有 Codex，再使用本地 CDP 调试端口拉起新进程；
+4. Codex 已开放本地 CDP 调试端口时直接复用当前进程；仅在未开放调试端口时重启并以调试模式拉起；
 5. 只在 `127.0.0.1:9229` 开启 Chromium 调试端口；
 6. 连接 Codex 页面并注入额度组件；
-7. 在连接成功后停止目标查找轮询；
-8. 在 Codex 退出后结束后台注入工作进程；macOS 原生入口保持待命以接收下一次 Finder 双击。
+7. 监听 Codex `auth.json` 变化，将当前账号轮换后的最新 Token 同步回独立账户库；
+8. 在连接成功后停止目标查找轮询；
+9. 在 Codex 退出前最后同步一次当前账号凭证，再结束后台注入工作进程；macOS 原生入口保持待命以接收下一次 Finder 双击。
 
 macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。Windows 支持 Microsoft Store 的 `OpenAI.ChatGPT`、`OpenAI.Codex`、`ChatGPT.exe` 和 `Codex.exe`。
 

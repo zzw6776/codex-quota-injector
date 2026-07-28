@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { watch } from "node:fs";
 import { createServer } from "node:http";
 import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -15,8 +16,11 @@ const TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const ACCOUNT_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
 const SUBSCRIPTIONS_URL = "https://chatgpt.com/backend-api/subscriptions";
+const OAUTH_CALLBACK_PORT = 1455;
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_REFRESH_MS = 12 * 60 * 60 * 1000;
+const TOKEN_REFRESH_LEAD_SECONDS = 24 * 60 * 60;
+const OFFICIAL_SYNC_DEBOUNCE_MS = 250;
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
@@ -26,53 +30,122 @@ export class AccountManager {
     this.codexHome = codexHome;
     this.operation = null;
     this.oauthPromise = null;
+    this.oauthAbortController = null;
     this.refreshLocks = new Map();
+    this.officialSyncPromise = null;
+    this.officialCredentialWatcher = null;
+    this.officialSyncTimer = null;
   }
 
   async initialize() {
     await this.store.initialize();
     await this.#importOfficialAccountIfStoreEmpty();
-    await this.#syncCurrentAccountFromOfficialCredentials();
+    await this.syncCurrentAccountFromOfficialCredentials();
     return this.getViewModel();
+  }
+
+  startOfficialCredentialWatch(onChange) {
+    if (this.officialCredentialWatcher) return;
+    try {
+      this.officialCredentialWatcher = watch(
+        this.codexHome,
+        { persistent: false },
+        (_eventType, fileName) => {
+          if (fileName && String(fileName) !== "auth.json") return;
+          clearTimeout(this.officialSyncTimer);
+          this.officialSyncTimer = setTimeout(() => {
+            this.officialSyncTimer = null;
+            void this.syncCurrentAccountFromOfficialCredentials()
+              .then((result) => {
+                if (result?.changed) onChange?.(result);
+              })
+              .catch((error) => {
+                console.error(`[accounts] Codex 凭证同步失败: ${error.message}`);
+              });
+          }, OFFICIAL_SYNC_DEBOUNCE_MS);
+        },
+      );
+      this.officialCredentialWatcher.on("error", (error) => {
+        console.error(`[accounts] Codex 凭证监听失败: ${error.message}`);
+      });
+    } catch (error) {
+      console.error(`[accounts] 无法监听 Codex 凭证: ${error.message}`);
+    }
+  }
+
+  close() {
+    clearTimeout(this.officialSyncTimer);
+    this.officialSyncTimer = null;
+    this.officialCredentialWatcher?.close();
+    this.officialCredentialWatcher = null;
+    this.oauthAbortController?.abort(createOAuthCancelledError());
+  }
+
+  async syncCurrentAccountFromOfficialCredentials() {
+    const previous = this.officialSyncPromise ?? Promise.resolve();
+    const task = previous
+      .catch(() => undefined)
+      .then(() => this.#syncCurrentAccountFromOfficialCredentialsOnce());
+    this.officialSyncPromise = task;
+    try {
+      return await task;
+    } finally {
+      if (this.officialSyncPromise === task) this.officialSyncPromise = null;
+    }
   }
 
   getViewModel({ fallbackQuota = null } = {}) {
     const officialWindows = fallbackQuota?.windows?.length ? fallbackQuota.windows : null;
-    const accounts = this.store.list().map((account) => {
-      const current = account.id === this.store.index.currentAccountId;
-      const publicAccount = toPublicAccount(account, current);
-      if (current && officialWindows) publicAccount.windows = officialWindows;
-      return publicAccount;
-    });
+    const accounts = this.store.list().map((account) => toPublicAccount(
+      account,
+      account.id === this.store.index.currentAccountId,
+    ));
     const current = accounts.find((account) => account.current) ?? null;
     return {
       accounts,
       currentAccountId: current?.id ?? null,
-      windows: officialWindows ?? current?.windows ?? [],
+      windows: officialWindows ?? [],
       operation: this.operation,
     };
   }
 
   async refreshAll({ forceSubscription = false } = {}) {
+    await this.syncCurrentAccountFromOfficialCredentials();
     const accounts = this.store.list().filter((account) => account.authMode === "oauth");
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       accounts.map((account) => this.refreshAccount(account.id, { forceSubscription })),
     );
-    return this.getViewModel();
+    return { viewModel: this.getViewModel(), results };
   }
 
   async refreshAllWithOperation() {
     return this.#withOperation("正在刷新全部账号…", async () => {
-      await this.refreshAll({ forceSubscription: true });
+      const { results } = await this.refreshAll({ forceSubscription: true });
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        const messages = [...new Set(failures
+          .map((result) => result.reason?.message)
+          .filter(Boolean))];
+        throw new Error(
+          `${failures.length} 个账号刷新失败${messages.length > 0 ? `：${messages.join("；")}` : ""}`,
+        );
+      }
       return "全部账号已刷新";
     });
   }
 
   async refreshAccount(accountId, { forceSubscription = false } = {}) {
+    return this.#withAccountLock(
+      accountId,
+      () => this.#refreshAccountOnce(accountId, { forceSubscription }),
+    );
+  }
+
+  async #withAccountLock(accountId, callback) {
     const previous = this.refreshLocks.get(accountId) ?? Promise.resolve();
     const task = previous
       .catch(() => undefined)
-      .then(() => this.#refreshAccountOnce(accountId, { forceSubscription }));
+      .then(callback);
     this.refreshLocks.set(accountId, task);
     try {
       return await task;
@@ -85,12 +158,23 @@ export class AccountManager {
     if (this.oauthPromise) throw new Error("已有 OAuth 添加流程正在进行");
     this.oauthPromise = this.#runOAuthLogin()
       .catch((error) => {
-        this.#setOperation("error", `添加失败：${error.message}`);
-        this.clearOperationAfter(8_000);
+        if (error?.code === "CODEX_QUOTA_OAUTH_CANCELLED") {
+          this.#setOperation("success", "已取消 OpenAI OAuth 授权");
+          this.clearOperationAfter();
+        } else {
+          this.#setOperation("error", `添加失败：${error.message}`);
+          this.clearOperationAfter(8_000);
+        }
       })
       .finally(() => {
         this.oauthPromise = null;
       });
+  }
+
+  cancelOAuthLogin() {
+    if (!this.oauthAbortController) return false;
+    this.oauthAbortController.abort(createOAuthCancelledError());
+    return true;
   }
 
   async importTokenInput(input) {
@@ -162,11 +246,23 @@ export class AccountManager {
 
   async switchAccount(accountId) {
     return this.#withOperation("正在切换账号…", async () => {
+      await this.syncCurrentAccountFromOfficialCredentials();
+      if (accountId === this.store.index.currentAccountId) {
+        const current = this.store.get(accountId);
+        if (!current) throw new Error("当前账号不存在，请刷新列表");
+        return `${current.email} 已是当前账号`;
+      }
+
       let account = this.store.get(accountId);
       if (!account) throw new Error("目标账号不存在，请刷新列表");
-      if (account.authMode === "oauth") {
-        account = await this.#ensureFreshTokens(account);
-      }
+      account = await this.#withAccountLock(account.id, async () => {
+        const latest = this.store.get(account.id);
+        if (!latest) throw new Error("目标账号不存在，请刷新列表");
+        if (latest.authStatus === "needsReauth") {
+          throw new Error(`${latest.email} 的登录凭证已失效，需要重新授权后才能切换`);
+        }
+        return latest.authMode === "oauth" ? this.#ensureFreshTokens(latest) : latest;
+      });
       await writeOfficialCredentials(this.codexHome, account);
       await this.store.setCurrent(account.id);
       return `已切换到 ${account.email}`;
@@ -185,13 +281,37 @@ export class AccountManager {
     let account = this.store.get(accountId);
     if (!account) throw new Error(`账号不存在: ${accountId}`);
     if (account.authMode !== "oauth" || !account.tokens.accessToken) return account;
+    let isCurrent = account.id === this.store.index.currentAccountId;
 
-    account = await this.#ensureFreshTokens(account);
     try {
-      const quota = await fetchQuota(account);
+      if (isCurrent) {
+        await this.syncCurrentAccountFromOfficialCredentials();
+        account = this.store.get(accountId) ?? account;
+        isCurrent = account.id === this.store.index.currentAccountId;
+      }
+      if (!isCurrent && account.authStatus === "needsReauth") {
+        throw new Error(`${account.email} 的登录凭证已失效，需要重新授权`);
+      }
+      if (!isCurrent) account = await this.#ensureFreshTokens(account);
+
+      let quota;
+      try {
+        quota = await fetchQuota(account);
+      } catch (error) {
+        if (!isCurrent || error?.status !== 401) throw error;
+        const previousAccessToken = account.tokens.accessToken;
+        await this.syncCurrentAccountFromOfficialCredentials();
+        const synced = this.store.get(accountId);
+        if (!synced || synced.tokens.accessToken === previousAccessToken) {
+          throw new Error(`${account.email} 的 Codex 登录尚未完成 Token 续期`);
+        }
+        account = synced;
+        quota = await fetchQuota(account);
+      }
       account.quota = quota;
       account.quotaUpdatedAt = Math.floor(Date.now() / 1000);
       account.quotaError = null;
+      account.authStatus = "active";
       if (quota.planType) account.planType = quota.planType;
 
       const subscriptionStale =
@@ -207,20 +327,32 @@ export class AccountManager {
           }
           account.subscriptionUpdatedAt = Math.floor(Date.now() / 1000);
         } catch (error) {
+          account.quotaError = `订阅刷新失败：${error.message}`;
           console.error(`[subscription] ${account.email}: ${error.message}`);
         }
       }
       return await this.store.upsert(account);
     } catch (error) {
-      account.quotaError = error.message;
+      if (!isCurrent && isPermanentRefreshError(error)) {
+        account.authStatus = "needsReauth";
+        account.quotaError = `登录凭证已失效，需要重新授权（${error.code ?? error.message}）`;
+      } else {
+        account.quotaError = error.message;
+      }
       await this.store.upsert(account);
       throw error;
     }
   }
 
   async #ensureFreshTokens(account) {
+    if (account.authStatus === "needsReauth") {
+      throw new Error(`${account.email} 的登录凭证已失效，需要重新授权`);
+    }
     const expiration = jwtExpiration(account.tokens.accessToken);
-    if (expiration == null || expiration > Math.floor(Date.now() / 1000) + 300) {
+    if (
+      expiration == null ||
+      expiration > Math.floor(Date.now() / 1000) + TOKEN_REFRESH_LEAD_SECONDS
+    ) {
       return account;
     }
     if (!account.tokens.refreshToken) {
@@ -228,6 +360,7 @@ export class AccountManager {
     }
     const tokens = await refreshTokens(account.tokens.refreshToken, account.tokens.idToken);
     account.tokens = tokens;
+    account.authStatus = "active";
     account.tokenGeneration = (account.tokenGeneration ?? 0) + 1;
     return this.store.upsert(account);
   }
@@ -273,26 +406,58 @@ export class AccountManager {
     }
   }
 
-  async #syncCurrentAccountFromOfficialCredentials() {
+  async #syncCurrentAccountFromOfficialCredentialsOnce() {
     let credentials;
     try {
       credentials = JSON.parse(await readFile(join(this.codexHome, "auth.json"), "utf8"));
     } catch {
-      return;
+      return { changed: false, account: null };
     }
 
     const accounts = this.store.list();
     const matched = matchOfficialAccount(credentials, accounts);
-    if (matched === undefined) return;
-    const currentAccountId = matched?.id ?? null;
-    if (currentAccountId === this.store.index.currentAccountId) return;
+    if (matched === undefined) return { changed: false, account: null };
 
-    await this.store.setCurrent(currentAccountId);
-    console.log(
-      matched
-        ? `[accounts] 已识别 Codex 当前账号: ${matched.email}`
-        : "[accounts] Codex 当前登录未在账号库中，已清除当前账号标记",
-    );
+    let account = matched;
+    let credentialsChanged = false;
+    const apiKey = typeof credentials.OPENAI_API_KEY === "string"
+      ? credentials.OPENAI_API_KEY.trim()
+      : "";
+    if (apiKey) {
+      if (!account) {
+        account = await this.#upsertApiKey(apiKey, "Local API Key");
+        credentialsChanged = true;
+      }
+    } else {
+      const candidate = parseTokenInput(JSON.stringify(credentials))[0];
+      if (candidate?.accessToken) {
+        const nextTokens = {
+          idToken: candidate.idToken || account?.tokens.idToken || "",
+          accessToken: candidate.accessToken,
+          refreshToken: candidate.refreshToken ?? account?.tokens.refreshToken ?? null,
+        };
+        if (
+          !account ||
+          !sameTokens(account.tokens, nextTokens) ||
+          account.authStatus === "needsReauth"
+        ) {
+          account = await this.#upsertOAuthTokens(nextTokens);
+          credentialsChanged = true;
+        }
+      }
+    }
+
+    const currentAccountId = account?.id ?? null;
+    const currentChanged = currentAccountId !== this.store.index.currentAccountId;
+    if (currentChanged) await this.store.setCurrent(currentAccountId);
+    if (credentialsChanged || currentChanged) {
+      console.log(
+        account
+          ? `[accounts] 已同步 Codex 当前账号凭证: ${account.email}`
+          : "[accounts] Codex 当前登录未在账号库中，已清除当前账号标记",
+      );
+    }
+    return { changed: credentialsChanged || currentChanged, account };
   }
 
   async #upsertOAuthTokens(tokens) {
@@ -325,6 +490,8 @@ export class AccountManager {
       accountId: accountId ?? existing?.accountId ?? null,
       organizationId: organizationId ?? existing?.organizationId ?? null,
       planType: auth.chatgpt_plan_type ?? existing?.planType ?? null,
+      authStatus: "active",
+      quotaError: isAuthenticationError(existing?.quotaError) ? null : existing?.quotaError,
       tokenGeneration: (existing?.tokenGeneration ?? 0) + 1,
     });
   }
@@ -343,33 +510,48 @@ export class AccountManager {
   }
 
   async #runOAuthLogin() {
-    this.#setOperation("loading", "正在准备 OpenAI OAuth…");
+    this.#setOperation("loading", "正在准备 OpenAI OAuth…", { cancellable: "oauth" });
+    const abortController = new AbortController();
+    this.oauthAbortController = abortController;
     const verifier = base64Url(randomBytes(32));
     const challenge = base64Url(createHash("sha256").update(verifier).digest());
     const expectedState = base64Url(randomBytes(32));
     const server = createServer();
-    await listen(server);
-    const address = server.address();
-    const port = typeof address === "object" && address ? address.port : null;
-    if (!port) throw new Error("无法分配 OAuth 回调端口");
-    const redirectUri = `http://localhost:${port}/auth/callback`;
-    const authUrl = new URL(AUTH_ENDPOINT);
-    authUrl.search = new URLSearchParams({
-      response_type: "code",
-      client_id: CLIENT_ID,
-      redirect_uri: redirectUri,
-      scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      id_token_add_organizations: "true",
-      codex_cli_simplified_flow: "true",
-      state: expectedState,
-      originator: "codex_vscode",
-    }).toString();
-
     try {
-      const callback = waitForOAuthCallback(server, expectedState, OAUTH_TIMEOUT_MS);
-      this.#setOperation("loading", "请在浏览器中完成 OpenAI 授权…");
+      try {
+        await listen(server, OAUTH_CALLBACK_PORT);
+      } catch (error) {
+        if (error?.code === "EADDRINUSE") {
+          throw new Error(`OAuth 回调端口 ${OAUTH_CALLBACK_PORT} 已被占用，请关闭旧授权流程后重试`);
+        }
+        throw error;
+      }
+      const redirectUri = `http://localhost:${OAUTH_CALLBACK_PORT}/auth/callback`;
+      const authUrl = new URL(AUTH_ENDPOINT);
+      authUrl.search = new URLSearchParams({
+        response_type: "code",
+        client_id: CLIENT_ID,
+        redirect_uri: redirectUri,
+        scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        id_token_add_organizations: "true",
+        codex_cli_simplified_flow: "true",
+        state: expectedState,
+        originator: "codex_vscode",
+      }).toString();
+
+      const callback = waitForOAuthCallback(
+        server,
+        expectedState,
+        OAUTH_TIMEOUT_MS,
+        abortController.signal,
+      );
+      this.#setOperation(
+        "loading",
+        "请在浏览器中完成 OpenAI 授权…",
+        { cancellable: "oauth" },
+      );
       openExternal(authUrl.toString());
       const code = await callback;
       this.#setOperation("loading", "授权完成，正在保存账号…");
@@ -379,6 +561,9 @@ export class AccountManager {
       this.#setOperation("success", `已添加 ${account.email}`);
       this.clearOperationAfter();
     } finally {
+      if (this.oauthAbortController === abortController) {
+        this.oauthAbortController = null;
+      }
       await closeServer(server);
     }
   }
@@ -397,8 +582,8 @@ export class AccountManager {
     }
   }
 
-  #setOperation(state, message) {
-    this.operation = { state, message, updatedAt: Date.now() };
+  #setOperation(state, message, extra = {}) {
+    this.operation = { state, message, updatedAt: Date.now(), ...extra };
   }
 }
 
@@ -408,7 +593,7 @@ export async function fetchQuota(account) {
     signal: AbortSignal.timeout(25_000),
   });
   const body = await response.text();
-  if (!response.ok) throw new Error(`额度接口返回 ${response.status}`);
+  if (!response.ok) throw createHttpError(`额度接口返回 ${response.status}`, response.status);
   const usage = JSON.parse(body);
   const windows = [
     usage.rate_limit?.primary_window,
@@ -427,7 +612,7 @@ export async function fetchSubscription(account) {
     headers: apiHeaders(account, checkUrl.pathname),
     signal: AbortSignal.timeout(25_000),
   });
-  if (!response.ok) throw new Error(`订阅接口返回 ${response.status}`);
+  if (!response.ok) throw createHttpError(`订阅接口返回 ${response.status}`, response.status);
   const payload = await response.json();
   let snapshot = parseAccountCheck(payload, account.accountId);
   if (snapshot.subscriptionActiveUntil || !snapshot.accountId) return snapshot;
@@ -460,7 +645,11 @@ export async function refreshTokens(refreshToken, currentIdToken = "") {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(`Token 刷新失败 ${response.status}: ${body.error?.code ?? body.error ?? "unknown"}`);
+    const code = body.error?.code ?? body.error ?? "unknown";
+    const error = new Error(`Token 刷新失败 ${response.status}: ${code}`);
+    error.code = String(code);
+    error.status = response.status;
+    throw error;
   }
   if (!body.access_token) throw new Error("Token 刷新响应缺少 access_token");
   return {
@@ -545,6 +734,7 @@ function toPublicAccount(account, current) {
     windows: account.quota?.windows ?? [],
     quotaUpdatedAt: account.quotaUpdatedAt,
     quotaError: account.quotaError,
+    authStatus: account.authStatus,
     current,
   };
 }
@@ -742,15 +932,55 @@ function jwtExpiration(token) {
   return Number.isFinite(value) ? value : null;
 }
 
-function waitForOAuthCallback(server, expectedState, timeoutMs) {
+function sameTokens(left = {}, right = {}) {
+  return left.idToken === right.idToken &&
+    left.accessToken === right.accessToken &&
+    left.refreshToken === right.refreshToken;
+}
+
+function isPermanentRefreshError(error) {
+  const code = String(error?.code ?? "").toLowerCase();
+  return code === "refresh_token_reused" ||
+    code === "invalid_grant" ||
+    (error?.status === 401 && String(error?.message ?? "").startsWith("Token 刷新失败"));
+}
+
+function isAuthenticationError(message) {
+  const value = String(message ?? "");
+  return value.includes("refresh_token_reused") ||
+    value.includes("登录凭证已失效") ||
+    value.includes("需要重新授权") ||
+    value.includes("Token 刷新失败");
+}
+
+function createHttpError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function createOAuthCancelledError() {
+  const error = new Error("OpenAI OAuth 授权已取消");
+  error.code = "CODEX_QUOTA_OAUTH_CANCELLED";
+  return error;
+}
+
+function waitForOAuthCallback(server, expectedState, timeoutMs, signal) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => finish(new Error("OAuth 授权超时，请重试")), timeoutMs);
     const finish = (error, code) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       server.removeAllListeners("request");
       if (error) reject(error);
       else resolve(code);
     };
+    const onAbort = () => finish(signal.reason ?? createOAuthCancelledError());
+    if (signal?.aborted) {
+      finish(signal.reason ?? createOAuthCancelledError());
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
     server.on("request", (request, response) => {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (url.pathname !== "/auth/callback") {
@@ -775,10 +1005,10 @@ function waitForOAuthCallback(server, expectedState, timeoutMs) {
   });
 }
 
-function listen(server) {
+function listen(server, port) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(port, "127.0.0.1", () => {
       server.off("error", reject);
       resolve();
     });

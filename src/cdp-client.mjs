@@ -138,13 +138,23 @@ export async function findCodexTarget(port) {
   });
   if (!response.ok) throw new Error(`CDP target list returned ${response.status}`);
   const targets = await response.json();
+  const appPages = targets.filter(
+    (target) =>
+      target.type === "page" &&
+      typeof target.url === "string" &&
+      target.url.startsWith("app://") &&
+      target.webSocketDebuggerUrl,
+  );
   return (
-    targets.find(
-      (target) =>
-        target.type === "page" &&
-        typeof target.url === "string" &&
-        target.url.startsWith("app://") &&
-        target.webSocketDebuggerUrl,
-    ) ?? null
+    appPages.find((target) => target.url === "app://-/index.html") ??
+    appPages.find((target) => {
+      try {
+        return !new URL(target.url).searchParams.has("initialRoute");
+      } catch {
+        return false;
+      }
+    }) ??
+    appPages[0] ??
+    null
   );
 }

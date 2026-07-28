@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 
 import { installFileLogger } from "./file-logger.mjs";
 import { runInjector } from "./injector.mjs";
-import { restartCodex, stopOtherInjectorProcesses } from "./platform.mjs";
+import { isCodexRunning, restartCodex, stopOtherInjectorProcesses } from "./platform.mjs";
 import {
   acquireSingleInstance,
   closeSingleInstance,
@@ -20,10 +20,10 @@ async function main() {
   const restartFromTakeover = async () => {
     if (takeoverInProgress) return;
     takeoverInProgress = true;
-    console.log("[launcher] 收到重复启动，正在完全重启 Codex 和注入器");
+    console.log("[launcher] 收到重复启动，正在接管注入器");
     await closeSingleInstance(instanceLock);
-    await restartCodex(CDP_PORT).catch((error) => {
-      console.error(`[launcher] 重启 Codex 失败: ${error.message}`);
+    await ensureCodexDebugMode(CDP_PORT).catch((error) => {
+      console.error(`[launcher] 准备 Codex 调试模式失败: ${error.message}`);
     });
     relaunchSelf();
     process.exit(0);
@@ -39,7 +39,7 @@ async function main() {
     }
     if (!instanceLock) return;
 
-    await restartCodex(CDP_PORT);
+    await ensureCodexDebugMode(CDP_PORT);
 
     console.log(`[launcher] 已启动，日志=${logPath}`);
     await runInjector({ port: CDP_PORT });
@@ -52,6 +52,27 @@ async function main() {
 }
 
 main();
+
+async function ensureCodexDebugMode(port) {
+  if (await hasCodexDebugPort(port)) {
+    console.log(`[launcher] Codex 已处于调试模式，保留当前进程（端口 ${port}）`);
+    return;
+  }
+  console.log(`[launcher] Codex 未开放调试端口，正在以调试模式重启（端口 ${port}）`);
+  await restartCodex(port);
+}
+
+async function hasCodexDebugPort(port) {
+  if (!await isCodexRunning()) return false;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
 
 function relaunchSelf() {
   const child = spawn(process.execPath, process.argv.slice(1), {

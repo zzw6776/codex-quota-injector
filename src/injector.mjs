@@ -25,6 +25,7 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
   let restartingCodex = false;
   let hasSeenCodexProcess = false;
   let stopped = false;
+  let stopping = false;
   let quotaRefreshTimer = null;
   let quotaRefreshPromise = null;
   let quotaRefreshRequested = false;
@@ -36,20 +37,29 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
     quotaRefreshTimer = null;
     cdp?.close();
     appServer.close();
+    accountManager.close();
   };
-  const stopAndExit = () => {
+  const stopAndExit = async () => {
+    if (stopping) return;
+    stopping = true;
+    await accountManager.syncCurrentAccountFromOfficialCredentials().catch((error) => {
+      console.error(`[lifecycle] 退出前同步 Codex 凭证失败: ${error.message}`);
+    });
     stop();
     setTimeout(() => process.exit(0), 250);
   };
-  process.once("SIGINT", stopAndExit);
-  process.once("SIGTERM", stopAndExit);
+  process.once("SIGINT", () => void stopAndExit());
+  process.once("SIGTERM", () => void stopAndExit());
 
   async function refreshQuotas() {
     try {
       const response = await appServer.readRateLimits();
-      fallbackQuota = toWidgetQuotas(selectQuotaWindows(response));
+      const nextOfficialQuota = toWidgetQuotas(selectQuotaWindows(response));
+      if (nextOfficialQuota.windows.length === 0) {
+        throw new Error("Codex 官方接口未返回可显示的额度窗口");
+      }
+      fallbackQuota = nextOfficialQuota;
     } catch (error) {
-      fallbackQuota = null;
       console.error(`[quota] Codex 当前账号额度读取失败: ${error.message}`);
     }
     if (accountManager.store.list().length > 0) {
@@ -115,6 +125,9 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
         case "oauth-add":
           accountManager.beginOAuthLogin();
           break;
+        case "oauth-cancel":
+          accountManager.cancelOAuthLogin();
+          break;
         case "token-add":
           await accountManager.importTokenInput(action.token);
           break;
@@ -131,7 +144,6 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
           await accountManager.refreshAllWithOperation();
           appServer.close();
           appServer = new AppServerClient();
-          fallbackQuota = null;
           await runQuotaRefresh({ repeatIfRunning: true });
           break;
         case "switch-account":
@@ -159,7 +171,14 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
     }
   }
 
-  await runQuotaRefresh();
+  if (once) {
+    await runQuotaRefresh();
+  } else {
+    accountManager.startOfficialCredentialWatch(() => {
+      void runQuotaRefresh({ repeatIfRunning: true });
+    });
+    void runQuotaRefresh();
+  }
   while (!stopped) {
     if (!cdp?.isConnected && !restartingCodex) {
       const codexRunning = await isCodexRunning();
@@ -167,7 +186,7 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
         hasSeenCodexProcess = true;
       } else if (hasSeenCodexProcess || Date.now() >= startupDeadline) {
         console.log("[lifecycle] Codex 已退出，注入器同步停止");
-        stopAndExit();
+        await stopAndExit();
         break;
       }
     }
