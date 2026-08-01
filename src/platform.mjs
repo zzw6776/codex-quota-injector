@@ -10,6 +10,7 @@ const MACOS_EXECUTABLES = [
   "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
   "/Applications/Codex.app/Contents/MacOS/Codex",
 ];
+const MACOS_CODEX_BUNDLE_ID = "com.openai.codex";
 const WINDOWS_EXECUTABLE_NAMES = ["ChatGPT.exe", "Codex.exe"];
 
 let cachedCodexExecutable = null;
@@ -222,8 +223,12 @@ export async function launchCodex(port) {
   ];
 
   if (process.platform === "darwin") {
-    const appRoot = executable.slice(0, executable.lastIndexOf("/Contents/MacOS/"));
-    await execFileAsync("/usr/bin/open", ["-na", appRoot, "--args", ...args]);
+    await execFileAsync("/usr/bin/open", [
+      "-b",
+      MACOS_CODEX_BUNDLE_ID,
+      "--args",
+      ...args,
+    ]);
     return;
   }
 
@@ -253,6 +258,15 @@ Start-Process -FilePath $target -ArgumentList @(${argumentList}) -ErrorAction St
 export async function restartCodex(port) {
   await stopCodex();
   await launchCodex(port);
+  if (process.platform !== "darwin") return;
+  if (await waitForCodexDebugPort(port)) return;
+
+  console.warn("[launcher] Codex 首次启动未开放调试端口，正在重新启动");
+  await stopCodex();
+  await launchCodex(port);
+  if (await waitForCodexDebugPort(port)) return;
+
+  throw new Error(`Codex 启动后未能开放调试端口 ${port}`);
 }
 
 async function listInjectorProcessIds() {
@@ -425,6 +439,22 @@ async function exists(path) {
   } catch {
     return false;
   }
+}
+
+async function waitForCodexDebugPort(port, { timeoutMs = 10_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+        signal: AbortSignal.timeout(1_000),
+      });
+      if (response.ok) return true;
+    } catch {
+      // Codex may still be starting.
+    }
+    await delay(250);
+  }
+  return false;
 }
 
 function delay(ms) {

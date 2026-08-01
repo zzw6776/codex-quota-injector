@@ -254,16 +254,26 @@ export class AccountManager {
 
       let account = this.store.get(accountId);
       if (!account) throw new Error("目标账号不存在，请刷新列表");
-      account = await this.#withAccountLock(account.id, async () => {
-        const latest = this.store.get(account.id);
-        if (!latest) throw new Error("目标账号不存在，请刷新列表");
-        if (latest.authStatus === "needsReauth") {
-          throw new Error(`${latest.email} 的登录凭证已失效，需要重新授权后才能切换`);
+      try {
+        account = await this.#withAccountLock(account.id, async () => {
+          const latest = this.store.get(account.id);
+          if (!latest) throw new Error("目标账号不存在，请刷新列表");
+          if (latest.authStatus === "needsReauth") {
+            throw new Error(`${latest.email} 的登录凭证已失效，需要重新授权后才能切换`);
+          }
+          return latest.authMode === "oauth"
+            ? await this.#ensureFreshTokens(latest, { refreshIfExpirationUnknown: true })
+            : latest;
+        });
+      } catch (error) {
+        if (isPermanentRefreshError(error)) {
+          await this.store.update(account.id, {
+            authStatus: "needsReauth",
+            quotaError: `登录凭证已失效，需要重新授权（${error.code ?? error.message}）`,
+          });
         }
-        return latest.authMode === "oauth"
-          ? this.#ensureFreshTokens(latest, { refreshIfExpirationUnknown: true })
-          : latest;
-      });
+        throw error;
+      }
       await writeOfficialCredentials(this.codexHome, account);
       await this.store.setCurrent(account.id);
       return `已切换到 ${account.email}`;
