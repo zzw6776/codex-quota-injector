@@ -1,5 +1,6 @@
 import { AccountManager } from "./account-manager.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
+import { CodexContextManager } from "./codex-context.mjs";
 import { isCodexRunning, restartCodex } from "./platform.mjs";
 import {
   widgetDrainActionsExpression,
@@ -14,7 +15,9 @@ const STARTUP_GRACE_MS = 30_000;
 
 export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
   const accountManager = new AccountManager();
+  const contextManager = new CodexContextManager();
   await accountManager.initialize();
+  await contextManager.initialize();
   let cdp = null;
   let targetId = null;
   let lastPushedJson = null;
@@ -94,9 +97,13 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
       await cdp.connect();
       targetId = target.id;
       lastPushedJson = null;
+      await contextManager.refresh();
     }
     await cdp.evaluate(widgetInstallExpression());
-    const viewModel = accountManager.getViewModel();
+    const viewModel = {
+      ...accountManager.getViewModel(),
+      context: contextManager.getViewModel(),
+    };
     const viewJson = JSON.stringify(viewModel);
     if (viewJson !== lastPushedJson) {
       await cdp.evaluate(widgetUpdateExpression(viewModel));
@@ -129,6 +136,22 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
         case "refresh-all":
           await accountManager.refreshAllWithOperation();
           break;
+        case "context-refresh":
+          await contextManager.refresh();
+          break;
+        case "context-save":
+          await contextManager.setOverride(
+            action.slug,
+            action.contextWindow,
+            action.maxContextWindow,
+          );
+          break;
+        case "context-reset":
+          await contextManager.resetOverride(action.slug);
+          break;
+        case "context-reset-all":
+          await contextManager.resetAll();
+          break;
         case "switch-account":
           restartingCodex = true;
           try {
@@ -147,6 +170,9 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
           console.error(`[action] 未知操作: ${action?.type ?? "empty"}`);
       }
     } catch (error) {
+      if (String(action?.type ?? "").startsWith("context-")) {
+        contextManager.setError(error.message);
+      }
       console.error(`[action] ${error.message}`);
     }
   }

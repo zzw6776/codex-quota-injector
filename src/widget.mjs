@@ -13,12 +13,18 @@ export function installQuotaWidget(
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
   const PLACEHOLDER_ID = "codex-quota-injector-placeholder";
-  const VERSION = 15;
+  const VERSION = 23;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
   const state = {
-    data: { accounts: [], windows: [], currentAccountId: null, operation: null },
+    data: {
+      accounts: [],
+      windows: [],
+      currentAccountId: null,
+      operation: null,
+      context: { status: "unavailable", models: [], overriddenCount: 0 },
+    },
     dataJson: "",
     root: null,
     placeholder: null,
@@ -30,6 +36,8 @@ export function installQuotaWidget(
     dismissed: false,
     hoverTimer: null,
     actions: [],
+    page: "accounts",
+    contextEditingSlug: null,
   };
 
   const styleText = `
@@ -55,6 +63,7 @@ export function installQuotaWidget(
     .quota-popover {
       position: fixed; left: 12px; bottom: 58px; width: min(430px, calc(100vw - 24px));
       max-height: 720px; overflow: auto;
+      overflow-anchor: none;
       padding: 14px; border-radius: 16px;
       color: var(--token-foreground, #f4f4f7); background: var(--token-main-surface-primary, #191923);
       border: 1px solid var(--token-border, rgba(255,255,255,.09));
@@ -63,6 +72,7 @@ export function installQuotaWidget(
       transform-origin: right bottom; pointer-events: none;
       transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
     }
+    .quota-popover.context-popover { width: min(620px, calc(100vw - 24px)); }
     .quota-wrap:hover .quota-popover, .quota-wrap:focus-within .quota-popover,
     .quota-wrap.is-open .quota-popover, .quota-wrap.is-hover-grace .quota-popover {
       opacity: 1; visibility: visible; transform: translateY(0) scale(1); pointer-events: auto;
@@ -72,6 +82,8 @@ export function installQuotaWidget(
     }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 1px 2px 10px; }
     .panel-title { font-size: 14px; font-weight: 700; }
+    .panel-title-wrap { display: flex; align-items: center; min-width: 0; gap: 7px; }
+    .panel-subtitle { margin-top: 3px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
     .panel-count { margin-left: 6px; color: var(--token-text-secondary, #aaaab5); font-size: 12px; font-weight: 500; }
     .icon-btn { appearance: none; width: 26px; height: 26px; border: 0; border-radius: 8px; cursor: pointer; color: inherit; background: transparent; }
     .icon-btn:hover { background: rgba(255,255,255,.07); }
@@ -116,6 +128,38 @@ export function installQuotaWidget(
     textarea { min-height: 70px; resize: vertical; }
     input:focus, textarea:focus { border-color: rgba(217,184,255,.4); }
     .quota-error { margin-top: 7px; color: #ef8e86; font-size: 10px; }
+    .context-summary { display: grid; gap: 6px; margin-bottom: 10px; padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
+    .context-status { font-size: 12px; font-weight: 650; }
+    .context-status.system-default { color: #7ecb9b; }
+    .context-status.applied { color: #d9b8ff; }
+    .context-status.pending { color: #e5b86a; }
+    .context-status.external { color: #e5b86a; }
+    .context-status.unavailable { color: #ef8e86; }
+    .context-note { color: var(--token-text-secondary, #aaaab5); font-size: 10px; line-height: 15px; }
+    .context-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: var(--token-text-secondary, #aaaab5); font-size: 11px; }
+    .context-toolbar-actions { display: flex; align-items: center; gap: 6px; }
+    .model-list { display: grid; gap: 7px; }
+    .model-card { padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
+    .model-card.overridden { border-color: rgba(217,184,255,.3); background: rgba(217,184,255,.055); }
+    .model-head { display: flex; align-items: center; justify-content: space-between; gap: 9px; }
+    .model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+    .model-slug { margin-top: 2px; color: var(--token-text-secondary, #aaaab5); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .model-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 5px; }
+    .model-values { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
+    .model-value { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 7px; background: rgba(0,0,0,.12); font-size: 10px; }
+    .model-value span { color: var(--token-text-secondary, #aaaab5); }
+    .model-value strong { font-variant-numeric: tabular-nums; }
+    .model-max { margin-top: 5px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .context-edit-form { display: grid; gap: 8px; margin-top: 9px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,.07); }
+    .context-edit-form[hidden] { display: none !important; }
+    .context-field { display: grid; gap: 4px; }
+    .context-field label { color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .context-field input { font-variant-numeric: tabular-nums; }
+    .context-advanced { border: 1px solid rgba(255,255,255,.07); border-radius: 8px; }
+    .context-advanced summary { padding: 6px 8px; }
+    .context-advanced .context-field { padding: 0 8px 8px; }
+    .context-edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
+    .context-empty { padding: 22px 10px; text-align: center; color: var(--token-text-secondary, #aaaab5); font-size: 11px; }
     .quota-wrap.is-light .quota-popover { color: #202124; background: #fff; border-color: rgba(0,0,0,.12); box-shadow: 0 16px 44px rgba(0,0,0,.18); }
     .quota-wrap.is-light .account-card { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
     .quota-wrap.is-light .account-card.current { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
@@ -132,6 +176,10 @@ export function installQuotaWidget(
     .quota-wrap.is-light .add-panel, .quota-wrap.is-light details { border-color: rgba(0,0,0,.09); }
     .quota-wrap.is-light input, .quota-wrap.is-light textarea { color: #202124; border-color: rgba(0,0,0,.13); background: rgba(0,0,0,.025); }
     .quota-wrap.is-light .operation { color: #666670; background: rgba(0,0,0,.04); }
+    .quota-wrap.is-light .context-summary, .quota-wrap.is-light .model-card { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
+    .quota-wrap.is-light .model-card.overridden { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
+    .quota-wrap.is-light .model-value { background: rgba(0,0,0,.04); }
+    .quota-wrap.is-light .context-edit-form, .quota-wrap.is-light .context-advanced { border-color: rgba(0,0,0,.09); }
   `;
 
   function findProfileButton() {
@@ -185,6 +233,9 @@ export function installQuotaWidget(
   function render() {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (!wrap) return;
+    const previousPopover = wrap.querySelector(".quota-popover");
+    const previousScrollTop = previousPopover?.scrollTop ?? 0;
+    const previousScrollLeft = previousPopover?.scrollLeft ?? 0;
     wrap.classList.toggle("is-light", isLightTheme());
     wrap.classList.toggle("is-open", state.pinned);
     wrap.classList.toggle("is-dismissed", state.dismissed);
@@ -203,10 +254,12 @@ export function installQuotaWidget(
       ? `<div class="operation ${escapeHtml(state.data.operation.state)} ${oauthCancellable ? "has-action" : ""}"><span>${escapeHtml(state.data.operation.message)}</span>${oauthCancellable ? '<button class="btn oauth-cancel" type="button">取消授权</button>' : ""}</div>`
       : "";
     const busy = state.data.operation?.state === "loading";
-    wrap.innerHTML = `
-      <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
-      <section class="quota-popover" aria-label="Codex 账号与额度">
-        <header class="panel-head"><div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+    const contextPage = state.page === "context";
+    const popoverClass = contextPage ? "quota-popover context-popover" : "quota-popover";
+    const popoverContent = contextPage
+      ? renderContextPage(busy)
+      : `
+        <header class="panel-head"><div class="panel-title-wrap"><div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div><button class="icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文">⚙</button></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
         <div class="account-list">${accountHtml}</div>
         ${operation}
         <section class="add-panel">
@@ -217,10 +270,66 @@ export function installQuotaWidget(
             <details><summary>Token / JSON</summary><form class="token-form"><textarea name="token" autocomplete="off" placeholder="粘贴 auth.json、tokens JSON、access token 或 refresh token" required ${busy ? "disabled" : ""}></textarea><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>导入 Token</button></form></details>
             <details><summary>API Key</summary><form class="api-key-form"><input name="name" placeholder="账号名称（可选）" ${busy ? "disabled" : ""}><input name="apiKey" type="password" autocomplete="off" placeholder="OpenAI API Key" required ${busy ? "disabled" : ""}><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>添加 API Key</button></form></details>
           </div>
-        </section>
-      </section>`;
+        </section>`;
+    wrap.innerHTML = `
+      <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
+      <section class="${popoverClass}" aria-label="${contextPage ? "Codex 模型上下文" : "Codex 账号与额度"}">${popoverContent}</section>`;
+    const nextPopover = wrap.querySelector(".quota-popover");
+    if (nextPopover) {
+      nextPopover.scrollTop = previousScrollTop;
+      nextPopover.scrollLeft = previousScrollLeft;
+    }
     positionWidget();
     bindEvents(wrap);
+  }
+
+  function renderContextPage(busy) {
+    const context = state.data.context ?? {};
+    const models = Array.isArray(context.models) ? context.models : [];
+    const orphanedCount = Number(context.orphanedCount) || 0;
+    const status = String(context.status ?? "unavailable");
+    const statusText = {
+      "system-default": "使用系统默认值",
+      applied: "已写入配置，重启后生效",
+      pending: "覆盖值待加载",
+      external: "检测到其他模型目录",
+      unavailable: "无法读取系统模型目录",
+    }[status] ?? "状态未知";
+    const contextNote = status === "external"
+      ? "Codex 当前指向其他模型目录。本工具不会自动合并或接管，请先恢复 Codex 官方模型目录。"
+      : `默认值来自 Codex 当前模型目录。只有主动保存的模型才会生成覆盖值；修改后需要重启 Codex 才能加载。${orphanedCount ? `有 ${orphanedCount} 条覆盖记录对应的模型已不存在，可用“恢复全部默认”清理。` : ""}`;
+    const statusMessage = context.message
+      ? `<div class="operation ${context.messageState === "error" ? "error" : "success"}">${escapeHtml(context.message)}</div>`
+      : "";
+    const modelHtml = models.length
+      ? models.map(renderContextModel).join("")
+      : '<div class="context-empty">没有可展示的模型目录</div>';
+    return `
+      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn context-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">模型上下文</div><div class="panel-subtitle">${models.length} 个模型 · 已覆盖 ${Number(context.overriddenCount) || 0} 个${orphanedCount ? ` · ${orphanedCount} 个模型已不存在` : ""}</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+      <section class="context-summary"><div class="context-status ${escapeHtml(status)}">${statusText}</div><div class="context-note">${contextNote}</div></section>
+      <div class="context-toolbar"><span>系统默认值与当前配置值</span><span class="context-toolbar-actions"><button class="btn context-refresh" type="button" ${busy ? "disabled" : ""}>刷新</button><button class="btn context-reset-all" type="button" ${busy || !Number(context.overriddenCount) ? "disabled" : ""}>恢复全部默认</button></span></div>
+      <div class="model-list">${modelHtml}</div>
+      ${statusMessage}`;
+  }
+
+  function renderContextModel(model) {
+    const editing = state.contextEditingSlug === model.slug;
+    return `<article class="model-card ${model.overridden ? "overridden" : ""}">
+      <div class="model-head"><div class="model-name-wrap"><div class="model-name" title="${escapeHtml(model.displayName)}">${escapeHtml(model.displayName)}</div><div class="model-slug">${escapeHtml(model.slug)}</div></div><div class="model-actions"><span class="badge ${model.overridden ? "current" : ""}">${model.overridden ? "已覆盖" : "系统默认"}</span><button class="btn context-edit-open" type="button" data-slug="${escapeHtml(model.slug)}">${editing ? "收起" : "修改"}</button></div></div>
+      <div class="model-values"><div class="model-value"><span>系统默认上下文</span><strong>${formatContextValue(model.defaultContextWindow)}</strong></div><div class="model-value"><span>当前配置上下文</span><strong>${formatContextValue(model.effectiveContextWindow)}</strong></div></div>
+      <div class="model-max">最大上下文：系统 ${formatContextValue(model.defaultMaxContextWindow)} · 配置 ${formatContextValue(model.effectiveMaxContextWindow)}</div>
+      ${renderContextEditForm(model, !editing)}
+    </article>`;
+  }
+
+  function renderContextEditForm(model, hidden) {
+    const contextValue = model.effectiveContextWindow ?? "";
+    const maxContextValue = model.effectiveMaxContextWindow ?? "";
+    return `<form class="context-edit-form" data-slug="${escapeHtml(model.slug)}" data-max-context-window="${escapeHtml(maxContextValue)}"${hidden ? " hidden" : ""}>
+      <div class="context-field"><label>上下文窗口</label><input name="contextWindow" type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(contextValue)}" required></div>
+      <details class="context-advanced"><summary>高级：单独设置最大上下文窗口</summary><div class="context-field"><label>最大上下文窗口</label><input name="maxContextWindow" type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(maxContextValue)}" required></div></details>
+      <div class="context-edit-actions"><button class="btn context-edit-cancel" type="button">取消</button>${model.overridden ? '<button class="btn context-reset" type="button">恢复系统默认</button>' : ""}<button class="btn primary" type="submit">保存覆盖值</button></div>
+    </form>`;
   }
 
   function positionWidget() {
@@ -305,6 +414,59 @@ export function installQuotaWidget(
     wrap.querySelector(".close-panel")?.addEventListener("click", () => {
       dismissPanel();
     });
+    wrap.querySelector(".context-open")?.addEventListener("click", () => {
+      state.page = "context";
+      state.contextEditingSlug = null;
+      state.pinned = true;
+      state.dismissed = false;
+      render();
+    });
+    wrap.querySelector(".context-back")?.addEventListener("click", () => {
+      state.page = "accounts";
+      state.contextEditingSlug = null;
+      render();
+    });
+    wrap.querySelector(".context-refresh")?.addEventListener("click", () => enqueue({ type: "context-refresh" }));
+    wrap.querySelector(".context-reset-all")?.addEventListener("click", () => {
+      state.contextEditingSlug = null;
+      enqueue({ type: "context-reset-all" });
+    });
+    wrap.querySelectorAll(".context-edit-open").forEach((button) => button.addEventListener("click", () => {
+      const form = button.closest(".model-card")?.querySelector(".context-edit-form");
+      const open = Boolean(form?.hidden);
+      state.contextEditingSlug = open ? button.dataset.slug : null;
+      setContextEditorOpen(form, open);
+    }));
+    wrap.querySelectorAll(".context-edit-cancel").forEach((button) => button.addEventListener("click", () => {
+      const form = button.closest(".context-edit-form");
+      state.contextEditingSlug = null;
+      setContextEditorOpen(form, false);
+    }));
+    wrap.querySelectorAll(".context-reset").forEach((button) => button.addEventListener("click", (event) => {
+      const form = event.currentTarget.closest(".context-edit-form");
+      state.contextEditingSlug = null;
+      setContextEditorOpen(form, false);
+      enqueue({ type: "context-reset", slug: form?.dataset.slug });
+    }));
+    wrap.querySelectorAll(".context-edit-form").forEach((form) => form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const fields = new FormData(event.currentTarget);
+      const contextWindow = Number(fields.get("contextWindow"));
+      const currentMaxContextWindow = Number(event.currentTarget.dataset.maxContextWindow);
+      const enteredMaxContextWindow = Number(fields.get("maxContextWindow"));
+      const maxFieldChanged = enteredMaxContextWindow !== currentMaxContextWindow;
+      const maxContextWindow = maxFieldChanged
+        ? enteredMaxContextWindow
+        : Math.max(currentMaxContextWindow || contextWindow, contextWindow);
+      state.contextEditingSlug = null;
+      setContextEditorOpen(event.currentTarget, false);
+      enqueue({
+        type: "context-save",
+        slug: event.currentTarget.dataset.slug,
+        contextWindow,
+        maxContextWindow,
+      });
+    }));
     wrap.querySelectorAll(".switch-account").forEach((button) => button.addEventListener("click", () => enqueue({ type: "switch-account", accountId: button.dataset.accountId })));
     wrap.querySelector(".oauth-add")?.addEventListener("click", () => enqueue({ type: "oauth-add" }));
     wrap.querySelector(".oauth-cancel")?.addEventListener("click", () => enqueue({ type: "oauth-cancel" }));
@@ -323,6 +485,13 @@ export function installQuotaWidget(
     });
   }
 
+  function setContextEditorOpen(form, open) {
+    if (!form) return;
+    form.hidden = !open;
+    const button = form.closest(".model-card")?.querySelector(".context-edit-open");
+    if (button) button.textContent = open ? "收起" : "修改";
+  }
+
   function enqueue(action) {
     state.actions.push({ ...action, id: `${Date.now()}-${Math.random().toString(16).slice(2)}` });
     state.dismissed = false;
@@ -333,6 +502,8 @@ export function installQuotaWidget(
     clearHoverGrace();
     state.pinned = false;
     state.dismissed = true;
+    state.page = "accounts";
+    state.contextEditingSlug = null;
     const wrap = state.shadow?.querySelector(".quota-wrap");
     wrap?.classList.remove("is-open");
     wrap?.classList.add("is-dismissed");
@@ -399,6 +570,16 @@ export function installQuotaWidget(
     if (Number(remaining) < 10) return "is-critical";
     if (Number(remaining) < 20) return "is-warning";
     return "";
+  }
+
+  function formatContextValue(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "未声明";
+    if (number >= 1_000_000) {
+      return `${(number / 1_000_000).toFixed(2).replace(/\.00$/, "")}M`;
+    }
+    if (number >= 1_000) return `${Math.round(number / 1_000)}K`;
+    return String(Math.round(number));
   }
 
   function number(value) {
