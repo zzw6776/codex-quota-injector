@@ -12,7 +12,7 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const VERSION = 29;
+  const VERSION = 40;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -23,6 +23,8 @@ export function installQuotaWidget(
       currentAccountId: null,
       operation: null,
       context: { status: "unavailable", models: [], overriddenCount: 0 },
+      deepSeek: { enabled: false, apiKey: "", balance: null },
+      tokenUsage: { status: "ready", turns: [] },
     },
     dataJson: "",
     root: null,
@@ -36,6 +38,12 @@ export function installQuotaWidget(
     actions: [],
     page: "accounts",
     contextEditingSlug: null,
+    deepSeekKeyDraft: null,
+    deepSeekEnabledDraft: null,
+    deepSeekSubmittedKey: null,
+    conversationRenderFrame: null,
+    conversationTooltip: null,
+    conversationTooltipTarget: null,
   };
 
   const styleText = `
@@ -71,6 +79,7 @@ export function installQuotaWidget(
       transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
     }
     .quota-popover.context-popover { width: min(620px, calc(100vw - 24px)); }
+    .quota-popover.provider-popover { width: min(520px, calc(100vw - 24px)); }
     .quota-wrap:focus-within .quota-popover,
     .quota-wrap.is-open .quota-popover, .quota-wrap.is-hover-grace .quota-popover {
       opacity: 1; visibility: visible; transform: translateY(0) scale(1); pointer-events: auto;
@@ -80,11 +89,25 @@ export function installQuotaWidget(
     }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 1px 2px 10px; }
     .panel-title { font-size: 14px; font-weight: 700; }
-    .panel-title-wrap { display: flex; align-items: center; min-width: 0; gap: 7px; }
+    .panel-title-wrap { display: flex; align-items: baseline; min-width: 0; gap: 7px; }
     .panel-subtitle { margin-top: 3px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
     .panel-count { margin-left: 6px; color: var(--token-text-secondary, #aaaab5); font-size: 12px; font-weight: 500; }
     .icon-btn { appearance: none; width: 26px; height: 26px; border: 0; border-radius: 8px; cursor: pointer; color: inherit; background: transparent; }
     .icon-btn:hover { background: rgba(255,255,255,.07); }
+    .provider-icon-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 0; color: var(--token-text-secondary, #777780);
+      background: transparent;
+      font: 650 11px/1 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: -.35px;
+    }
+    .provider-icon-btn:hover, .provider-icon-btn:focus-visible {
+      color: inherit; background: rgba(255,255,255,.07); outline: none;
+    }
+    .accounts-head { align-items: baseline; }
+    .accounts-head .icon-btn {
+      display: inline-block; height: auto; padding: 5px 0; line-height: 1; transform: none;
+    }
     .account-list { display: grid; gap: 8px; }
     .account-card { padding: 11px 12px; border: 1px solid rgba(255,255,255,.07); border-radius: 12px; background: rgba(255,255,255,.025); }
     .account-card.current { border-color: rgba(217,184,255,.33); background: rgba(217,184,255,.055); }
@@ -160,6 +183,26 @@ export function installQuotaWidget(
     .context-advanced .context-field { padding: 0 8px 8px; }
     .context-edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
     .context-empty { padding: 22px 10px; text-align: center; color: var(--token-text-secondary, #aaaab5); font-size: 11px; }
+    .provider-summary { display: grid; gap: 6px; margin-bottom: 10px; padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
+    .provider-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 650; }
+    .provider-status .enabled { color: #7ecb9b; }
+    .provider-status .disabled { color: var(--token-text-secondary, #aaaab5); }
+    .provider-note { color: var(--token-text-secondary, #aaaab5); font-size: 10px; line-height: 15px; }
+    .provider-form { display: grid; gap: 9px; padding: 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
+    .provider-field { display: grid; gap: 5px; }
+    .provider-field label { color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .provider-key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .provider-toggle { display: flex; align-items: center; gap: 7px; font-size: 11px; }
+    .provider-toggle input { width: auto; margin: 0; }
+    .provider-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+    .provider-warning { color: #e5b86a; font-size: 10px; line-height: 15px; }
+    .balance-section { margin-top: 10px; }
+    .balance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; font-size: 11px; }
+    .balance-grid { display: grid; gap: 7px; }
+    .balance-card { padding: 9px 10px; border: 1px solid rgba(255,255,255,.07); border-radius: 10px; background: rgba(255,255,255,.025); }
+    .balance-currency { color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .balance-total { margin-top: 3px; font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .balance-detail { margin-top: 4px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
     .quota-wrap.is-light .quota-popover { color: #202124; background: #fff; border-color: rgba(0,0,0,.12); box-shadow: 0 16px 44px rgba(0,0,0,.18); }
     .quota-wrap.is-light .account-card { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
     .quota-wrap.is-light .account-card.current { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
@@ -175,10 +218,18 @@ export function installQuotaWidget(
     .quota-wrap.is-light .account-remove { color: #b53d35; border-color: rgba(181,61,53,.2); background: rgba(181,61,53,.045); }
     .quota-wrap.is-light .account-remove:hover { background: rgba(181,61,53,.09); }
     .quota-wrap.is-light .icon-btn:hover { background: rgba(0,0,0,.06); }
+    .quota-wrap.is-light .provider-icon-btn {
+      color: #70717c; background: transparent;
+    }
+    .quota-wrap.is-light .provider-icon-btn:hover, .quota-wrap.is-light .provider-icon-btn:focus-visible {
+      color: #363740; background: rgba(0,0,0,.06);
+    }
     .quota-wrap.is-light .add-panel, .quota-wrap.is-light details { border-color: rgba(0,0,0,.09); }
     .quota-wrap.is-light input, .quota-wrap.is-light textarea { color: #202124; border-color: rgba(0,0,0,.13); background: rgba(0,0,0,.025); }
     .quota-wrap.is-light .operation { color: #666670; background: rgba(0,0,0,.04); }
-    .quota-wrap.is-light .context-summary, .quota-wrap.is-light .model-card { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
+    .quota-wrap.is-light .context-summary, .quota-wrap.is-light .model-card,
+    .quota-wrap.is-light .provider-summary, .quota-wrap.is-light .provider-form,
+    .quota-wrap.is-light .balance-card { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
     .quota-wrap.is-light .model-card.overridden { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
     .quota-wrap.is-light .model-value { background: rgba(0,0,0,.04); }
     .quota-wrap.is-light .context-edit-form, .quota-wrap.is-light .context-advanced { border-color: rgba(0,0,0,.09); }
@@ -261,11 +312,18 @@ export function installQuotaWidget(
       : "";
     const busy = state.data.operation?.state === "loading";
     const contextPage = state.page === "context";
-    const popoverClass = contextPage ? "quota-popover context-popover" : "quota-popover";
+    const providerPage = state.page === "provider";
+    const popoverClass = contextPage
+      ? "quota-popover context-popover"
+      : providerPage
+        ? "quota-popover provider-popover"
+        : "quota-popover";
     const popoverContent = contextPage
       ? renderContextPage(busy)
-      : `
-        <header class="panel-head"><div class="panel-title-wrap"><div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div><button class="icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文">⚙</button></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+      : providerPage
+        ? renderProviderPage()
+        : `
+        <header class="panel-head accounts-head"><div class="panel-title-wrap"><div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div><button class="icon-btn provider-icon-btn provider-open" type="button" aria-label="DeepSeek 设置" title="DeepSeek 设置"><span aria-hidden="true">DS</span></button><button class="icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文">⚙</button></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
         <div class="account-list">${accountHtml}</div>
         ${operation}
         <section class="add-panel">
@@ -279,7 +337,7 @@ export function installQuotaWidget(
         </section>`;
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : "Codex 账号与额度"}">${popoverContent}</section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : providerPage ? "DeepSeek 设置" : "Codex 账号与额度"}">${popoverContent}</section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       nextPopover.showPopover();
@@ -288,6 +346,233 @@ export function installQuotaWidget(
     }
     positionPopover(wrap);
     bindEvents(wrap);
+    scheduleConversationTokenUsageRender();
+  }
+
+  function scheduleConversationTokenUsageRender() {
+    if (state.conversationRenderFrame != null) return;
+    state.conversationRenderFrame = window.requestAnimationFrame(() => {
+      state.conversationRenderFrame = null;
+      renderConversationTokenUsage();
+    });
+  }
+
+  function renderConversationTokenUsage() {
+    const usageItems = Array.isArray(state.data.tokenUsage?.turns)
+      ? state.data.tokenUsage.turns
+      : [];
+    const turnNodes = new Map([...document.querySelectorAll("[data-content-search-turn-key]")]
+      .map((node) => [node.getAttribute("data-content-search-turn-key"), node]));
+    const visibleTurnIds = new Set();
+
+    for (const usage of usageItems) {
+      const turnId = String(usage?.turnId ?? "");
+      const turnNode = turnNodes.get(turnId);
+      if (!turnId || !turnNode || !usage?.completed || Number(usage.totalTokens) <= 0) continue;
+      visibleTurnIds.add(turnId);
+      const host = turnNode.firstElementChild ?? turnNode;
+      let line = turnNode.querySelector("[data-codex-token-usage]");
+      if (!line) {
+        line = document.createElement("div");
+        line.setAttribute("data-codex-token-usage", turnId);
+        line.setAttribute("role", "status");
+        line.setAttribute("tabindex", "0");
+        line.style.cssText = [
+          "align-self:flex-start",
+          "margin-top:6px",
+          "max-width:100%",
+          "color:var(--color-token-text-tertiary, #777780)",
+          "font:500 11px/16px ui-sans-serif,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+          "font-variant-numeric:tabular-nums",
+          "white-space:normal",
+          "overflow-wrap:anywhere",
+          "opacity:.82",
+          "user-select:text",
+        ].join(";");
+        line.addEventListener("pointerenter", () => showConversationTokenTooltip(line));
+        line.addEventListener("pointerleave", () => hideConversationTokenTooltip(line));
+        line.addEventListener("focus", () => showConversationTokenTooltip(line));
+        line.addEventListener("blur", () => hideConversationTokenTooltip(line));
+        host.append(line);
+      }
+      line.__codexTokenUsage = usage;
+      const cost = usage.cost ?? {};
+      const costSummary = cost.available
+        ? `${cost.label ?? "本轮费用"} ${formatCny(cost.totalCny)}`
+        : "费用暂不可算";
+      const summary = [
+        `本轮 Token ${formatTokenCount(usage.totalTokens)}`,
+        `输入 ${formatTokenCount(usage.inputTokens)}`,
+        `缓存输入 ${formatTokenCount(usage.cachedInputTokens)}`,
+        `输出 ${formatTokenCount(usage.outputTokens)}`,
+        `累计 ${formatTokenCount(usage.cumulativeTotalTokens)}`,
+        costSummary,
+      ].join(" · ");
+      if (line.textContent !== summary) line.textContent = summary;
+      line.removeAttribute("title");
+      const accessibilitySummary = `${summary}；缓存写入 ${formatTokenCount(usage.cacheWriteInputTokens)}；推理输出 ${formatTokenCount(usage.reasoningOutputTokens)}`;
+      if (line.getAttribute("aria-label") !== accessibilitySummary) {
+        line.setAttribute("aria-label", accessibilitySummary);
+      }
+    }
+
+    document.querySelectorAll("[data-codex-token-usage]").forEach((line) => {
+      if (!visibleTurnIds.has(line.getAttribute("data-codex-token-usage"))) {
+        hideConversationTokenTooltip(line);
+        line.remove();
+      }
+    });
+  }
+
+  function showConversationTokenTooltip(line) {
+    const usage = line?.__codexTokenUsage;
+    if (!usage) return;
+    const tooltip = ensureConversationTokenTooltip();
+    const lightTheme = isLightTheme();
+    tooltip.style.background = lightTheme ? "#fff" : "#24242d";
+    tooltip.style.color = lightTheme ? "#202124" : "#f4f4f7";
+    tooltip.style.boxShadow = lightTheme
+      ? "0 10px 28px rgba(0,0,0,.18)"
+      : "0 10px 28px rgba(0,0,0,.38)";
+    const cost = usage.cost ?? {};
+    const ordinaryInputTokens = Math.max(
+      0,
+      Number(usage.inputTokens || 0) - Number(usage.cachedInputTokens || 0) -
+        Number(usage.cacheWriteInputTokens || 0),
+    );
+    tooltip.replaceChildren();
+
+    const header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:8px;font-weight:650";
+    const title = document.createElement("span");
+    title.textContent = cost.normalizedModel || cost.requestedModel || usage.model || "Token 费用明细";
+    const total = document.createElement("strong");
+    total.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
+    total.textContent = cost.available
+      ? `${cost.label ?? "本轮费用"} ${formatCny(cost.totalCny)}`
+      : "费用暂不可算";
+    header.append(title, total);
+    tooltip.append(header);
+
+    const rows = document.createElement("div");
+    rows.style.cssText = "display:grid;gap:5px;padding:7px 0;border-top:1px solid rgba(127,127,127,.2);border-bottom:1px solid rgba(127,127,127,.2)";
+    appendConversationTooltipRow(rows, "普通输入", ordinaryInputTokens, cost, "ordinaryInput");
+    appendConversationTooltipRow(rows, "缓存输入", usage.cachedInputTokens, cost, "cachedInput");
+    appendConversationTooltipRow(rows, "缓存写入", usage.cacheWriteInputTokens, cost, "cacheWriteInput");
+    appendConversationTooltipRow(rows, "输出", usage.outputTokens, cost, "output");
+    appendConversationTooltipRow(
+      rows,
+      "推理输出",
+      usage.reasoningOutputTokens,
+      cost,
+      "reasoningOutput",
+      "已包含在输出费用中",
+    );
+    tooltip.append(rows);
+
+    const cumulative = document.createElement("div");
+    cumulative.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-top:7px;font-weight:650";
+    const cumulativeLabel = document.createElement("span");
+    cumulativeLabel.textContent = "累计费用";
+    const cumulativeAmount = document.createElement("strong");
+    cumulativeAmount.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
+    cumulativeAmount.textContent = cost.cumulativeAvailable
+      ? formatCny(cost.cumulativeCny)
+      : "暂不可算";
+    cumulative.append(cumulativeLabel, cumulativeAmount);
+    tooltip.append(cumulative);
+
+    const footer = document.createElement("div");
+    footer.style.cssText = "display:grid;gap:2px;margin-top:7px;color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px;line-height:15px";
+    const pricing = document.createElement("span");
+    if (cost.provider === "openai") {
+      const tiers = Array.isArray(cost.contextTiers) && cost.contextTiers.includes("long")
+        ? "包含长上下文请求"
+        : "短上下文";
+      pricing.textContent = `OpenAI 标准 API 价格 · ${tiers}`;
+    } else if (cost.provider === "deepseek") {
+      pricing.textContent = "DeepSeek API 官方价格 · 每百万 Token 计价";
+    } else {
+      pricing.textContent = cost.reason || "当前模型没有可用价格";
+    }
+    footer.append(pricing);
+    if (cost.exchangeRate) {
+      const exchange = document.createElement("span");
+      exchange.textContent = `汇率 1 USD = ${formatExchangeRate(cost.exchangeRate.rate)} CNY · ${cost.exchangeRate.date} · ${cost.exchangeRate.source}${cost.exchangeRate.fallback ? "（内置备用值）" : ""}`;
+      footer.append(exchange);
+    }
+    tooltip.append(footer);
+
+    state.conversationTooltipTarget = line;
+    tooltip.hidden = false;
+    tooltip.style.visibility = "hidden";
+    positionConversationTokenTooltip(line, tooltip);
+    tooltip.style.visibility = "visible";
+  }
+
+  function appendConversationTooltipRow(container, label, tokens, cost, component, note = "") {
+    const row = document.createElement("div");
+    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:16px";
+    const name = document.createElement("span");
+    name.style.cssText = "color:var(--color-token-text-secondary,#b2b2bc)";
+    name.textContent = `${label} ${formatTokenCount(tokens)}`;
+    const amount = document.createElement("span");
+    amount.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
+    amount.textContent = cost.available
+      ? `${formatCny(cost.componentsCny?.[component])}${note ? `（${note}）` : ""}`
+      : "暂不可算";
+    row.append(name, amount);
+    container.append(row);
+  }
+
+  function ensureConversationTokenTooltip() {
+    if (state.conversationTooltip?.isConnected) return state.conversationTooltip;
+    const tooltip = document.createElement("div");
+    tooltip.id = "codex-token-usage-tooltip";
+    tooltip.setAttribute("data-codex-token-usage-tooltip", "");
+    tooltip.setAttribute("role", "tooltip");
+    tooltip.hidden = true;
+    tooltip.style.cssText = [
+      "position:fixed",
+      "z-index:2147483647",
+      "width:max-content",
+      "min-width:320px",
+      "max-width:min(420px,calc(100vw - 24px))",
+      "padding:10px 12px",
+      "border:1px solid rgba(127,127,127,.25)",
+      "border-radius:10px",
+      "background:var(--color-token-bg-primary,var(--token-main-surface-primary,#24242d))",
+      "color:var(--color-token-text-primary,var(--token-foreground,#f4f4f7))",
+      "box-shadow:0 10px 28px rgba(0,0,0,.28)",
+      "font:500 11px/16px ui-sans-serif,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+      "pointer-events:none",
+      "user-select:none",
+    ].join(";");
+    document.body.append(tooltip);
+    state.conversationTooltip = tooltip;
+    return tooltip;
+  }
+
+  function positionConversationTokenTooltip(line, tooltip = state.conversationTooltip) {
+    if (!line?.isConnected || !tooltip?.isConnected || tooltip.hidden) return;
+    const lineRect = line.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = Math.max(
+      12,
+      Math.min(window.innerWidth - tooltipRect.width - 12, lineRect.left),
+    );
+    const above = lineRect.top - tooltipRect.height - 8;
+    const top = above >= 12
+      ? above
+      : Math.min(window.innerHeight - tooltipRect.height - 12, lineRect.bottom + 8);
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.max(12, Math.round(top))}px`;
+  }
+
+  function hideConversationTokenTooltip(line = null) {
+    if (line && state.conversationTooltipTarget !== line) return;
+    if (state.conversationTooltip) state.conversationTooltip.hidden = true;
+    state.conversationTooltipTarget = null;
   }
 
   function renderContextPage(busy) {
@@ -317,6 +602,37 @@ export function installQuotaWidget(
       <div class="context-toolbar"><span>系统默认值与当前配置值</span><span class="context-toolbar-actions"><button class="btn context-refresh" type="button" ${busy ? "disabled" : ""}>刷新</button><button class="btn context-reset-all" type="button" ${busy || !Number(context.overriddenCount) ? "disabled" : ""}>恢复全部默认</button></span></div>
       <div class="model-list">${modelHtml}</div>
       ${statusMessage}`;
+  }
+
+  function renderProviderPage() {
+    const provider = state.data.deepSeek ?? {};
+    const key = state.deepSeekKeyDraft ?? provider.apiKey ?? "";
+    const enabled = state.deepSeekEnabledDraft ?? Boolean(provider.enabled);
+    const configured = Boolean(provider.apiKey);
+    const supported = provider.supported !== false;
+    const pendingRestart = Boolean(provider.pendingRestart);
+    const balanceItems = Array.isArray(provider.balance?.items) ? provider.balance.items : [];
+    const balanceHtml = balanceItems.length
+      ? balanceItems.map((item) => `<div class="balance-card"><div class="balance-currency">${escapeHtml(item.currency)}</div><div class="balance-total">${escapeHtml(item.totalBalance)}</div><div class="balance-detail">赠送余额 ${escapeHtml(item.grantedBalance)} · 充值余额 ${escapeHtml(item.toppedUpBalance)}</div></div>`).join("")
+      : `<div class="context-empty">${configured ? "暂无可用余额数据" : "保存 API Key 后可查询余额"}</div>`;
+    const statusMessage = provider.message
+      ? `<div class="operation ${provider.messageState === "error" ? "error" : "success"}">${escapeHtml(provider.message)}</div>`
+      : "";
+    const balanceError = provider.balanceError
+      ? `<div class="quota-error">${escapeHtml(provider.balanceError)}（保留上次成功余额）</div>`
+      : "";
+    return `
+      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn provider-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">DeepSeek 模型</div><div class="panel-subtitle">${escapeHtml(provider.model?.displayName ?? "DeepSeek V4 Flash")} · 推理深度 low / high / max</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+      <section class="provider-summary"><div class="provider-status"><span class="${provider.enabled ? "enabled" : "disabled"}">${provider.enabled ? "已启用" : "未启用"}</span><span class="badge">${escapeHtml(provider.model?.slug ?? "deepseek-v4-flash")}</span></div><div class="provider-note">启用后，OpenAI 官方模型和 DeepSeek 会同时出现在模型列表。供应商在新建任务时确定，同一任务不能中途切换。</div></section>
+      <form class="provider-form">
+        <label class="provider-toggle"><input name="enabled" type="checkbox" ${enabled ? "checked" : ""} ${supported && !pendingRestart ? "" : "disabled"}>在模型列表中启用 DeepSeek</label>
+        <div class="provider-field"><label>DeepSeek API Key（本地明文保存并完整回显）</label><input class="provider-key" name="apiKey" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(key)}" placeholder="sk-..." ${supported && !pendingRestart ? "" : "disabled"}></div>
+        <div class="provider-warning">Key 保存在 ${escapeHtml(provider.settingsPath ?? "本地 provider-settings.json")}；不会写入系统安全存储。保存、停用或删除后都会重启 Codex。</div>
+        <div class="provider-actions"><button class="btn deepseek-remove" type="button" ${configured && !pendingRestart ? "" : "disabled"}>删除并重启 Codex</button><button class="btn primary" type="submit" ${supported && !pendingRestart ? "" : "disabled"}>保存并重启 Codex</button></div>
+        ${supported ? "" : '<div class="quota-error">DeepSeek 模型共存当前仅支持 macOS。</div>'}
+      </form>
+      ${statusMessage}
+      <section class="balance-section"><div class="balance-head"><span>账户余额${provider.balance ? ` · ${provider.balance.available ? "账户可用" : "账户不可用"}` : ""} · ${escapeHtml(formatUpdatedAt(provider.balanceUpdatedAt))}</span><button class="btn deepseek-refresh-balance" type="button" ${!configured || provider.balanceRefreshing ? "disabled" : ""}>${provider.balanceRefreshing ? "查询中" : "查询余额"}</button></div><div class="balance-grid">${balanceHtml}</div>${balanceError}</section>`;
   }
 
   function renderContextModel(model) {
@@ -425,11 +741,47 @@ export function installQuotaWidget(
       state.dismissed = false;
       render();
     });
+    wrap.querySelector(".provider-open")?.addEventListener("click", () => {
+      state.page = "provider";
+      state.deepSeekKeyDraft = state.data.deepSeek?.apiKey ?? "";
+      state.deepSeekEnabledDraft = Boolean(state.data.deepSeek?.enabled);
+      state.pinned = true;
+      state.dismissed = false;
+      render();
+    });
     wrap.querySelector(".context-back")?.addEventListener("click", () => {
       state.page = "accounts";
       state.contextEditingSlug = null;
       render();
     });
+    wrap.querySelector(".provider-back")?.addEventListener("click", () => {
+      state.page = "accounts";
+      render();
+    });
+    wrap.querySelector(".provider-key")?.addEventListener("input", (event) => {
+      state.deepSeekKeyDraft = event.currentTarget.value;
+    });
+    wrap.querySelector('.provider-form input[name="enabled"]')?.addEventListener("change", (event) => {
+      state.deepSeekEnabledDraft = event.currentTarget.checked;
+    });
+    wrap.querySelector(".provider-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const apiKey = String(form.get("apiKey") ?? "");
+      const enabled = form.get("enabled") === "on";
+      state.deepSeekKeyDraft = apiKey;
+      state.deepSeekEnabledDraft = enabled;
+      state.deepSeekSubmittedKey = apiKey.trim();
+      enqueue({ type: "deepseek-save", apiKey, enabled });
+    });
+    wrap.querySelector(".deepseek-remove")?.addEventListener("click", () => {
+      if (!window.confirm("确定删除本地保存的完整 DeepSeek API Key 并重启 Codex？")) return;
+      state.deepSeekKeyDraft = "";
+      state.deepSeekEnabledDraft = false;
+      state.deepSeekSubmittedKey = "";
+      enqueue({ type: "deepseek-remove" });
+    });
+    wrap.querySelector(".deepseek-refresh-balance")?.addEventListener("click", () => enqueue({ type: "deepseek-refresh-balance" }));
     wrap.querySelector(".context-refresh")?.addEventListener("click", () => enqueue({ type: "context-refresh" }));
     wrap.querySelector(".context-reset-all")?.addEventListener("click", () => {
       state.contextEditingSlug = null;
@@ -592,6 +944,30 @@ export function installQuotaWidget(
     return String(Math.round(number));
   }
 
+  function formatTokenCount(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return "0.00M";
+    return `${(number / 1_000_000).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 3,
+    })}M`;
+  }
+
+  function formatCny(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return "¥0.000000";
+    const digits = number >= 1 ? 2 : number >= 0.01 ? 4 : 6;
+    return `¥${number.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}`;
+  }
+
+  function formatExchangeRate(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number.toFixed(4) : "未知";
+  }
+
   function number(value) {
     return Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
   }
@@ -600,11 +976,17 @@ export function installQuotaWidget(
     return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   }
 
-  state.observer = new MutationObserver(() => ensureMounted());
+  state.observer = new MutationObserver(() => {
+    ensureMounted();
+    scheduleConversationTokenUsageRender();
+  });
   state.observer.observe(document.documentElement, { childList: true, subtree: true });
   state.resizeHandler = () => {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (wrap) positionPopover(wrap);
+    if (state.conversationTooltipTarget) {
+      positionConversationTokenTooltip(state.conversationTooltipTarget);
+    }
   };
   state.documentPointerHandler = (event) => {
     if (state.root && event.composedPath().includes(state.root)) return;
@@ -619,6 +1001,12 @@ export function installQuotaWidget(
     update(data) {
       const json = JSON.stringify(data ?? {});
       if (json === state.dataJson) return;
+      if (state.deepSeekSubmittedKey != null &&
+        String(data?.deepSeek?.apiKey ?? "") === state.deepSeekSubmittedKey) {
+        state.deepSeekKeyDraft = null;
+        state.deepSeekEnabledDraft = null;
+        state.deepSeekSubmittedKey = null;
+      }
       state.dataJson = json;
       state.data = data ?? state.data;
       ensureMounted();
@@ -630,8 +1018,16 @@ export function installQuotaWidget(
     destroy() {
       state.observer?.disconnect();
       clearHoverGrace();
+      if (state.conversationRenderFrame != null) {
+        window.cancelAnimationFrame(state.conversationRenderFrame);
+        state.conversationRenderFrame = null;
+      }
       window.removeEventListener("resize", state.resizeHandler);
       document.removeEventListener("pointerdown", state.documentPointerHandler, true);
+      document.querySelectorAll("[data-codex-token-usage]").forEach((line) => line.remove());
+      state.conversationTooltip?.remove();
+      state.conversationTooltip = null;
+      state.conversationTooltipTarget = null;
       state.root?.remove();
       delete window[GLOBAL_KEY];
     },

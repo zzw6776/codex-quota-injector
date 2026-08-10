@@ -1,8 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -77,6 +77,21 @@ export async function resolveCodexExecutable({ refresh = false } = {}) {
   }
   cachedCodexExecutable = resolved;
   return resolved;
+}
+
+export async function resolveCodexCliExecutable() {
+  if (process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI) {
+    const overridden = resolve(process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI);
+    if (await exists(overridden)) return overridden;
+    throw new Error(`指定的 Codex CLI 不存在: ${overridden}`);
+  }
+  if (process.platform !== "darwin") {
+    throw new Error("DeepSeek 模型共存目前仅支持 macOS Codex 客户端");
+  }
+  const appExecutable = await resolveCodexExecutable({ refresh: true });
+  const candidate = join(dirname(dirname(appExecutable)), "Resources", "codex");
+  if (!await exists(candidate)) throw new Error(`Codex App Server 可执行文件不存在: ${candidate}`);
+  return candidate;
 }
 
 export async function listCodexProcessIds() {
@@ -215,7 +230,7 @@ export async function stopCodex({ timeoutMs = 10_000 } = {}) {
   throw new Error("Codex 进程未能在超时内退出");
 }
 
-export async function launchCodex(port) {
+export async function launchCodex(port, { env = {} } = {}) {
   const executable = await resolveCodexExecutable({ refresh: true });
   const args = [
     "--remote-debugging-address=127.0.0.1",
@@ -226,6 +241,7 @@ export async function launchCodex(port) {
     await execFileAsync("/usr/bin/open", [
       "-b",
       MACOS_CODEX_BUNDLE_ID,
+      ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
       "--args",
       ...args,
     ]);
@@ -255,18 +271,30 @@ Start-Process -FilePath $target -ArgumentList @(${argumentList}) -ErrorAction St
   throw new Error("Codex 启动仅支持 macOS 和 Windows");
 }
 
-export async function restartCodex(port) {
+export async function restartCodex(port, options = {}) {
   await stopCodex();
-  await launchCodex(port);
+  await launchCodex(port, options);
   if (process.platform !== "darwin") return;
   if (await waitForCodexDebugPort(port)) return;
 
   console.warn("[launcher] Codex 首次启动未开放调试端口，正在重新启动");
   await stopCodex();
-  await launchCodex(port);
+  await launchCodex(port, options);
   if (await waitForCodexDebugPort(port)) return;
 
   throw new Error(`Codex 启动后未能开放调试端口 ${port}`);
+}
+
+export async function isRelayStateCurrent(path, generation) {
+  try {
+    const state = JSON.parse(await readFile(path, "utf8"));
+    if (generation != null && state?.generation !== generation) return false;
+    if (!Number.isInteger(state?.pid)) return false;
+    process.kill(state.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function listInjectorProcessIds() {

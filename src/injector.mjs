@@ -1,7 +1,10 @@
 import { AccountManager } from "./account-manager.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { CodexContextManager } from "./codex-context.mjs";
+import { prepareCodexLaunch } from "./codex-bridge.mjs";
+import { DeepSeekManager } from "./deepseek-manager.mjs";
 import { isCodexRunning, restartCodex } from "./platform.mjs";
+import { TokenUsageManager } from "./token-usage.mjs";
 import {
   widgetDrainActionsExpression,
   widgetInstallExpression,
@@ -11,13 +14,25 @@ import {
 const DEFAULT_PORT = 9229;
 const TARGET_POLL_MS = 1_500;
 const QUOTA_REFRESH_MS = 60_000;
+const DEEPSEEK_BALANCE_REFRESH_MS = 5 * 60_000;
 const STARTUP_GRACE_MS = 30_000;
 
-export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
-  const accountManager = new AccountManager();
-  const contextManager = new CodexContextManager();
+export async function runInjector({
+  port = DEFAULT_PORT,
+  once = false,
+  accountManager = new AccountManager(),
+  contextManager = new CodexContextManager(),
+  deepSeekManager = new DeepSeekManager(),
+  tokenUsageManager = new TokenUsageManager(),
+  managersInitialized = false,
+  prepareLaunch = () => prepareCodexLaunch({ deepSeekManager, contextManager }),
+} = {}) {
   await accountManager.initialize();
-  await contextManager.initialize();
+  await tokenUsageManager.initialize();
+  if (!managersInitialized) {
+    await contextManager.initialize();
+    await deepSeekManager.initialize();
+  }
   let cdp = null;
   let targetId = null;
   let lastPushedJson = null;
@@ -29,14 +44,18 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
   let quotaRefreshTimer = null;
   let quotaRefreshPromise = null;
   let quotaRefreshRequested = false;
+  let deepSeekBalanceTimer = null;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
 
   const stop = () => {
     stopped = true;
     clearTimeout(quotaRefreshTimer);
+    clearTimeout(deepSeekBalanceTimer);
     quotaRefreshTimer = null;
     cdp?.close();
     accountManager.close();
+    deepSeekManager.close();
+    tokenUsageManager.close();
   };
   const stopAndExit = async () => {
     if (stopping) return;
@@ -100,9 +119,12 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
       await contextManager.refresh();
     }
     await cdp.evaluate(widgetInstallExpression());
+    await tokenUsageManager.refresh();
     const viewModel = {
       ...accountManager.getViewModel(),
       context: contextManager.getViewModel(),
+      deepSeek: deepSeekManager.getViewModel(),
+      tokenUsage: tokenUsageManager.getViewModel(),
     };
     const viewJson = JSON.stringify(viewModel);
     if (viewJson !== lastPushedJson) {
@@ -155,11 +177,22 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
         case "context-reset-all":
           await contextManager.resetAll();
           break;
+        case "deepseek-save":
+          await deepSeekManager.save({ apiKey: action.apiKey, enabled: action.enabled });
+          await restartForConfigurationChange();
+          break;
+        case "deepseek-remove":
+          await deepSeekManager.remove();
+          await restartForConfigurationChange();
+          break;
+        case "deepseek-refresh-balance":
+          await deepSeekManager.refreshBalance();
+          break;
         case "switch-account":
           restartingCodex = true;
           try {
             await accountManager.switchAccount(action.accountId);
-            await restartCodex(port);
+            await restartCodex(port, await prepareLaunch());
             cdp?.close();
             cdp = null;
             targetId = null;
@@ -176,8 +209,42 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
       if (String(action?.type ?? "").startsWith("context-")) {
         contextManager.setError(error.message);
       }
+      if (String(action?.type ?? "").startsWith("deepseek-") &&
+        action?.type !== "deepseek-refresh-balance") {
+        deepSeekManager.setError(error.message);
+      }
       console.error(`[action] ${error.message}`);
     }
+  }
+
+  async function restartForConfigurationChange() {
+    restartingCodex = true;
+    try {
+      await restartCodex(port, await prepareLaunch());
+      deepSeekManager.markRestarted();
+      scheduleDeepSeekBalanceRefresh();
+      cdp?.close();
+      cdp = null;
+      targetId = null;
+      lastPushedJson = null;
+    } finally {
+      restartingCodex = false;
+    }
+  }
+
+  function scheduleDeepSeekBalanceRefresh() {
+    clearTimeout(deepSeekBalanceTimer);
+    const deepSeek = deepSeekManager.getViewModel();
+    if (stopped || !deepSeek.enabled || !deepSeek.configured) return;
+    deepSeekBalanceTimer = setTimeout(async () => {
+      try {
+        await deepSeekManager.refreshBalance();
+      } catch (error) {
+        console.error(`[deepseek-balance] ${error.message}`);
+      } finally {
+        scheduleDeepSeekBalanceRefresh();
+      }
+    }, DEEPSEEK_BALANCE_REFRESH_MS);
   }
 
   if (once) {
@@ -187,6 +254,13 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
       void runQuotaRefresh({ repeatIfRunning: true });
     });
     void runQuotaRefresh();
+    const deepSeek = deepSeekManager.getViewModel();
+    if (deepSeek.enabled && deepSeek.configured) {
+      void deepSeekManager.refreshBalance().catch((error) => {
+        console.error(`[deepseek-balance] ${error.message}`);
+      });
+      scheduleDeepSeekBalanceRefresh();
+    }
   }
   while (!stopped) {
     if (!cdp?.isConnected && !restartingCodex) {

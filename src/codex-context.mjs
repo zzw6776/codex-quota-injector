@@ -94,6 +94,23 @@ export class CodexContextManager {
     };
   }
 
+  getEffectiveCatalog() {
+    if (!isUsableCatalog(this.catalog)) return null;
+    return {
+      ...this.catalog,
+      models: this.catalog.models.map((model) => {
+        const override = this.overrides[model?.slug];
+        return override
+          ? {
+              ...model,
+              context_window: override.contextWindow,
+              max_context_window: override.maxContextWindow,
+            }
+          : model;
+      }),
+    };
+  }
+
   async setOverride(slug, contextWindow, maxContextWindow = contextWindow) {
     return this.#withLock(async () => {
       await this.#refreshOnce({ sync: false });
