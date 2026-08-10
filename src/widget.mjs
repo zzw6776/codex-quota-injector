@@ -12,8 +12,7 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const PLACEHOLDER_ID = "codex-quota-injector-placeholder";
-  const VERSION = 23;
+  const VERSION = 27;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -27,7 +26,6 @@ export function installQuotaWidget(
     },
     dataJson: "",
     root: null,
-    placeholder: null,
     shadow: null,
     observer: null,
     resizeHandler: null,
@@ -41,7 +39,7 @@ export function installQuotaWidget(
   };
 
   const styleText = `
-    :host { display: inline-flex; position: fixed; z-index: 2147483000; }
+    :host { display: inline-flex; flex: 0 0 auto; align-items: center; }
     * { box-sizing: border-box; }
     button, input, textarea { font: inherit; }
     .quota-wrap { position: relative; display: inline-flex; align-items: center; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -109,6 +107,8 @@ export function installQuotaWidget(
     .btn.primary { border-color: rgba(217,184,255,.24); color: #e5cdfd; background: rgba(217,184,255,.1); }
     .btn:disabled { cursor: default; opacity: .45; }
     .account-switch { padding: 2px 7px; border-radius: 999px; line-height: 16px; white-space: nowrap; }
+    .account-remove { padding: 2px 7px; border-radius: 999px; line-height: 16px; white-space: nowrap; color: #ef8e86; border-color: rgba(220,76,63,.2); background: rgba(220,76,63,.06); }
+    .account-remove:hover { background: rgba(220,76,63,.12); }
     .empty { padding: 18px 8px; text-align: center; color: var(--token-text-secondary, #aaaab5); font-size: 12px; }
     .operation { margin-top: 9px; padding: 8px 10px; border-radius: 9px; overflow-wrap: anywhere; background: rgba(255,255,255,.045); color: var(--token-text-secondary, #b5b5bf); font-size: 11px; }
     .operation.has-action { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -172,6 +172,8 @@ export function installQuotaWidget(
     .quota-wrap.is-light .btn { color: #2f3035; border-color: rgba(0,0,0,.12); background: rgba(0,0,0,.025); }
     .quota-wrap.is-light .btn:hover { background: rgba(0,0,0,.065); }
     .quota-wrap.is-light .btn.primary { color: #71438e; border-color: rgba(116,69,143,.28); background: rgba(116,69,143,.08); }
+    .quota-wrap.is-light .account-remove { color: #b53d35; border-color: rgba(181,61,53,.2); background: rgba(181,61,53,.045); }
+    .quota-wrap.is-light .account-remove:hover { background: rgba(181,61,53,.09); }
     .quota-wrap.is-light .icon-btn:hover { background: rgba(0,0,0,.06); }
     .quota-wrap.is-light .add-panel, .quota-wrap.is-light details { border-color: rgba(0,0,0,.09); }
     .quota-wrap.is-light input, .quota-wrap.is-light textarea { color: #202124; border-color: rgba(0,0,0,.13); background: rgba(0,0,0,.025); }
@@ -197,22 +199,18 @@ export function installQuotaWidget(
 
   function ensureMounted() {
     const profileButton = findProfileButton();
-    if (!profileButton?.parentElement) return false;
-    let placeholder = document.getElementById(PLACEHOLDER_ID);
-    if (!placeholder) {
-      placeholder = document.createElement("span");
-      placeholder.id = PLACEHOLDER_ID;
-      placeholder.setAttribute("aria-hidden", "true");
-      placeholder.style.cssText = "display:inline-block;flex:0 0 auto;width:22px;height:22px;pointer-events:none";
-      profileButton.after(placeholder);
+    const profileRow = profileButton?.parentElement;
+    if (!profileRow) {
+      detachRoot();
+      return false;
     }
-    state.placeholder = placeholder;
-    if (state.root?.isConnected) {
+    if (state.root?.isConnected && state.root.parentElement === profileRow) {
       const wrap = state.shadow?.querySelector(".quota-wrap");
       wrap?.classList.toggle("is-light", isLightTheme());
-      positionWidget();
+      if (wrap) positionPopover(wrap);
       return true;
     }
+    detachRoot();
     document.getElementById(ROOT_ID)?.remove();
     const root = document.createElement("span");
     root.id = ROOT_ID;
@@ -223,11 +221,19 @@ export function installQuotaWidget(
     const wrap = document.createElement("span");
     wrap.className = "quota-wrap";
     shadow.append(style, wrap);
-    document.body.append(root);
+    profileButton.after(root);
     state.root = root;
     state.shadow = shadow;
     render();
     return true;
+  }
+
+  function detachRoot() {
+    if (!state.root) return;
+    dismissPanel();
+    state.root.remove();
+    state.root = null;
+    state.shadow = null;
   }
 
   function render() {
@@ -279,7 +285,7 @@ export function installQuotaWidget(
       nextPopover.scrollTop = previousScrollTop;
       nextPopover.scrollLeft = previousScrollLeft;
     }
-    positionWidget();
+    positionPopover(wrap);
     bindEvents(wrap);
   }
 
@@ -332,21 +338,6 @@ export function installQuotaWidget(
     </form>`;
   }
 
-  function positionWidget() {
-    const placeholder = state.placeholder;
-    const root = state.root;
-    const wrap = state.shadow?.querySelector(".quota-wrap");
-    const chip = wrap?.querySelector(".quota-chip");
-    if (!placeholder?.isConnected || !root?.isConnected || !wrap || !chip) return;
-    const chipRect = chip.getBoundingClientRect();
-    const chipWidth = Math.max(22, chipRect.width);
-    placeholder.style.width = `${chipWidth}px`;
-    const anchor = placeholder.getBoundingClientRect();
-    root.style.left = `${anchor.left}px`;
-    root.style.top = `${anchor.top + Math.max(0, (anchor.height - chipRect.height) / 2)}px`;
-    positionPopover(wrap);
-  }
-
   function positionPopover(wrap) {
     const chip = wrap.querySelector(".quota-chip");
     const popover = wrap.querySelector(".quota-popover");
@@ -376,8 +367,9 @@ export function installQuotaWidget(
       : needsReauth
         ? '<span class="badge">需要重新授权</span>'
         : `<button class="btn primary account-switch switch-account" type="button" data-account-id="${escapeHtml(account.id)}" ${busy ? "disabled" : ""}>切换到此账号</button>`;
+    const removeControl = `<button class="btn account-remove remove-account" type="button" data-account-id="${escapeHtml(account.id)}" data-account-email="${escapeHtml(account.email)}" title="${account.current ? "当前账号请先切换后再移除" : "移除本工具保存的账号凭据"}" ${busy || account.current ? "disabled" : ""}>移除</button>`;
     return `<article class="account-card ${account.current ? "current" : ""}">
-      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}${switchControl}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
+      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}${switchControl}${removeControl}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
       <div class="expiry account-meta"><span>订阅：${escapeHtml(expiry)}</span><span>最后刷新：${escapeHtml(updatedAt)}</span></div>
       ${quotaHtml}
       ${account.quotaError ? `<div class="quota-error">刷新异常：${escapeHtml(account.quotaError)}</div>` : ""}
@@ -468,6 +460,12 @@ export function installQuotaWidget(
       });
     }));
     wrap.querySelectorAll(".switch-account").forEach((button) => button.addEventListener("click", () => enqueue({ type: "switch-account", accountId: button.dataset.accountId })));
+    wrap.querySelectorAll(".remove-account").forEach((button) => button.addEventListener("click", () => {
+      const email = button.dataset.accountEmail || "该账号";
+      if (!window.confirm(`确定移除 ${email}？\n\n将删除本工具保存的账号凭据，不会注销 OpenAI 账号。`)) return;
+      button.disabled = true;
+      enqueue({ type: "remove-account", accountId: button.dataset.accountId });
+    }));
     wrap.querySelector(".oauth-add")?.addEventListener("click", () => enqueue({ type: "oauth-add" }));
     wrap.querySelector(".oauth-cancel")?.addEventListener("click", () => enqueue({ type: "oauth-cancel" }));
     wrap.querySelector(".local-import")?.addEventListener("click", () => enqueue({ type: "local-import" }));
@@ -593,7 +591,8 @@ export function installQuotaWidget(
   state.observer = new MutationObserver(() => ensureMounted());
   state.observer.observe(document.documentElement, { childList: true, subtree: true });
   state.resizeHandler = () => {
-    positionWidget();
+    const wrap = state.shadow?.querySelector(".quota-wrap");
+    if (wrap) positionPopover(wrap);
   };
   state.documentPointerHandler = (event) => {
     if (state.root && event.composedPath().includes(state.root)) return;
@@ -622,7 +621,6 @@ export function installQuotaWidget(
       window.removeEventListener("resize", state.resizeHandler);
       document.removeEventListener("pointerdown", state.documentPointerHandler, true);
       state.root?.remove();
-      state.placeholder?.remove();
       delete window[GLOBAL_KEY];
     },
   };

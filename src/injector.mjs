@@ -136,6 +136,9 @@ export async function runInjector({ port = DEFAULT_PORT, once = false } = {}) {
         case "refresh-all":
           await accountManager.refreshAllWithOperation();
           break;
+        case "remove-account":
+          await accountManager.removeAccount(action.accountId);
+          break;
         case "context-refresh":
           await contextManager.refresh();
           break;

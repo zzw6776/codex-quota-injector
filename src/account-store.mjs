@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -27,7 +27,7 @@ export class AccountStore {
   async initialize() {
     await mkdir(this.accountsDir, { recursive: true, mode: 0o700 });
     const loaded = await this.#loadOwnData();
-    if (!loaded || this.accounts.size === 0) {
+    if (!loaded || (this.accounts.size === 0 && this.index.accounts.length > 0)) {
       await this.#importCockpitData();
     }
     return this.snapshot();
@@ -72,6 +72,33 @@ export class AccountStore {
         id: accountId,
       });
     });
+  }
+
+  async remove(accountId) {
+    return this.#enqueueWrite(() => this.#removeOnce(accountId));
+  }
+
+  async #removeOnce(accountId) {
+    const account = this.accounts.get(accountId);
+    if (!account) throw new Error(`账号不存在: ${accountId}`);
+    if (accountId === this.index.currentAccountId) {
+      throw new Error("当前账号不能移除，请先切换到其他账号");
+    }
+
+    this.accounts.delete(accountId);
+    try {
+      await this.#writeIndex();
+      await removeFile(join(this.accountsDir, `${safeFileId(accountId)}.json`));
+    } catch (error) {
+      this.accounts.set(accountId, account);
+      try {
+        await this.#writeIndex();
+      } catch (rollbackError) {
+        error.message = `${error.message}（回滚失败：${rollbackError.message}）`;
+      }
+      throw error;
+    }
+    return structuredClone(account);
   }
 
   async #upsertOnce(account) {
@@ -387,6 +414,14 @@ async function readJson(path) {
     return JSON.parse(await readFile(path, "utf8"));
   } catch {
     return null;
+  }
+}
+
+async function removeFile(path) {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
   }
 }
 

@@ -280,6 +280,19 @@ export class AccountManager {
     });
   }
 
+  async removeAccount(accountId) {
+    return this.#withOperation("正在移除账号…", async () => {
+      await this.syncCurrentAccountFromOfficialCredentials();
+      const account = this.store.get(accountId);
+      if (!account) throw new Error("目标账号不存在，请刷新列表");
+      if (accountId === this.store.index.currentAccountId) {
+        throw new Error("当前账号不能移除，请先切换到其他账号");
+      }
+      await this.#withAccountLock(accountId, () => this.store.remove(accountId));
+      return `已移除 ${account.email}`;
+    });
+  }
+
   clearOperationAfter(ms = 4_000) {
     const current = this.operation;
     if (!current) return;
