@@ -12,7 +12,7 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const VERSION = 27;
+  const VERSION = 28;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -59,7 +59,7 @@ export function installQuotaWidget(
     .is-warning { color: #d97706 !important; }
     .is-critical { color: #dc4c3f !important; }
     .quota-popover {
-      position: fixed; left: 12px; bottom: 58px; width: min(430px, calc(100vw - 24px));
+      position: fixed; inset: auto auto 58px 12px; margin: 0; width: min(430px, calc(100vw - 24px));
       max-height: 720px; overflow: auto;
       overflow-anchor: none;
       padding: 14px; border-radius: 16px;
@@ -279,9 +279,10 @@ export function installQuotaWidget(
         </section>`;
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
-      <section class="${popoverClass}" aria-label="${contextPage ? "Codex 模型上下文" : "Codex 账号与额度"}">${popoverContent}</section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : "Codex 账号与额度"}">${popoverContent}</section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
+      nextPopover.showPopover();
       nextPopover.scrollTop = previousScrollTop;
       nextPopover.scrollLeft = previousScrollLeft;
     }
