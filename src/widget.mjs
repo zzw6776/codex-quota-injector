@@ -12,7 +12,7 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const VERSION = 28;
+  const VERSION = 29;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -71,7 +71,7 @@ export function installQuotaWidget(
       transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
     }
     .quota-popover.context-popover { width: min(620px, calc(100vw - 24px)); }
-    .quota-wrap:hover .quota-popover, .quota-wrap:focus-within .quota-popover,
+    .quota-wrap:focus-within .quota-popover,
     .quota-wrap.is-open .quota-popover, .quota-wrap.is-hover-grace .quota-popover {
       opacity: 1; visibility: visible; transform: translateY(0) scale(1); pointer-events: auto;
     }
@@ -383,11 +383,16 @@ export function installQuotaWidget(
   }
 
   function bindEvents(wrap) {
-    wrap.onpointerenter = () => clearHoverGrace();
-    wrap.onpointerleave = () => {
-      if (state.pinned || state.dismissed) return;
-      clearHoverGrace();
+    const holdHover = () => {
+      if (state.hoverTimer != null) {
+        window.clearTimeout(state.hoverTimer);
+        state.hoverTimer = null;
+      }
       wrap.classList.add("is-hover-grace");
+    };
+    const releaseHover = () => {
+      if (state.pinned || state.dismissed) return;
+      if (state.hoverTimer != null) window.clearTimeout(state.hoverTimer);
       state.hoverTimer = window.setTimeout(() => {
         state.hoverTimer = null;
         wrap.classList.remove("is-hover-grace");
@@ -395,10 +400,16 @@ export function installQuotaWidget(
     };
     const chip = wrap.querySelector(".quota-chip");
     chip?.addEventListener("pointerenter", () => {
-      if (!state.dismissed) return;
-      state.dismissed = false;
-      wrap.classList.remove("is-dismissed");
+      if (state.dismissed) {
+        state.dismissed = false;
+        wrap.classList.remove("is-dismissed");
+      }
+      holdHover();
     });
+    chip?.addEventListener("pointerleave", releaseHover);
+    const popover = wrap.querySelector(".quota-popover");
+    popover?.addEventListener("pointerenter", holdHover);
+    popover?.addEventListener("pointerleave", releaseHover);
     chip?.addEventListener("click", () => {
       state.dismissed = false;
       state.pinned = !state.pinned;
