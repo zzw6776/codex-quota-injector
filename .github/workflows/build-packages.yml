@@ -119,17 +119,54 @@ jobs:
 
       - name: Install NSIS
         shell: pwsh
-        run: choco install nsis --yes --no-progress
+        run: |
+          $ErrorActionPreference = "Stop"
+          $makensisPath = $null
+          $programFilesX86 = ${env:ProgramFiles(x86)}
+          $candidatePaths = @(
+            (Join-Path $programFilesX86 "NSIS\makensis.exe"),
+            (Join-Path $env:ProgramFiles "NSIS\makensis.exe")
+          )
+
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install nsis --yes --no-progress
+            $chocoExitCode = $LASTEXITCODE
+
+            $command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+            if ($chocoExitCode -eq 0 -and $command) {
+              $makensisPath = $command.Source
+              break
+            }
+
+            $makensisPath = $candidatePaths |
+              Where-Object { Test-Path -LiteralPath $_ } |
+              Select-Object -First 1
+            if ($makensisPath) { break }
+
+            if ($attempt -lt 3) {
+              Start-Sleep -Seconds ($attempt * 10)
+            }
+          }
+
+          if (-not $makensisPath) {
+            throw "NSIS 安装失败或找不到 makensis.exe"
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "MAKENSIS_PATH=$makensisPath"
+          Write-Host "Using NSIS compiler: $makensisPath"
 
       - name: Package Windows installer
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          if (-not $env:MAKENSIS_PATH -or -not (Test-Path -LiteralPath $env:MAKENSIS_PATH)) {
+            throw "MAKENSIS_PATH 未设置或文件不存在"
+          }
           npm run package:windows -- `
             --input-executable "build/native/Codex Quota Injector.exe" `
             --node-license "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/LICENSE" `
             --output-dir "release/windows" `
-            --makensis "C:\Program Files (x86)\NSIS\makensis.exe"
+            --makensis "$env:MAKENSIS_PATH"
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
