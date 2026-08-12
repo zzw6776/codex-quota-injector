@@ -12,7 +12,7 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const VERSION = 40;
+  const VERSION = 47;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -43,7 +43,9 @@ export function installQuotaWidget(
     deepSeekSubmittedKey: null,
     conversationRenderFrame: null,
     conversationTooltip: null,
+    conversationTooltipBridge: null,
     conversationTooltipTarget: null,
+    conversationTooltipPointer: null,
   };
 
   const styleText = `
@@ -389,8 +391,11 @@ export function installQuotaWidget(
           "opacity:.82",
           "user-select:text",
         ].join(";");
-        line.addEventListener("pointerenter", () => showConversationTokenTooltip(line));
-        line.addEventListener("pointerleave", () => hideConversationTokenTooltip(line));
+        line.addEventListener("pointerenter", (event) => showConversationTokenTooltip(line, event));
+        line.addEventListener("pointermove", (event) => moveConversationTokenTooltip(line, event));
+        line.addEventListener("pointerleave", (event) => {
+          if (!isConversationTooltipArea(event.relatedTarget)) hideConversationTokenTooltip(line);
+        });
         line.addEventListener("focus", () => showConversationTokenTooltip(line));
         line.addEventListener("blur", () => hideConversationTokenTooltip(line));
         host.append(line);
@@ -424,7 +429,7 @@ export function installQuotaWidget(
     });
   }
 
-  function showConversationTokenTooltip(line) {
+  function showConversationTokenTooltip(line, event = null) {
     const usage = line?.__codexTokenUsage;
     if (!usage) return;
     const tooltip = ensureConversationTokenTooltip();
@@ -435,11 +440,6 @@ export function installQuotaWidget(
       ? "0 10px 28px rgba(0,0,0,.18)"
       : "0 10px 28px rgba(0,0,0,.38)";
     const cost = usage.cost ?? {};
-    const ordinaryInputTokens = Math.max(
-      0,
-      Number(usage.inputTokens || 0) - Number(usage.cachedInputTokens || 0) -
-        Number(usage.cacheWriteInputTokens || 0),
-    );
     tooltip.replaceChildren();
 
     const header = document.createElement("div");
@@ -456,18 +456,69 @@ export function installQuotaWidget(
 
     const rows = document.createElement("div");
     rows.style.cssText = "display:grid;gap:5px;padding:7px 0;border-top:1px solid rgba(127,127,127,.2);border-bottom:1px solid rgba(127,127,127,.2)";
-    appendConversationTooltipRow(rows, "普通输入", ordinaryInputTokens, cost, "ordinaryInput");
-    appendConversationTooltipRow(rows, "缓存输入", usage.cachedInputTokens, cost, "cachedInput");
-    appendConversationTooltipRow(rows, "缓存写入", usage.cacheWriteInputTokens, cost, "cacheWriteInput");
-    appendConversationTooltipRow(rows, "输出", usage.outputTokens, cost, "output");
-    appendConversationTooltipRow(
+    const tiers = getConversationTooltipTiers(cost, usage);
+    const inputSummary = summarizeConversationTooltipInput(tiers);
+    appendConversationTooltipSummaryRow(
       rows,
-      "推理输出",
-      usage.reasoningOutputTokens,
-      cost,
-      "reasoningOutput",
-      "已包含在输出费用中",
+      "输入总量",
+      inputSummary.inputTokens,
+      cost.available && inputSummary.available ? inputSummary.costCny : null,
     );
+    const appendTierRows = (label, component, tokenCount) => {
+      for (const tier of tiers) {
+        appendConversationTooltipRow(
+          rows,
+          `${label}${tier.labelSuffix}`,
+          tokenCount(tier.usage),
+          tier.cost,
+          component,
+        );
+      }
+    };
+    appendTierRows(
+      "未缓存输入",
+      "ordinaryInput",
+      (tierUsage) => tierUsage.input_tokens - tierUsage.cached_input_tokens - tierUsage.cache_write_input_tokens,
+    );
+    appendTierRows("缓存输入", "cachedInput", (tierUsage) => tierUsage.cached_input_tokens);
+    appendTierRows("缓存写入", "cacheWriteInput", (tierUsage) => tierUsage.cache_write_input_tokens);
+    appendConversationTooltipMetricRow(
+      rows,
+      "缓存命中率",
+      formatTooltipPercent(inputSummary.inputTokens > 0
+        ? inputSummary.cachedInputTokens / inputSummary.inputTokens * 100
+        : null),
+      `${formatTokenCount(inputSummary.cachedInputTokens)} / ${formatTokenCount(inputSummary.inputTokens)}`,
+    );
+    appendTierRows("输出", "output", (tierUsage) => tierUsage.output_tokens);
+
+    const reasoningTiers = tiers.filter((tier) => tier.usage.reasoning_output_tokens > 0);
+    if (reasoningTiers.length > 0) {
+      const details = document.createElement("details");
+      details.style.cssText = "margin-top:2px;padding-top:5px;border-top:1px solid rgba(127,127,127,.14)";
+      const summary = document.createElement("summary");
+      const reasoningTokens = reasoningTiers.reduce(
+        (totalTokens, tier) => totalTokens + tier.usage.reasoning_output_tokens,
+        0,
+      );
+      summary.textContent = `显示推理输出 ${formatTokenCount(reasoningTokens)}（已计入输出）`;
+      summary.style.cssText = "cursor:pointer;color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px;user-select:none";
+      const reasoningRows = document.createElement("div");
+      reasoningRows.style.cssText = "display:grid;gap:5px;margin-top:5px";
+      for (const tier of reasoningTiers) {
+        appendConversationTooltipRow(
+          reasoningRows,
+          `推理输出${tier.labelSuffix}`,
+          tier.usage.reasoning_output_tokens,
+          tier.cost,
+          "reasoningOutput",
+          "已包含在输出费用中",
+          "output",
+        );
+      }
+      details.append(summary, reasoningRows);
+      rows.append(details);
+    }
     tooltip.append(rows);
 
     const cumulative = document.createElement("div");
@@ -491,7 +542,7 @@ export function installQuotaWidget(
         : "短上下文";
       pricing.textContent = `OpenAI 标准 API 价格 · ${tiers}`;
     } else if (cost.provider === "deepseek") {
-      pricing.textContent = "DeepSeek API 官方价格 · 每百万 Token 计价";
+      pricing.textContent = "DeepSeek API 官方价格";
     } else {
       pricing.textContent = cost.reason || "当前模型没有可用价格";
     }
@@ -504,18 +555,42 @@ export function installQuotaWidget(
     tooltip.append(footer);
 
     state.conversationTooltipTarget = line;
+    state.conversationTooltipPointer = conversationTooltipPointer(event, line);
     tooltip.hidden = false;
     tooltip.style.visibility = "hidden";
     positionConversationTokenTooltip(line, tooltip);
     tooltip.style.visibility = "visible";
   }
 
-  function appendConversationTooltipRow(container, label, tokens, cost, component, note = "") {
+  function moveConversationTokenTooltip(line, event) {
+    if (state.conversationTooltipTarget !== line || state.conversationTooltip?.hidden) return;
+    state.conversationTooltipPointer = conversationTooltipPointer(event, line);
+    positionConversationTokenTooltip(line);
+  }
+
+  function conversationTooltipPointer(event, line) {
+    if (Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) {
+      return { x: event.clientX, y: event.clientY };
+    }
+    const rect = line.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }
+
+  function appendConversationTooltipRow(
+    container,
+    label,
+    tokens,
+    cost,
+    component,
+    note = "",
+    unitComponent = component,
+  ) {
     const row = document.createElement("div");
     row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:16px";
     const name = document.createElement("span");
     name.style.cssText = "color:var(--color-token-text-secondary,#b2b2bc)";
-    name.textContent = `${label} ${formatTokenCount(tokens)}`;
+    const unitPrice = cost.available ? formatUnitPrice(cost, unitComponent) : "未知";
+    name.textContent = `${label} ${formatTokenCount(tokens)} · ${unitPrice}`;
     const amount = document.createElement("span");
     amount.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
     amount.textContent = cost.available
@@ -523,6 +598,112 @@ export function installQuotaWidget(
       : "暂不可算";
     row.append(name, amount);
     container.append(row);
+  }
+
+  function appendConversationTooltipSummaryRow(container, label, tokens, amount) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:16px;font-weight:650";
+    const name = document.createElement("span");
+    name.textContent = `${label} ${formatTokenCount(tokens)}`;
+    const total = document.createElement("span");
+    total.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
+    total.textContent = amount == null ? "暂不可算" : formatCny(amount);
+    row.append(name, total);
+    container.append(row);
+  }
+
+  function appendConversationTooltipMetricRow(container, label, value, detail) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:16px;color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px";
+    const name = document.createElement("span");
+    name.textContent = `${label} ${value}`;
+    const denominator = document.createElement("span");
+    denominator.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
+    denominator.textContent = detail;
+    row.append(name, denominator);
+    container.append(row);
+  }
+
+  function summarizeConversationTooltipInput(tiers) {
+    return tiers.reduce((summary, tier) => {
+      const usage = tier.usage;
+      summary.inputTokens += usage.input_tokens;
+      summary.cachedInputTokens += usage.cached_input_tokens;
+      summary.cacheWriteInputTokens += usage.cache_write_input_tokens;
+      if (!tier.cost?.available) {
+        summary.available = false;
+        return summary;
+      }
+      summary.costCny += ["ordinaryInput", "cachedInput", "cacheWriteInput"]
+        .reduce((total, component) => total + (Number(tier.cost.componentsCny?.[component]) || 0), 0);
+      return summary;
+    }, {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      costCny: 0,
+      available: true,
+    });
+  }
+
+  function getConversationTooltipTiers(cost, usage) {
+    const fallbackUsage = {
+      input_tokens: Number(usage.inputTokens || 0),
+      cached_input_tokens: Number(usage.cachedInputTokens || 0),
+      cache_write_input_tokens: Number(usage.cacheWriteInputTokens || 0),
+      output_tokens: Number(usage.outputTokens || 0),
+      reasoning_output_tokens: Number(usage.reasoningOutputTokens || 0),
+      total_tokens: Number(usage.totalTokens || 0),
+    };
+    const tiers = Array.isArray(cost?.tiers) && cost.tiers.length > 0
+      ? cost.tiers.map((tier) => ({ cost: tier, usage: tier.tokenUsage ?? {} }))
+      : [{ cost, usage: fallbackUsage }];
+    const models = new Set(tiers.map((tier) => tier.cost?.normalizedModel).filter(Boolean));
+    const contextTiers = new Set(tiers.map((tier) => tier.cost?.contextTier).filter(Boolean));
+    const showModel = models.size > 1;
+    const showContext = contextTiers.has("short") && contextTiers.has("long");
+    return tiers.map((tier) => {
+      const labels = [
+        showModel ? tier.cost?.normalizedModel : "",
+        showContext ? formatContextTier(tier.cost?.contextTier) : "",
+      ].filter(Boolean);
+      return {
+        ...tier,
+        usage: normalizeTooltipUsage(tier.usage),
+        labelSuffix: labels.length > 0 ? `（${labels.join(" · ")}）` : "",
+      };
+    });
+  }
+
+  function normalizeTooltipUsage(usage) {
+    return {
+      input_tokens: Math.max(0, Number(usage?.input_tokens) || 0),
+      cached_input_tokens: Math.max(0, Number(usage?.cached_input_tokens) || 0),
+      cache_write_input_tokens: Math.max(0, Number(usage?.cache_write_input_tokens) || 0),
+      output_tokens: Math.max(0, Number(usage?.output_tokens) || 0),
+      reasoning_output_tokens: Math.max(0, Number(usage?.reasoning_output_tokens) || 0),
+      total_tokens: Math.max(0, Number(usage?.total_tokens) || 0),
+    };
+  }
+
+  function formatContextTier(value) {
+    return value === "short" ? "短" : value === "long" ? "长" : "标准";
+  }
+
+  function formatUnitPrice(cost, component) {
+    if (!cost?.available) return "未知";
+    if (cost.normalizedModel === "multiple" ||
+      (Array.isArray(cost.contextTiers) && cost.contextTiers.length > 1)) {
+      return "未知";
+    }
+    const rate = Number(cost.rates?.[component]);
+    const exchangeRate = cost.currency === "USD"
+      ? Number(cost.exchangeRate?.rate)
+      : 1;
+    if (!Number.isFinite(rate) || rate < 0 || !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+      return "未知";
+    }
+    return `${formatCny(rate * exchangeRate)}/M`;
   }
 
   function ensureConversationTokenTooltip() {
@@ -545,11 +726,35 @@ export function installQuotaWidget(
       "color:var(--color-token-text-primary,var(--token-foreground,#f4f4f7))",
       "box-shadow:0 10px 28px rgba(0,0,0,.28)",
       "font:500 11px/16px ui-sans-serif,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
-      "pointer-events:none",
-      "user-select:none",
+      "pointer-events:auto",
+      "user-select:text",
+      "-webkit-user-select:text",
+      "cursor:text",
     ].join(";");
+    tooltip.addEventListener("pointerleave", (event) => {
+      if (!isConversationLineTarget(event.relatedTarget) && !isConversationBridgeTarget(event.relatedTarget)) {
+        hideConversationTokenTooltip();
+      }
+    });
     document.body.append(tooltip);
     state.conversationTooltip = tooltip;
+    const bridge = document.createElement("div");
+    bridge.id = "codex-token-usage-tooltip-bridge";
+    bridge.setAttribute("aria-hidden", "true");
+    bridge.hidden = true;
+    bridge.style.cssText = [
+      "position:fixed",
+      "z-index:2147483646",
+      "pointer-events:auto",
+      "background:transparent",
+    ].join(";");
+    bridge.addEventListener("pointerleave", (event) => {
+      if (!isConversationTooltipTarget(event.relatedTarget) && !isConversationLineTarget(event.relatedTarget)) {
+        hideConversationTokenTooltip();
+      }
+    });
+    document.body.append(bridge);
+    state.conversationTooltipBridge = bridge;
     return tooltip;
   }
 
@@ -557,22 +762,75 @@ export function installQuotaWidget(
     if (!line?.isConnected || !tooltip?.isConnected || tooltip.hidden) return;
     const lineRect = line.getBoundingClientRect();
     const tooltipRect = tooltip.getBoundingClientRect();
+    const pointer = state.conversationTooltipPointer;
+    const gap = 10;
+    const preferredLeft = pointer
+      ? pointer.x - tooltipRect.width / 2
+      : lineRect.left <= window.innerWidth / 2
+        ? lineRect.left
+        : lineRect.right - tooltipRect.width;
     const left = Math.max(
       12,
-      Math.min(window.innerWidth - tooltipRect.width - 12, lineRect.left),
+      Math.min(window.innerWidth - tooltipRect.width - 12, preferredLeft),
     );
-    const above = lineRect.top - tooltipRect.height - 8;
+    const preferredTop = lineRect.top - tooltipRect.height - gap;
+    const above = preferredTop;
     const top = above >= 12
       ? above
-      : Math.min(window.innerHeight - tooltipRect.height - 12, lineRect.bottom + 8);
+      : Math.min(window.innerHeight - tooltipRect.height - 12, lineRect.bottom + gap);
     tooltip.style.left = `${Math.round(left)}px`;
     tooltip.style.top = `${Math.max(12, Math.round(top))}px`;
+    positionConversationTooltipBridge(lineRect, tooltipRect, left, top, gap);
+  }
+
+  function positionConversationTooltipBridge(lineRect, tooltipRect, tooltipLeft, tooltipTop, gap) {
+    const bridge = state.conversationTooltipBridge;
+    if (!bridge?.isConnected) return;
+    const tooltipRight = tooltipLeft + tooltipRect.width;
+    const lineRight = lineRect.right;
+    const bridgeLeft = Math.max(lineRect.left, tooltipLeft);
+    const bridgeRight = Math.min(lineRight, tooltipRight);
+    const overlapLeft = bridgeRight > bridgeLeft ? bridgeLeft : Math.min(lineRect.left, tooltipLeft);
+    const overlapRight = bridgeRight > bridgeLeft ? bridgeRight : Math.max(lineRight, tooltipRight);
+    const above = tooltipTop < lineRect.top;
+    const bridgeTop = above ? tooltipTop + tooltipRect.height : lineRect.bottom;
+    const bridgeHeight = above ? lineRect.top - bridgeTop : tooltipTop - lineRect.bottom;
+    if (bridgeHeight <= 0) {
+      bridge.hidden = true;
+      return;
+    }
+    bridge.style.left = `${Math.round(overlapLeft)}px`;
+    bridge.style.top = `${Math.round(bridgeTop)}px`;
+    bridge.style.width = `${Math.max(1, Math.round(overlapRight - overlapLeft))}px`;
+    bridge.style.height = `${Math.max(gap, Math.round(bridgeHeight))}px`;
+    bridge.hidden = false;
+  }
+
+  function isConversationTooltipTarget(value) {
+    return Boolean(value && state.conversationTooltip &&
+      (value === state.conversationTooltip || state.conversationTooltip.contains(value)));
+  }
+
+  function isConversationBridgeTarget(value) {
+    return Boolean(value && state.conversationTooltipBridge &&
+      (value === state.conversationTooltipBridge || state.conversationTooltipBridge.contains(value)));
+  }
+
+  function isConversationTooltipArea(value) {
+    return isConversationTooltipTarget(value) || isConversationBridgeTarget(value);
+  }
+
+  function isConversationLineTarget(value) {
+    const line = state.conversationTooltipTarget;
+    return Boolean(value && line && (value === line || line.contains(value)));
   }
 
   function hideConversationTokenTooltip(line = null) {
     if (line && state.conversationTooltipTarget !== line) return;
     if (state.conversationTooltip) state.conversationTooltip.hidden = true;
+    if (state.conversationTooltipBridge) state.conversationTooltipBridge.hidden = true;
     state.conversationTooltipTarget = null;
+    state.conversationTooltipPointer = null;
   }
 
   function renderContextPage(busy) {
@@ -963,6 +1221,15 @@ export function installQuotaWidget(
     })}`;
   }
 
+  function formatTooltipPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return `${number.toLocaleString(undefined, {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    })}%`;
+  }
+
   function formatExchangeRate(value) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number.toFixed(4) : "未知";
@@ -990,6 +1257,8 @@ export function installQuotaWidget(
   };
   state.documentPointerHandler = (event) => {
     if (state.root && event.composedPath().includes(state.root)) return;
+    if (state.conversationTooltip && event.composedPath().includes(state.conversationTooltip)) return;
+    if (state.conversationTooltipBridge && event.composedPath().includes(state.conversationTooltipBridge)) return;
     dismissPanel();
   };
   window.addEventListener("resize", state.resizeHandler);
@@ -1026,8 +1295,11 @@ export function installQuotaWidget(
       document.removeEventListener("pointerdown", state.documentPointerHandler, true);
       document.querySelectorAll("[data-codex-token-usage]").forEach((line) => line.remove());
       state.conversationTooltip?.remove();
+      state.conversationTooltipBridge?.remove();
       state.conversationTooltip = null;
+      state.conversationTooltipBridge = null;
       state.conversationTooltipTarget = null;
+      state.conversationTooltipPointer = null;
       state.root?.remove();
       delete window[GLOBAL_KEY];
     },

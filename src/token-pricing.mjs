@@ -4,6 +4,14 @@ import { dirname, join } from "node:path";
 import { defaultAccountDataDir } from "./platform.mjs";
 
 const MILLION = 1_000_000;
+const TOKEN_USAGE_FIELDS = [
+  "input_tokens",
+  "cached_input_tokens",
+  "cache_write_input_tokens",
+  "output_tokens",
+  "reasoning_output_tokens",
+  "total_tokens",
+];
 const LONG_CONTEXT_THRESHOLD = 272_000;
 const EXCHANGE_RATE_REFRESH_MS = 6 * 60 * 60 * 1000;
 const EXCHANGE_RATE_RETRY_MS = 30 * 60 * 1000;
@@ -133,7 +141,7 @@ export class TokenPricingManager {
     if (!cost.available) return { ...cost };
     const exchangeRate = cost.currency === "USD" ? this.exchangeRate.rate : 1;
     const convert = (value) => positiveNumber(value) * exchangeRate;
-    return {
+    const viewModel = {
       ...cost,
       totalCny: convert(cost.total),
       componentsCny: {
@@ -145,6 +153,10 @@ export class TokenPricingManager {
       },
       exchangeRate: cost.currency === "USD" ? { ...this.exchangeRate } : null,
     };
+    if (Array.isArray(cost.tiers)) {
+      viewModel.tiers = cost.tiers.map((tier) => this.toViewModel(tier));
+    }
+    return viewModel;
   }
 
   async #fetchExchangeRate() {
@@ -199,6 +211,7 @@ export function accumulateTokenCost(current, next) {
       : "multiple",
     total: current.total + next.total,
     components: addComponents(current.components, next.components),
+    tokenUsage: addTokenUsage(current.tokenUsage, next.tokenUsage),
     contextTiers: [...contextTiers],
   };
 }
@@ -250,6 +263,9 @@ function calculateWithTier({
     contextTier,
     contextTiers: [contextTier],
     rates: { ...rates, cacheWriteInput: cacheWriteRate },
+    tokenUsage: Object.fromEntries(
+      TOKEN_USAGE_FIELDS.map((field) => [field, positiveNumber(usage?.[field])]),
+    ),
     components,
     total: components.ordinaryInput + components.cachedInput +
       components.cacheWriteInput + components.output,
@@ -269,8 +285,18 @@ function cloneCost(cost) {
     ...cost,
     rates: { ...cost.rates },
     components: { ...cost.components },
+    tokenUsage: { ...cost.tokenUsage },
     contextTiers: [...(cost.contextTiers ?? [])],
   };
+}
+
+function addTokenUsage(left = {}, right = {}) {
+  return Object.fromEntries(
+    TOKEN_USAGE_FIELDS.map((field) => [
+      field,
+      positiveNumber(left[field]) + positiveNumber(right[field]),
+    ]),
+  );
 }
 
 function addComponents(left = {}, right = {}) {

@@ -429,12 +429,21 @@ function addUsage(turn, usage, model) {
 
 function calculateTurnCost(turn, pricingManager) {
   let cost = null;
+  const tiers = new Map();
   for (const segment of turn.segments) {
-    cost = accumulateTokenCost(
-      cost,
-      pricingManager.calculate(segment.model || turn.model, segment.usage),
-    );
+    const segmentCost = pricingManager.calculate(segment.model || turn.model, segment.usage);
+    cost = accumulateTokenCost(cost, segmentCost);
+    if (!segmentCost.available) continue;
+    const tierKey = JSON.stringify([
+      segmentCost.normalizedModel,
+      segmentCost.provider,
+      segmentCost.currency,
+      segmentCost.contextTier,
+      segmentCost.rates,
+    ]);
+    tiers.set(tierKey, accumulateTokenCost(tiers.get(tierKey), segmentCost));
   }
+  if (cost?.available) cost.tiers = [...tiers.values()];
   return cost;
 }
 
