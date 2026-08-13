@@ -16,7 +16,7 @@ import { Worker } from "node:worker_threads";
 import { defaultAccountDataDir } from "./platform.mjs";
 import { accumulateTokenCost, TokenPricingManager } from "./token-pricing.mjs";
 
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 const DISCOVERY_INTERVAL_MS = 5_000;
 const MAX_VIEW_TURNS = 120;
 const READ_CHUNK_BYTES = 1024 * 1024;
@@ -32,8 +32,15 @@ const TERMINAL_TURN_STATUSES = new Set(["completed", "interrupted", "failed"]);
 const EVENT_WATCH_DEBOUNCE_MS = 80;
 const MODEL_SOURCE_PRIORITY = Object.freeze({
   thread: 1,
-  rerouted: 2,
-  "turn-context": 3,
+  "thread-settings": 1,
+  "thread-response": 1,
+  "thread-request": 2,
+  "turn-request": 3,
+  "turn-started": 3,
+  usage: 3,
+  completed: 3,
+  "turn-context": 4,
+  rerouted: 5,
 });
 
 const ROLLOUT_WORKER_SOURCE = String.raw`
@@ -288,8 +295,11 @@ export class TokenUsageManager {
     if (!this.viewModelDirty && this.viewModelCache) return this.viewModelCache;
     const cumulativeCosts = new Map();
     const mappedTurns = [...this.turns.values()]
-      .filter((turn) => turn.totalTokens > 0 &&
-        (turn.completed || turn.threadId === this.activeThreadId))
+      // `activeThreadId` identifies the rollout file currently being tailed;
+      // it is not a single-session view of the app. Multiple threads can be
+      // running at the same time, so every live turn with usage must remain
+      // available to the widget regardless of which thread was started last.
+      .filter((turn) => turn.totalTokens > 0)
       .sort((left, right) => left.updatedAt - right.updatedAt)
       .map((turn) => {
         const rawCost = calculateTurnCost(turn, this.pricingManager);
@@ -318,17 +328,16 @@ export class TokenUsageManager {
           },
         };
       });
-    const activeTurns = this.activeThreadId
-      ? mappedTurns.filter((turn) => turn.threadId === this.activeThreadId)
-      : [];
-    const activeTurnIds = new Set(activeTurns.map((turn) => turn.turnId));
+    // Keep all in-progress turns so simultaneous sessions can update in real
+    // time. The retention limit only applies to completed turns.
+    const liveTurns = mappedTurns.filter((turn) => !turn.completed);
     const recentTurns = mappedTurns
-      .filter((turn) => !activeTurnIds.has(turn.turnId))
+      .filter((turn) => turn.completed)
       .slice(-this.maxViewTurns);
     this.viewModelCache = {
       status: this.initializing ? "loading" : this.error ? "error" : "ready",
       error: this.error,
-      turns: [...recentTurns, ...activeTurns]
+      turns: [...recentTurns, ...liveTurns]
         .sort((left, right) => left.updatedAt - right.updatedAt),
     };
     this.viewModelDirty = false;
@@ -477,7 +486,6 @@ export class TokenUsageManager {
 
     if (event.type === "thread-active") {
       this.activeThreadId = threadId;
-      if (model) this.#fillThreadModel(threadId, model);
       return;
     }
 
@@ -517,14 +525,6 @@ export class TokenUsageManager {
       turn.completed = TERMINAL_TURN_STATUSES.has(turn.status);
       turn.updatedAt = updatedAt;
     }
-  }
-
-  #fillThreadModel(threadId, model) {
-    for (const turn of this.turns.values()) {
-      if (turn.threadId !== threadId) continue;
-      setTurnModel(turn, model, "thread");
-    }
-    this.#invalidateViewModel();
   }
 
   async #refreshRolloutCatalog() {
@@ -638,8 +638,11 @@ export class TokenUsageManager {
       setTurnModel(turn, model, "turn-context");
       if (model) {
         for (const segment of turn.segments) {
-          segment.model = model;
-          segment.modelSource = "turn-context";
+          const sourcePriority = MODEL_SOURCE_PRIORITY[segment.modelSource] ?? 0;
+          if (!segment.model || sourcePriority < MODEL_SOURCE_PRIORITY["turn-context"]) {
+            segment.model = model;
+            segment.modelSource = "turn-context";
+          }
         }
       }
       if (turn.source === "rollout") turn.updatedAt = parseTimestamp(record.timestamp);

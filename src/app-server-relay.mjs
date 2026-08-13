@@ -13,7 +13,13 @@ const PROVIDER_CONFIG =
   `model_providers.${DEEPSEEK_PROVIDER}={name="DeepSeek",base_url="https://api.deepseek.com/",` +
   `env_key="${DEEPSEEK_ENV_KEY}",wire_api="responses"}`;
 const THREAD_METHODS = new Set(["thread/start", "thread/resume", "thread/fork"]);
-const OBSERVED_THREAD_METHODS = new Set([...THREAD_METHODS, "thread/read", "thread/list"]);
+const THREAD_SETTINGS_METHOD = "thread/settings/update";
+const OBSERVED_THREAD_METHODS = new Set([
+  ...THREAD_METHODS,
+  "thread/read",
+  "thread/list",
+  THREAD_SETTINGS_METHOD,
+]);
 const TURN_INPUT_METHODS = new Set(["turn/start", "turn/steer"]);
 const ALLOWED_DEEPSEEK_EFFORTS = new Set(["low", "high", "max"]);
 const MAX_SERVER_INSPECTION_BYTES = 1024 * 1024;
@@ -71,18 +77,21 @@ export async function runAppServerRelay() {
   const pendingRequests = new Map();
   const threadProviders = new Map();
   const threadModels = new Map();
+  const turnModels = new Map();
   pipeLines(process.stdin, child.stdin, (line) => rewriteClientLine(line, {
     deepSeekEnabled,
     officialModels,
     pendingRequests,
     threadProviders,
     threadModels,
+    turnModels,
     emitUsageEvent: usageEventWriter.write,
   }));
   pipeLines(child.stdout, process.stdout, (line) => rewriteServerLine(line, {
     pendingRequests,
     threadProviders,
     threadModels,
+    turnModels,
     emitUsageEvent: usageEventWriter.write,
   }));
   pipeRaw(child.stderr, process.stderr);
@@ -99,16 +108,27 @@ function rewriteClientLine(line, state) {
 
   const method = message.method;
   if (!OBSERVED_THREAD_METHODS.has(method) && !TURN_INPUT_METHODS.has(method)) return line;
+  const params = message.params && typeof message.params === "object"
+    ? { ...message.params }
+    : {};
+
+  if (method === THREAD_SETTINGS_METHOD) {
+    const configuredModel = readModelSetting(params);
+    if (params.threadId && configuredModel.present) {
+      updateThreadModel(state.threadModels, params.threadId, configuredModel.model, "thread-settings");
+    }
+    return JSON.stringify({ ...message, params });
+  }
+
   if (!THREAD_METHODS.has(method) && !TURN_INPUT_METHODS.has(method)) {
     if (message.id != null) {
       state.pendingRequests.set(String(message.id), { method, provider: null, threadId: null });
     }
     return line;
   }
-  const params = message.params && typeof message.params === "object"
-    ? { ...message.params }
-    : {};
-  const requestedModel = normalizedModel(params.model) ?? state.threadModels.get(params.threadId) ?? null;
+  const threadModel = getThreadModel(state.threadModels, params.threadId);
+  const requestModel = readModelSetting(params);
+  const requestedModel = requestModel.present ? requestModel.model : threadModel?.model ?? null;
   let provider = providerForModel(requestedModel, state.officialModels) ??
     state.threadProviders.get(params.threadId) ?? null;
 
@@ -143,21 +163,27 @@ function rewriteClientLine(line, state) {
       }
     }
     if (method === "turn/start" && params.threadId) {
-      if (requestedModel) state.threadModels.set(params.threadId, requestedModel);
+      if (requestedModel && requestModel.present) {
+        updateThreadModel(state.threadModels, params.threadId, requestedModel, "turn-request");
+      }
       state.emitUsageEvent({
         type: "thread-active",
         threadId: params.threadId,
         model: requestedModel,
+        modelSource: requestModel.present ? "turn-request" : threadModel?.source ?? "thread",
       });
     }
   }
 
   if (method === "thread/resume" && params.threadId) {
-    if (requestedModel) state.threadModels.set(params.threadId, requestedModel);
+    if (requestedModel && requestModel.present) {
+      updateThreadModel(state.threadModels, params.threadId, requestedModel, "thread-request");
+    }
     state.emitUsageEvent({
       type: "thread-active",
       threadId: params.threadId,
       model: requestedModel,
+      modelSource: requestModel.present ? "thread-request" : threadModel?.source ?? "thread",
     });
   }
 
@@ -167,6 +193,9 @@ function rewriteClientLine(line, state) {
       provider,
       threadId: params.threadId,
       model: requestedModel,
+      modelSource: requestModel.present
+        ? "turn-request"
+        : threadModel?.source ?? "thread",
     });
   }
   return JSON.stringify({ ...message, params });
@@ -190,16 +219,32 @@ function rewriteServerLine(line, state) {
   const pending = state.pendingRequests.get(String(message.id));
   if (!pending) return line;
   state.pendingRequests.delete(String(message.id));
-  const thread = message?.result?.thread ?? message?.result;
+  const result = message?.result;
+  const thread = result?.thread ?? result;
   const threadId = thread?.id ?? pending.threadId;
-  const provider = thread?.modelProvider ?? pending.provider;
-  const model = normalizedModel(thread?.model) ?? pending.model;
+  const provider = normalizedModel(result?.modelProvider) ??
+    normalizedModel(thread?.modelProvider) ?? pending.provider;
+  // thread/start, thread/resume and thread/fork return the selected model at
+  // the response envelope level, while the nested Thread object does not.
+  const model = normalizedModel(result?.model) ??
+    normalizedModel(thread?.model) ?? pending.model;
   if (threadId && provider) state.threadProviders.set(threadId, provider);
-  if (threadId && model) state.threadModels.set(threadId, model);
+  if (threadId && model) updateThreadModel(state.threadModels, threadId, model, "thread-response");
   learnThreadProviders(message?.result, state.threadProviders);
   learnThreadModels(message?.result, state.threadModels);
+  if (pending.method === "turn/start" && result?.turn?.id && pending.model) {
+    state.turnModels.set(String(result.turn.id), {
+      model: pending.model,
+      source: pending.modelSource ?? "thread",
+    });
+  }
   if (threadId && THREAD_METHODS.has(pending.method)) {
-    state.emitUsageEvent({ type: "thread-active", threadId, model });
+    state.emitUsageEvent({
+      type: "thread-active",
+      threadId,
+      model,
+      modelSource: "thread-response",
+    });
   }
   return line;
 }
@@ -212,10 +257,17 @@ function completeLargeResponse(line, state) {
   if (!pending) return;
   state.pendingRequests.delete(requestId);
   const threadId = pending.threadId;
-  if (threadId && pending.provider) state.threadProviders.set(threadId, pending.provider);
-  if (threadId && pending.model) state.threadModels.set(threadId, pending.model);
+  const provider = extractResponseStringField(line, "modelProvider") ?? pending.provider;
+  const model = extractResponseStringField(line, "model") ?? pending.model;
+  if (threadId && provider) state.threadProviders.set(threadId, provider);
+  if (threadId && model) updateThreadModel(state.threadModels, threadId, model, "thread-response");
   if (threadId && THREAD_METHODS.has(pending.method)) {
-    state.emitUsageEvent({ type: "thread-active", threadId, model: pending.model });
+    state.emitUsageEvent({
+      type: "thread-active",
+      threadId,
+      model,
+      modelSource: "thread-response",
+    });
   }
 }
 
@@ -235,6 +287,15 @@ function learnThreadProviders(value, threadProviders) {
 
 function learnThreadModels(value, threadModels) {
   if (!value || typeof value !== "object") return;
+  const configuredModel = readModelSetting(value.threadSettings);
+  if (value.threadId && configuredModel.present) {
+    updateThreadModel(threadModels, value.threadId, configuredModel.model, "thread-settings");
+  }
+  const envelopeModel = normalizedModel(value.model);
+  const envelopeThreadId = value.thread?.id ?? value.threadId;
+  if (envelopeModel && envelopeThreadId) {
+    updateThreadModel(threadModels, envelopeThreadId, envelopeModel, "thread-response");
+  }
   const candidates = [
     value,
     value.thread,
@@ -242,7 +303,7 @@ function learnThreadModels(value, threadModels) {
   ].filter(Boolean);
   for (const thread of candidates) {
     const model = normalizedModel(thread?.model);
-    if (thread?.id && model) threadModels.set(thread.id, model);
+    if (thread?.id && model) updateThreadModel(threadModels, thread.id, model, "thread-response");
   }
 }
 
@@ -250,35 +311,117 @@ function captureUsageNotification(message, state) {
   const method = message?.method;
   const params = message?.params;
   if (!params || typeof params !== "object") return;
+  const configuredModel = readModelSetting(params.threadSettings);
+  if (method === "thread/settings/updated" && params.threadId && configuredModel.present) {
+    updateThreadModel(state.threadModels, params.threadId, configuredModel.model, "thread-settings");
+    return;
+  }
+  if (method === "turn/started" && params.threadId && params.turn?.id) {
+    const tracked = state.turnModels.get(String(params.turn.id));
+    const threadModel = getThreadModel(state.threadModels, params.threadId);
+    const explicitModel = normalizedModel(params.model) ?? normalizedModel(params.turn.model);
+    const model = explicitModel ?? tracked?.model ?? threadModel?.model ?? null;
+    const source = explicitModel
+      ? "turn-started"
+      : tracked?.source ?? threadModel?.source ?? "thread";
+    if (model) state.turnModels.set(String(params.turn.id), { model, source });
+    return;
+  }
   if (method === "model/rerouted" && params.threadId) {
     const model = normalizedModel(params.toModel);
-    if (model) state.threadModels.set(params.threadId, model);
+    if (model && params.turnId) {
+      state.turnModels.set(String(params.turnId), { model, source: "rerouted" });
+    }
     return;
   }
   if (method === "thread/tokenUsage/updated" && params.threadId && params.turnId) {
+    const tracked = state.turnModels.get(String(params.turnId));
+    const threadModel = getThreadModel(state.threadModels, params.threadId);
+    const explicitModel = normalizedModel(params.model) ?? normalizedModel(params.turn?.model);
+    const model = explicitModel ?? tracked?.model ?? threadModel?.model ?? null;
     state.emitUsageEvent({
       type: "usage",
       threadId: params.threadId,
       turnId: params.turnId,
-      model: state.threadModels.get(params.threadId) ?? null,
+      model,
+      modelSource: explicitModel ? "usage" : tracked?.source ?? threadModel?.source ?? "thread",
       tokenUsage: params.tokenUsage,
     });
     return;
   }
   if (method === "turn/completed" && params.threadId && params.turn?.id) {
+    const turnId = String(params.turn.id);
+    const tracked = state.turnModels.get(turnId);
+    const threadModel = getThreadModel(state.threadModels, params.threadId);
+    const explicitModel = normalizedModel(params.model) ?? normalizedModel(params.turn.model);
+    const model = explicitModel ?? tracked?.model ?? threadModel?.model ?? null;
     state.emitUsageEvent({
       type: "turn-completed",
       threadId: params.threadId,
-      turnId: params.turn.id,
-      model: state.threadModels.get(params.threadId) ?? null,
+      turnId,
+      model,
+      modelSource: explicitModel ? "completed" : tracked?.source ?? threadModel?.source ?? "thread",
       status: params.turn.status ?? null,
     });
+    state.turnModels.delete(turnId);
   }
+}
+
+function readModelSetting(value) {
+  if (!value || typeof value !== "object") return { present: false, model: null };
+  if (Object.prototype.hasOwnProperty.call(value, "model")) {
+    return { present: true, model: normalizedModel(value.model) };
+  }
+  const collaborationSettings = value.collaborationMode?.settings;
+  if (collaborationSettings &&
+    Object.prototype.hasOwnProperty.call(collaborationSettings, "model")) {
+    return { present: true, model: normalizedModel(collaborationSettings.model) };
+  }
+  return { present: false, model: null };
+}
+
+function getThreadModel(threadModels, threadId) {
+  if (!threadId) return null;
+  const value = threadModels.get(String(threadId));
+  if (!value) return null;
+  return typeof value === "string" ? { model: value, source: "thread" } : value;
+}
+
+function updateThreadModel(threadModels, threadId, model, source) {
+  if (!threadId) return;
+  const key = String(threadId);
+  if (model == null) {
+    threadModels.delete(key);
+    return;
+  }
+  const normalized = normalizedModel(model);
+  if (!normalized) return;
+  const current = getThreadModel(threadModels, key);
+  // A stale thread/read or thread/start response must not overwrite a newer
+  // settings/request update. Settings and explicit requests are ordered by
+  // arrival, so they are always allowed to replace the thread default.
+  if (source === "thread-response" && current && current.source !== "thread-response") return;
+  threadModels.set(key, { model: normalized, source });
 }
 
 function normalizedModel(value) {
   const model = String(value ?? "").trim();
   return model || null;
+}
+
+function extractResponseStringField(line, field) {
+  const resultIndex = line.indexOf('"result"');
+  if (resultIndex < 0) return null;
+  const escapedField = String(field).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = line.slice(resultIndex).match(
+    new RegExp(`"${escapedField}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`),
+  );
+  if (!match) return null;
+  try {
+    return normalizedModel(JSON.parse(`"${match[1]}"`));
+  } catch {
+    return null;
+  }
 }
 
 function providerForModel(model, officialModels) {
