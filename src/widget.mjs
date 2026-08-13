@@ -12,7 +12,7 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const VERSION = 48;
+  const VERSION = 49;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -359,6 +359,18 @@ export function installQuotaWidget(
     });
   }
 
+  function placeConversationTokenUsageLine(line, host, assistantNode) {
+    if (!line || !host) return;
+    if (assistantNode?.parentElement) {
+      if (line.parentElement !== assistantNode.parentElement ||
+        line.previousElementSibling !== assistantNode) {
+        assistantNode.after(line);
+      }
+      return;
+    }
+    if (line.parentElement !== host || line !== host.lastElementChild) host.append(line);
+  }
+
   function renderConversationTokenUsage() {
     const usageItems = Array.isArray(state.data.tokenUsage?.turns)
       ? state.data.tokenUsage.turns
@@ -370,9 +382,10 @@ export function installQuotaWidget(
     for (const usage of usageItems) {
       const turnId = String(usage?.turnId ?? "");
       const turnNode = turnNodes.get(turnId);
-      if (!turnId || !turnNode || !usage?.completed || Number(usage.totalTokens) <= 0) continue;
+      if (!turnId || !turnNode || Number(usage.totalTokens) <= 0) continue;
       visibleTurnIds.add(turnId);
       const host = turnNode.firstElementChild ?? turnNode;
+      const assistantNode = turnNode.querySelector('[data-local-conversation-final-assistant="true"]');
       let line = turnNode.querySelector("[data-codex-token-usage]");
       if (!line) {
         line = document.createElement("div");
@@ -398,15 +411,16 @@ export function installQuotaWidget(
         });
         line.addEventListener("focus", () => showConversationTokenTooltip(line));
         line.addEventListener("blur", () => hideConversationTokenTooltip(line));
-        host.append(line);
       }
+      placeConversationTokenUsageLine(line, host, assistantNode);
       line.__codexTokenUsage = usage;
       const cost = usage.cost ?? {};
+      const costLabel = usage.completed ? (cost.label ?? "本轮费用") : "实时估算";
       const costSummary = cost.available
-        ? `${cost.label ?? "本轮费用"} ${formatCny(cost.totalCny)}`
+        ? `${costLabel} ${formatCny(cost.totalCny)}`
         : "费用暂不可算";
       const summary = [
-        `本轮 Token ${formatTokenCount(usage.totalTokens)}`,
+        `${usage.completed ? "本轮" : "实时"} Token ${formatTokenCount(usage.totalTokens)}`,
         `输入 ${formatTokenCount(usage.inputTokens)}`,
         `缓存输入 ${formatTokenCount(usage.cachedInputTokens)}`,
         `输出 ${formatTokenCount(usage.outputTokens)}`,
@@ -449,7 +463,7 @@ export function installQuotaWidget(
     const total = document.createElement("strong");
     total.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
     total.textContent = cost.available
-      ? `${cost.label ?? "本轮费用"} ${formatCny(cost.totalCny)}`
+      ? `${usage.completed ? (cost.label ?? "本轮费用") : "实时估算"} ${formatCny(cost.totalCny)}`
       : "费用暂不可算";
     header.append(title, total);
     tooltip.append(header);

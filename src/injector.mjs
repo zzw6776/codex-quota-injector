@@ -40,6 +40,9 @@ export async function runInjector({
   let targetId = null;
   let widgetInstalled = false;
   let lastPushedJson = null;
+  let widgetUpdatePromise = null;
+  let widgetUpdateRequested = false;
+  let removeTokenUsageListener = () => {};
   let activeAction = null;
   let restartingCodex = false;
   let hasSeenCodexProcess = false;
@@ -56,6 +59,8 @@ export async function runInjector({
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
     quotaRefreshTimer = null;
+    removeTokenUsageListener();
+    removeTokenUsageListener = () => {};
     cdp?.close();
     accountManager.close();
     deepSeekManager.close();
@@ -131,6 +136,21 @@ export async function runInjector({
       console.error(`[token-usage] 刷新失败: ${error.message}`);
     });
     if (once) await tokenRefresh;
+    void tokenRefresh
+      .then(() => {
+        if (!once) return requestWidgetUpdate();
+        return undefined;
+      })
+      .catch((error) => {
+        console.error(`[token-usage] 实时 Widget 刷新失败: ${error.message}`);
+      });
+    await requestWidgetUpdate();
+    return true;
+  }
+
+  async function pushWidgetViewModel() {
+    const currentCdp = cdp;
+    if (!currentCdp?.isConnected || stopped) return false;
     const viewModel = {
       ...accountManager.getViewModel(),
       context: contextManager.getViewModel(),
@@ -139,11 +159,32 @@ export async function runInjector({
     };
     const viewJson = JSON.stringify(viewModel);
     if (viewJson !== lastPushedJson) {
-      await cdp.evaluate(widgetUpdateExpression(viewModel));
-      lastPushedJson = viewJson;
+      await currentCdp.evaluate(widgetUpdateExpression(viewModel));
+      if (cdp === currentCdp) lastPushedJson = viewJson;
     }
-    return true;
+    return cdp === currentCdp;
   }
+
+  function requestWidgetUpdate() {
+    widgetUpdateRequested = true;
+    if (widgetUpdatePromise) return widgetUpdatePromise;
+    const task = (async () => {
+      do {
+        widgetUpdateRequested = false;
+        await pushWidgetViewModel();
+      } while (widgetUpdateRequested && !stopped);
+    })().finally(() => {
+      if (widgetUpdatePromise === task) widgetUpdatePromise = null;
+    });
+    widgetUpdatePromise = task;
+    return task;
+  }
+
+  removeTokenUsageListener = tokenUsageManager.onChange(() => {
+    void requestWidgetUpdate().catch((error) => {
+      console.error(`[token-usage] 事件驱动 Widget 刷新失败: ${error.message}`);
+    });
+  });
 
   async function startAction(action) {
     try {

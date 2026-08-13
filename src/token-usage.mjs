@@ -8,6 +8,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { watch } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -28,6 +29,7 @@ const TOKEN_FIELDS = [
   "total_tokens",
 ];
 const TERMINAL_TURN_STATUSES = new Set(["completed", "interrupted", "failed"]);
+const EVENT_WATCH_DEBOUNCE_MS = 80;
 const MODEL_SOURCE_PRIORITY = Object.freeze({
   thread: 1,
   rerouted: 2,
@@ -215,6 +217,15 @@ export class TokenUsageManager {
     this.rolloutWorker = null;
     this.rolloutWorkerRequestId = 0;
     this.rolloutWorkerRequests = new Map();
+    this.eventWatcher = null;
+    this.eventWatchTimer = null;
+    this.changeListeners = new Set();
+  }
+
+  onChange(listener) {
+    if (typeof listener !== "function") return () => {};
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
   }
 
   initialize() {
@@ -224,8 +235,11 @@ export class TokenUsageManager {
       await this.pricingManager.initialize();
       await this.#loadCache();
       await this.#refreshOnce({ forceDiscovery: true });
+      this.#startEventWatcher();
       this.initialized = true;
-      return this.getViewModel();
+      const viewModel = this.getViewModel();
+      this.#notifyChange(viewModel);
+      return viewModel;
     })()
       .catch((error) => {
         this.error = error.message;
@@ -242,14 +256,26 @@ export class TokenUsageManager {
     return task;
   }
 
-  async refresh({ forceDiscovery = false } = {}) {
-    if (this.initializing) return this.initializationPromise;
-    if (this.refreshPromise) return this.refreshPromise;
+  async refresh({ forceDiscovery = false, notify = false } = {}) {
+    if (this.initializing) {
+      const viewModel = await this.initializationPromise;
+      if (notify) this.#notifyChange(viewModel);
+      return viewModel;
+    }
+    if (this.refreshPromise) {
+      const viewModel = await this.refreshPromise;
+      if (notify) this.#notifyChange(viewModel);
+      return viewModel;
+    }
     const task = this.#refreshOnce({ forceDiscovery })
       .catch((error) => {
         this.error = error.message;
         console.error(`[token-usage] ${error.message}`);
         return this.getViewModel();
+      })
+      .then((viewModel) => {
+        if (notify) this.#notifyChange(viewModel);
+        return viewModel;
       })
       .finally(() => {
         if (this.refreshPromise === task) this.refreshPromise = null;
@@ -262,7 +288,8 @@ export class TokenUsageManager {
     if (!this.viewModelDirty && this.viewModelCache) return this.viewModelCache;
     const cumulativeCosts = new Map();
     const mappedTurns = [...this.turns.values()]
-      .filter((turn) => turn.completed && turn.totalTokens > 0)
+      .filter((turn) => turn.totalTokens > 0 &&
+        (turn.completed || turn.threadId === this.activeThreadId))
       .sort((left, right) => left.updatedAt - right.updatedAt)
       .map((turn) => {
         const rawCost = calculateTurnCost(turn, this.pricingManager);
@@ -309,6 +336,11 @@ export class TokenUsageManager {
   }
 
   close() {
+    clearTimeout(this.eventWatchTimer);
+    this.eventWatchTimer = null;
+    this.eventWatcher?.close();
+    this.eventWatcher = null;
+    this.changeListeners.clear();
     this.#closeRolloutWorker();
     this.fileStates.clear();
     this.turns.clear();
@@ -318,6 +350,41 @@ export class TokenUsageManager {
 
   #invalidateViewModel() {
     this.viewModelDirty = true;
+  }
+
+  #notifyChange(viewModel) {
+    for (const listener of this.changeListeners) {
+      try {
+        listener(viewModel);
+      } catch (error) {
+        console.error(`[token-usage] 变更监听器失败: ${error.message}`);
+      }
+    }
+  }
+
+  #startEventWatcher() {
+    if (this.eventWatcher) return;
+    try {
+      this.eventWatcher = watch(
+        dirname(this.eventPath),
+        { persistent: false },
+        (_eventType, fileName) => {
+          if (fileName && String(fileName) !== basename(this.eventPath)) return;
+          clearTimeout(this.eventWatchTimer);
+          this.eventWatchTimer = setTimeout(() => {
+            this.eventWatchTimer = null;
+            void this.refresh({ notify: true }).catch((error) => {
+              console.error(`[token-usage] 事件驱动刷新失败: ${error.message}`);
+            });
+          }, EVENT_WATCH_DEBOUNCE_MS);
+        },
+      );
+      this.eventWatcher.on("error", (error) => {
+        console.error(`[token-usage] Token 事件监听失败: ${error.message}`);
+      });
+    } catch (error) {
+      console.error(`[token-usage] 无法监听 Token 事件: ${error.message}`);
+    }
   }
 
   async #refreshOnce({ forceDiscovery }) {
