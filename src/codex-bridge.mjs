@@ -4,9 +4,9 @@ import { access } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 import { defaultAccountDataDir, resolveCodexCliExecutable } from "./platform.mjs";
-import packageJson from "../package.json" with { type: "json" };
+import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
 
-const BRIDGE_GENERATION = `usage-events-v3:${packageJson.version}`;
+const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
 
 export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
   if (process.platform !== "darwin") return { env: {}, relay: null };

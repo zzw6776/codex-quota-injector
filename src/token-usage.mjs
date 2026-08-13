@@ -16,10 +16,21 @@ import { Worker } from "node:worker_threads";
 import { defaultAccountDataDir } from "./platform.mjs";
 import { accumulateTokenCost, TokenPricingManager } from "./token-pricing.mjs";
 
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 6;
 const DISCOVERY_INTERVAL_MS = 5_000;
 const MAX_VIEW_TURNS = 120;
+const MAX_STORED_TURNS = 2_000;
+const MAX_TRACKED_ROLLOUT_STATES = 256;
+const MAX_HISTORICAL_THREADS = 2_048;
+const MAX_HISTORICAL_SEGMENTS = 128;
 const READ_CHUNK_BYTES = 1024 * 1024;
+const COST_CACHE_VERSION = 1;
+const ROLLOUT_PARSER_VERSION = 2;
+const MAX_SEEN_EVENT_IDS = 50_000;
+const CACHE_PERSIST_DELAY_MS = 10_000;
+const UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS = 10_000;
+const UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY = 4;
+const ACTIVE_THREAD_HINT_TTL_MS = 5 * 60 * 1000;
 const TOKEN_FIELDS = [
   "input_tokens",
   "cached_input_tokens",
@@ -39,8 +50,9 @@ const MODEL_SOURCE_PRIORITY = Object.freeze({
   "turn-started": 3,
   usage: 3,
   completed: 3,
+  "turn-response": 5,
   "turn-context": 4,
-  rerouted: 5,
+  rerouted: 6,
 });
 
 const ROLLOUT_WORKER_SOURCE = String.raw`
@@ -48,11 +60,14 @@ const { parentPort } = require("node:worker_threads");
 const { open, stat } = require("node:fs/promises");
 
 const READ_CHUNK_BYTES = 1024 * 1024;
+const ROLLOUT_RECORD_BATCH_SIZE = 256;
 
 parentPort.on("message", async (request) => {
   try {
-    const result = await readRollout(request);
-    parentPort.postMessage({ id: request.id, ok: true, ...result });
+    const result = await readRollout(request, (records) => {
+      if (records.length > 0) parentPort.postMessage({ id: request.id, type: "batch", records });
+    });
+    parentPort.postMessage({ id: request.id, type: "done", ok: true, ...result });
   } catch (error) {
     parentPort.postMessage({
       id: request.id,
@@ -62,7 +77,7 @@ parentPort.on("message", async (request) => {
   }
 });
 
-async function readRollout(request) {
+async function readRollout(request, emitBatch) {
   const path = String(request.path || "");
   let info;
   try {
@@ -76,18 +91,21 @@ async function readRollout(request) {
   let offset = reconcile ? 0 : positiveInteger(request.offset);
   let pending = reconcile ? "" : String(request.pending || "");
   let currentTurnId = reconcile ? null : nonEmptyString(request.currentTurnId);
+  let pendingModel = reconcile ? null : nonEmptyString(request.pendingModel);
   let reset = false;
   if (info.size < offset) {
     offset = 0;
     pending = "";
     currentTurnId = null;
+    pendingModel = null;
     reset = true;
+    parentPort.postMessage({ id: request.id, type: "reset" });
   }
   if (info.size === offset) {
-    return { offset, pending, currentTurnId, reset, records: [] };
+    return { offset, pending, currentTurnId, pendingModel, reset, records: [] };
   }
 
-  const records = [];
+  let records = [];
   const handle = await open(path, "r");
   try {
     while (offset < info.size) {
@@ -102,23 +120,32 @@ async function readRollout(request) {
       for (const line of lines) {
         const record = parseRecord(line);
         if (!record) continue;
-        const simplified = simplifyRecord(record, currentTurnId);
+        const simplified = simplifyRecord(record, currentTurnId, pendingModel);
         currentTurnId = simplified.currentTurnId;
-        if (simplified.record) records.push(simplified.record);
+        pendingModel = simplified.pendingModel;
+        if (simplified.record) {
+          records.push(simplified.record);
+          if (records.length >= ROLLOUT_RECORD_BATCH_SIZE) {
+            emitBatch(records);
+            records = [];
+          }
+        }
       }
     }
   } finally {
     await handle.close();
   }
-  return { offset, pending, currentTurnId, reset, records };
+  emitBatch(records);
+  return { offset, pending, currentTurnId, pendingModel, reset };
 }
 
-function simplifyRecord(record, currentTurnId) {
+function simplifyRecord(record, currentTurnId, pendingModel) {
   const payload = record.payload;
   if (record.type === "turn_context" && payload?.turn_id) {
     const turnId = String(payload.turn_id);
     return {
       currentTurnId: turnId,
+      pendingModel,
       record: {
         timestamp: record.timestamp,
         type: "turn_context",
@@ -130,16 +157,45 @@ function simplifyRecord(record, currentTurnId) {
     const turnId = payload?.internal_chat_message_metadata_passthrough?.turn_id;
     return {
       currentTurnId: turnId ? String(turnId) : currentTurnId,
+      pendingModel,
       record: null,
     };
   }
   if (record.type !== "event_msg" || !payload) {
-    return { currentTurnId, record: null };
+    return { currentTurnId, pendingModel, record: null };
+  }
+  if (payload.type === "thread_settings_applied") {
+    const model = nonEmptyString(payload.thread_settings?.model) ?? pendingModel;
+    return {
+      currentTurnId,
+      pendingModel: model,
+      record: {
+        timestamp: record.timestamp,
+        type: "event_msg",
+        payload: { type: "thread_settings_applied", model },
+      },
+    };
+  }
+  if (payload.type === "task_started") {
+    const turnId = payload.turn_id ? String(payload.turn_id) : currentTurnId;
+    const model = nonEmptyString(payload.model) ?? pendingModel;
+    return {
+      currentTurnId: turnId,
+      pendingModel: model,
+      record: turnId
+        ? {
+            timestamp: record.timestamp,
+            type: "event_msg",
+            payload: { type: "task_started", turn_id: turnId, model },
+          }
+        : null,
+    };
   }
   if (payload.type === "turn_aborted") {
     const turnId = payload.turn_id ? String(payload.turn_id) : currentTurnId;
     return {
       currentTurnId: turnId,
+      pendingModel,
       record: turnId
         ? {
             timestamp: record.timestamp,
@@ -152,6 +208,7 @@ function simplifyRecord(record, currentTurnId) {
   if (payload.type === "token_count" && currentTurnId) {
     return {
       currentTurnId,
+      pendingModel,
       record: {
         timestamp: record.timestamp,
         type: "event_msg",
@@ -162,6 +219,7 @@ function simplifyRecord(record, currentTurnId) {
   if (payload.type === "task_complete" && currentTurnId) {
     return {
       currentTurnId,
+      pendingModel,
       record: {
         timestamp: record.timestamp,
         type: "event_msg",
@@ -169,7 +227,7 @@ function simplifyRecord(record, currentTurnId) {
       },
     };
   }
-  return { currentTurnId, record: null };
+  return { currentTurnId, pendingModel, record: null };
 }
 
 function parseRecord(line) {
@@ -210,8 +268,20 @@ export class TokenUsageManager {
     this.seenEventIds = new Set();
     this.fileStates = new Map();
     this.turns = new Map();
+    this.historicalSegmentsByThread = new Map();
+    this.historicalCostCache = new Map();
     this.activeThreadId = null;
+    this.activeThreadHint = false;
+    this.activeThreadHintAt = 0;
     this.rolloutPathsByThread = new Map();
+    this.rolloutReconcileRequested = false;
+    this.rolloutReconcilePromise = null;
+    this.rolloutReadPromises = new Map();
+    this.cachePersistPromise = null;
+    this.cachePersistTimer = null;
+    this.cacheRevision = 0;
+    this.lastCachePersistAt = 0;
+    this.turnCostCache = new Map();
     this.lastDiscoveryAt = 0;
     this.refreshPromise = null;
     this.initializationPromise = null;
@@ -226,7 +296,14 @@ export class TokenUsageManager {
     this.rolloutWorkerRequests = new Map();
     this.eventWatcher = null;
     this.eventWatchTimer = null;
+    this.unknownRolloutCheckTimer = null;
+    this.lastUnknownRolloutCheckAt = 0;
     this.changeListeners = new Set();
+    this.closed = false;
+    this.removePricingListener = this.pricingManager.onChange?.(() => {
+      this.#invalidateViewModel();
+      if (this.initialized && !this.initializing) this.#notifyChange(this.getViewModel());
+    }) ?? (() => {});
   }
 
   onChange(listener) {
@@ -242,6 +319,7 @@ export class TokenUsageManager {
       await this.pricingManager.initialize();
       await this.#loadCache();
       await this.#refreshOnce({ forceDiscovery: true });
+      if (this.closed) return this.getViewModel();
       this.#startEventWatcher();
       this.initialized = true;
       const viewModel = this.getViewModel();
@@ -264,6 +342,7 @@ export class TokenUsageManager {
   }
 
   async refresh({ forceDiscovery = false, notify = false } = {}) {
+    if (this.closed) return this.getViewModel();
     if (this.initializing) {
       const viewModel = await this.initializationPromise;
       if (notify) this.#notifyChange(viewModel);
@@ -294,6 +373,23 @@ export class TokenUsageManager {
   getViewModel() {
     if (!this.viewModelDirty && this.viewModelCache) return this.viewModelCache;
     const cumulativeCosts = new Map();
+    for (const [threadId, history] of this.historicalSegmentsByThread) {
+      const revision = positiveInteger(history.costRevision);
+      const cached = this.historicalCostCache.get(threadId);
+      const historyCost = cached?.revision === revision
+        ? cached.cost
+        : history.segments.length > 0
+          ? calculateTurnCost({ segments: history.segments }, this.pricingManager)
+          : null;
+      this.historicalCostCache.set(threadId, { revision, cost: historyCost });
+      const viewCost = this.pricingManager.toViewModel(historyCost);
+      const historyPendingTurns = positiveInteger(history.pendingTurns) +
+        (history.segments.length > 0 && !historyCost?.available ? 1 : 0);
+      cumulativeCosts.set(threadId, {
+        totalCny: historyCost?.available ? positiveNumber(viewCost.totalCny) : 0,
+        pendingTurns: historyPendingTurns,
+      });
+    }
     const mappedTurns = [...this.turns.values()]
       // `activeThreadId` identifies the rollout file currently being tailed;
       // it is not a single-session view of the app. Multiple threads can be
@@ -302,14 +398,14 @@ export class TokenUsageManager {
       .filter((turn) => turn.totalTokens > 0)
       .sort((left, right) => left.updatedAt - right.updatedAt)
       .map((turn) => {
-        const rawCost = calculateTurnCost(turn, this.pricingManager);
+        const rawCost = this.#getCachedTurnCost(turn);
         const cost = this.pricingManager.toViewModel(rawCost);
         const taskCost = cumulativeCosts.get(turn.taskKey) ?? {
-          available: true,
           totalCny: 0,
+          pendingTurns: 0,
         };
         if (cost.available) taskCost.totalCny += positiveNumber(cost.totalCny);
-        else taskCost.available = false;
+        else taskCost.pendingTurns += 1;
         cumulativeCosts.set(turn.taskKey, taskCost);
         const {
           taskKey: _taskKey,
@@ -317,20 +413,24 @@ export class TokenUsageManager {
           modelSource: _modelSource,
           segments: _segments,
           rolloutPath: _rolloutPath,
+          costRevision: _costRevision,
           ...publicTurn
         } = turn;
         return {
           ...publicTurn,
           cost: {
             ...cost,
-            cumulativeAvailable: taskCost.available,
-            cumulativeCny: taskCost.available ? taskCost.totalCny : null,
+            cumulativeAvailable: taskCost.pendingTurns === 0,
+            cumulativeCny: taskCost.totalCny,
+            cumulativePendingTurns: taskCost.pendingTurns,
           },
         };
       });
-    // Keep all in-progress turns so simultaneous sessions can update in real
-    // time. The retention limit only applies to completed turns.
-    const liveTurns = mappedTurns.filter((turn) => !turn.completed);
+    // Keep simultaneous in-progress turns, but cap both live and completed
+    // views so a missed completion event cannot grow the UI forever.
+    const liveTurns = mappedTurns
+      .filter((turn) => !turn.completed)
+      .slice(-this.maxViewTurns);
     const recentTurns = mappedTurns
       .filter((turn) => turn.completed)
       .slice(-this.maxViewTurns);
@@ -345,15 +445,25 @@ export class TokenUsageManager {
   }
 
   close() {
+    this.closed = true;
     clearTimeout(this.eventWatchTimer);
+    clearTimeout(this.cachePersistTimer);
+    clearTimeout(this.unknownRolloutCheckTimer);
     this.eventWatchTimer = null;
+    this.cachePersistTimer = null;
+    this.unknownRolloutCheckTimer = null;
     this.eventWatcher?.close();
     this.eventWatcher = null;
+    this.removePricingListener();
+    this.removePricingListener = () => {};
     this.changeListeners.clear();
     this.#closeRolloutWorker();
-    this.fileStates.clear();
-    this.turns.clear();
-    this.seenEventIds.clear();
+    this.rolloutReconcileRequested = false;
+    this.rolloutReadPromises.clear();
+    this.historicalCostCache.clear();
+    // Keep cache state alive until an in-flight asynchronous persistence has
+    // finished; clearing these maps here could make that write serialize an
+    // empty cache during injector shutdown.
     this.#invalidateViewModel();
   }
 
@@ -372,7 +482,7 @@ export class TokenUsageManager {
   }
 
   #startEventWatcher() {
-    if (this.eventWatcher) return;
+    if (this.closed || this.eventWatcher) return;
     try {
       this.eventWatcher = watch(
         dirname(this.eventPath),
@@ -397,7 +507,12 @@ export class TokenUsageManager {
   }
 
   async #refreshOnce({ forceDiscovery }) {
-    await this.pricingManager.refreshExchangeRate();
+    // Exchange-rate refresh is deliberately detached from usage parsing. A
+    // cached rate is sufficient for the current view; the pricing listener
+    // invalidates CNY values when a newer rate arrives.
+    void Promise.resolve(this.pricingManager.refreshExchangeRate()).catch((error) => {
+      console.error(`[token-usage] 汇率刷新失败: ${error.message}`);
+    });
     this.#invalidateViewModel();
     await this.#readUsageEvents();
     const now = Date.now();
@@ -410,22 +525,28 @@ export class TokenUsageManager {
       ? this.fileStates.get(this.activeThreadId)
       : null;
     if (activeState) await this.#readAppendedRollout(activeState);
-    if (this.cacheDirty) await this.#persistCache();
+    this.#pruneCompletedTurns();
+    this.#queueCachePersist();
     this.error = null;
-    return this.getViewModel();
+    const viewModel = this.getViewModel();
+    if (!this.closed) this.#scheduleUnknownRolloutReconciliation();
+    return viewModel;
   }
 
   async #loadCache() {
     const cached = await readJson(this.cachePath);
-    if (!cached || cached.version !== CACHE_VERSION) return;
+    const cachedVersion = positiveInteger(cached?.version);
+    if (!cached || ![4, 5, CACHE_VERSION].includes(cachedVersion)) return;
     this.eventState = {
       offset: positiveInteger(cached.eventState?.offset),
       pending: String(cached.eventState?.pending ?? ""),
     };
     this.seenEventIds = new Set(Array.isArray(cached.seenEventIds)
-      ? cached.seenEventIds.map(String)
+      ? cached.seenEventIds.map(String).slice(-MAX_SEEN_EVENT_IDS)
       : []);
     this.activeThreadId = nonEmptyString(cached.activeThreadId);
+    this.activeThreadHint = Boolean(cached.activeThreadHint);
+    this.activeThreadHintAt = positiveNumber(cached.activeThreadHintAt);
     for (const value of Array.isArray(cached.turns) ? cached.turns : []) {
       const turn = normalizeCachedTurn(value);
       if (turn) this.turns.set(turn.turnId, turn);
@@ -434,19 +555,106 @@ export class TokenUsageManager {
       const state = normalizeCachedFileState(value);
       if (state) this.fileStates.set(state.threadId, state);
     }
+    if (this.fileStates.size > MAX_TRACKED_ROLLOUT_STATES) {
+      this.#pruneRolloutStates(null);
+      this.#markCacheDirty();
+    }
+    for (const value of Array.isArray(cached.historicalSegmentsByThread)
+      ? cached.historicalSegmentsByThread
+      : []) {
+      const history = normalizeCachedHistory(value);
+      if (history) this.historicalSegmentsByThread.set(history.threadId, history);
+    }
+    if (this.#pruneHistoricalThreads()) this.#markCacheDirty();
+    if (cachedVersion !== CACHE_VERSION) this.#markCacheDirty();
     this.#invalidateViewModel();
   }
 
+  #getCachedTurnCost(turn) {
+    const revision = positiveInteger(turn.costRevision);
+    const cached = this.turnCostCache.get(turn.turnId);
+    if (cached?.version === COST_CACHE_VERSION && cached.revision === revision) {
+      return cached.cost;
+    }
+    const cost = calculateTurnCost(turn, this.pricingManager);
+    this.turnCostCache.set(turn.turnId, {
+      version: COST_CACHE_VERSION,
+      revision,
+      cost,
+    });
+    return cost;
+  }
+
   async #persistCache() {
-    await writeJsonAtomic(this.cachePath, {
+    if (this.cachePersistPromise) return this.cachePersistPromise;
+    const task = (async () => {
+      if (!this.cacheDirty) return;
+      const revision = this.cacheRevision;
+      await writeJsonAtomic(this.cachePath, this.#cacheSnapshot());
+      this.lastCachePersistAt = Date.now();
+      if (this.cacheRevision === revision) this.cacheDirty = false;
+    })().finally(() => {
+      if (this.cachePersistPromise === task) this.cachePersistPromise = null;
+      if (this.cacheDirty && !this.closed) this.#queueCachePersist();
+    });
+    this.cachePersistPromise = task;
+    return task;
+  }
+
+  #queueCachePersist() {
+    if (!this.cacheDirty || this.cachePersistTimer || this.closed) return;
+    if (this.cachePersistPromise) return;
+    const delay = Math.max(
+      0,
+      CACHE_PERSIST_DELAY_MS - (Date.now() - this.lastCachePersistAt),
+    );
+    this.cachePersistTimer = setTimeout(() => {
+      this.cachePersistTimer = null;
+      void this.#persistCache().catch((error) => {
+        console.error(`[token-usage] 保存 Token 缓存失败: ${error.message}`);
+      });
+    }, delay);
+  }
+
+  async flush() {
+    clearTimeout(this.cachePersistTimer);
+    this.cachePersistTimer = null;
+    while (this.initializationPromise || this.refreshPromise || this.rolloutReconcilePromise ||
+      this.cachePersistPromise || this.cacheDirty) {
+      const inFlight = [
+        this.initializationPromise,
+        this.refreshPromise,
+        this.rolloutReconcilePromise,
+      ].filter(Boolean);
+      if (inFlight.length > 0) {
+        await Promise.allSettled(inFlight);
+        continue;
+      }
+      if (this.cachePersistPromise) {
+        await this.cachePersistPromise;
+      } else {
+        await this.#persistCache();
+      }
+    }
+  }
+
+  #cacheSnapshot() {
+    return {
       version: CACHE_VERSION,
       eventState: this.eventState,
       seenEventIds: [...this.seenEventIds],
       activeThreadId: this.activeThreadId,
+      activeThreadHint: this.activeThreadHint,
+      activeThreadHintAt: this.activeThreadHintAt,
       fileStates: [...this.fileStates.values()],
+      historicalSegmentsByThread: [...this.historicalSegmentsByThread.values()],
       turns: [...this.turns.values()],
-    });
-    this.cacheDirty = false;
+    };
+  }
+
+  #markCacheDirty() {
+    this.cacheDirty = true;
+    this.cacheRevision += 1;
   }
 
   async #readUsageEvents() {
@@ -459,7 +667,15 @@ export class TokenUsageManager {
     }
     if (info.size < this.eventState.offset) {
       this.eventState = { offset: 0, pending: "" };
-      this.cacheDirty = true;
+      this.seenEventIds.clear();
+      for (const [turnId, turn] of this.turns) {
+        if (turn.source === "event") {
+          this.turns.delete(turnId);
+          this.turnCostCache.delete(turnId);
+        }
+      }
+      this.#markCacheDirty();
+      this.#invalidateViewModel();
     }
     await readAppendedChunks(this.eventPath, this.eventState, (line) => {
       if (!line) return;
@@ -477,7 +693,12 @@ export class TokenUsageManager {
     const eventId = nonEmptyString(event?.eventId);
     if (!eventId || this.seenEventIds.has(eventId)) return;
     this.seenEventIds.add(eventId);
-    this.cacheDirty = true;
+    while (this.seenEventIds.size > MAX_SEEN_EVENT_IDS) {
+      const oldest = this.seenEventIds.values().next().value;
+      if (oldest == null) break;
+      this.seenEventIds.delete(oldest);
+    }
+    this.#markCacheDirty();
     this.#invalidateViewModel();
     const threadId = nonEmptyString(event.threadId);
     if (!threadId) return;
@@ -486,6 +707,8 @@ export class TokenUsageManager {
 
     if (event.type === "thread-active") {
       this.activeThreadId = threadId;
+      this.activeThreadHint = true;
+      this.activeThreadHintAt = Date.now();
       return;
     }
 
@@ -495,21 +718,35 @@ export class TokenUsageManager {
       const last = normalizeProtocolUsage(event.tokenUsage?.last);
       if (!last) return;
       let turn = this.turns.get(turnId);
-      if (!turn || turn.source !== "event") {
-        const previous = turn;
-        turn = emptyTurn(turnId, threadId, "event");
-        if (previous) {
-          turn.completed = previous.completed;
-          turn.status = previous.status;
-          turn.model = previous.model;
-          turn.modelSource = previous.modelSource;
-          turn.modelContextWindow = previous.modelContextWindow;
-          turn.updatedAt = previous.updatedAt;
+      if (!turn) turn = emptyTurn(turnId, threadId, "event");
+      // Relay events are authoritative for live turns, but a rollout record
+      // may have been loaded first. Preserve its counters and append only a
+      // genuinely newer event delta instead of replacing the whole turn.
+      turn.source = "event";
+      const modelSource = event.modelSource ?? "thread";
+      const incomingTotal = positiveNumber(event.tokenUsage?.total?.totalTokens);
+      const previousTotal = positiveNumber(turn.cumulativeTotalTokens);
+      if (model) {
+        // A reroute starts a new model segment. Unknown tokens before that
+        // boundary must stay unresolved instead of being relabeled with the
+        // new model.
+        if (modelSource !== "rerouted") {
+          fillUnknownSegmentModels(turn, model, modelSource);
         }
+        setTurnModel(turn, model, modelSource);
       }
-      setTurnModel(turn, model, event.modelSource ?? "thread");
-      addUsage(turn, last, turn.model, turn.modelSource);
-      turn.cumulativeTotalTokens = positiveNumber(event.tokenUsage?.total?.totalTokens);
+      if (incomingTotal <= 0 || incomingTotal > previousTotal) {
+        // The event can carry a stale lower-priority model after a reroute.
+        // Price the delta with the model that won the source-priority check,
+        // rather than relabeling a post-reroute segment with that stale value.
+        addUsage(
+          turn,
+          last,
+          turn.model || model,
+          turn.modelSource || modelSource,
+        );
+      }
+      turn.cumulativeTotalTokens = Math.max(previousTotal, incomingTotal);
       const modelContextWindow = positiveNumber(event.tokenUsage?.modelContextWindow);
       if (modelContextWindow > 0) turn.modelContextWindow = modelContextWindow;
       turn.updatedAt = updatedAt;
@@ -520,6 +757,9 @@ export class TokenUsageManager {
     if (event.type === "turn-completed") {
       const turn = this.turns.get(turnId);
       if (!turn) return;
+      if (model && event.modelSource !== "rerouted") {
+        fillUnknownSegmentModels(turn, model, event.modelSource ?? "completed");
+      }
       setTurnModel(turn, model, event.modelSource ?? "thread");
       turn.status = nonEmptyString(event.status);
       turn.completed = TERMINAL_TURN_STATUSES.has(turn.status);
@@ -530,88 +770,214 @@ export class TokenUsageManager {
   async #refreshRolloutCatalog() {
     const paths = await collectRolloutFiles(join(this.codexHome, "sessions"), 4);
     this.rolloutPathsByThread.clear();
+    const discoveredThreadIds = new Set();
     for (const path of paths) {
       const threadId = threadIdFromRolloutPath(path);
-      if (threadId) this.rolloutPathsByThread.set(threadId, path);
+      if (threadId) {
+        discoveredThreadIds.add(threadId);
+        this.rolloutPathsByThread.set(threadId, path);
+      }
+    }
+    for (const [threadId] of this.fileStates) {
+      if (!discoveredThreadIds.has(threadId)) {
+        this.fileStates.delete(threadId);
+        this.rolloutReadPromises.delete(threadId);
+        this.#markCacheDirty();
+      }
+    }
+    const activeHintFresh = this.activeThreadHint &&
+      Date.now() - this.activeThreadHintAt < ACTIVE_THREAD_HINT_TTL_MS;
+    if (this.activeThreadId && !discoveredThreadIds.has(this.activeThreadId) &&
+      !activeHintFresh) {
+      this.activeThreadId = null;
+      this.activeThreadHint = false;
+      this.activeThreadHintAt = 0;
+      this.#markCacheDirty();
     }
     if (!this.activeThreadId && paths.length > 0) {
       const latestPath = [...paths].sort((left, right) => basename(right).localeCompare(basename(left)))[0];
       this.activeThreadId = threadIdFromRolloutPath(latestPath);
-      this.cacheDirty = Boolean(this.activeThreadId);
+      this.activeThreadHint = false;
+      this.activeThreadHintAt = 0;
+      if (this.activeThreadId) this.#markCacheDirty();
     }
   }
 
   async #ensureActiveRollout() {
     const threadId = this.activeThreadId;
-    if (!threadId || this.fileStates.has(threadId)) return;
+    return this.#ensureRolloutState(threadId);
+  }
+
+  async #ensureRolloutState(threadId) {
+    if (!threadId) return null;
+    const existing = this.fileStates.get(threadId);
+    if (existing) {
+      const currentPath = this.rolloutPathsByThread.get(threadId);
+      if (currentPath && existing.path !== currentPath) {
+        existing.path = currentPath;
+        existing.offset = 0;
+        existing.pending = "";
+        existing.currentTurnId = null;
+        existing.threadModel = null;
+        existing.modelReconciled = false;
+        existing.unknownModelChecked = false;
+        existing.unknownModelCheckOffset = 0;
+        this.#markCacheDirty();
+      }
+      existing.lastUsedAt = Date.now();
+      if (existing.parserVersion !== ROLLOUT_PARSER_VERSION) {
+        existing.modelReconciled = false;
+        existing.unknownModelChecked = false;
+        existing.unknownModelCheckOffset = 0;
+      }
+      return existing;
+    }
     let path = this.rolloutPathsByThread.get(threadId);
     if (!path) {
       await this.#refreshRolloutCatalog();
       path = this.rolloutPathsByThread.get(threadId);
     }
     if (!path) return;
-    this.fileStates.set(threadId, {
+    this.#pruneRolloutStates(threadId);
+    const state = {
       threadId,
       path,
       offset: 0,
       pending: "",
       currentTurnId: null,
+      threadModel: null,
       modelReconciled: false,
-    });
-    this.cacheDirty = true;
+      parserVersion: 0,
+      unknownModelChecked: false,
+      unknownModelCheckOffset: 0,
+      lastUsedAt: Date.now(),
+    };
+    this.fileStates.set(threadId, state);
+    this.#markCacheDirty();
+    return state;
   }
 
   async #readAppendedRollout(state) {
+    const inFlight = this.rolloutReadPromises.get(state.threadId);
+    if (inFlight) return inFlight;
+    const task = this.#readAppendedRolloutOnce(state)
+      .finally(() => {
+        if (this.rolloutReadPromises.get(state.threadId) === task) {
+          this.rolloutReadPromises.delete(state.threadId);
+        }
+      });
+    this.rolloutReadPromises.set(state.threadId, task);
+    return task;
+  }
+
+  async #readAppendedRolloutOnce(state) {
+    state.lastUsedAt = Date.now();
     const reconcile = !state.modelReconciled;
+    const previousState = {
+      offset: state.offset,
+      pending: state.pending,
+      currentTurnId: state.currentTurnId,
+      threadModel: state.threadModel,
+      modelReconciled: state.modelReconciled,
+      parserVersion: state.parserVersion,
+    };
+    if (reconcile) {
+      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+      state.threadModel = null;
+    }
     let result;
     try {
-      result = await this.#readRolloutInWorker(state, reconcile);
+      result = await this.#readRolloutInWorker(
+        state,
+        reconcile,
+        (records) => {
+          for (const record of records) this.#processRolloutRecord(record, state);
+        },
+        () => {
+          // The worker announces truncation before it emits the rebuilt
+          // records. Clear the old projection first so the new batches are
+          // not discarded after parsing completes.
+          this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+          state.offset = 0;
+          state.pending = "";
+          state.currentTurnId = null;
+          state.threadModel = null;
+          state.modelReconciled = false;
+        },
+      );
     } catch (error) {
+      if (this.closed) return;
       console.error(`[token-usage] Worker 解析 rollout 失败，回退到主线程：${error.message}`);
-      await this.#readAppendedRolloutOnMain(state, reconcile);
+      // A worker may have emitted a few batches before failing. Rebuild this
+      // rollout from the beginning so those partial records cannot be
+      // duplicated by the main-thread fallback.
+      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+      state.offset = 0;
+      state.pending = "";
+      state.currentTurnId = null;
+      state.threadModel = null;
+      state.modelReconciled = false;
+      await this.#readAppendedRolloutOnMain(state, true);
       return;
     }
     if (result.missing) {
       this.fileStates.delete(state.threadId);
-      this.cacheDirty = true;
+      this.#markCacheDirty();
       this.#invalidateViewModel();
       return;
-    }
-    if (result.reset) {
-      this.#clearRolloutTurns(state.threadId);
-      this.cacheDirty = true;
     }
     state.offset = positiveInteger(result.offset);
     state.pending = String(result.pending ?? "");
     state.currentTurnId = nonEmptyString(result.currentTurnId);
-    for (const record of result.records ?? []) this.#processRolloutRecord(record, state);
-    if (reconcile) state.modelReconciled = true;
-    this.cacheDirty = true;
-    this.#invalidateViewModel();
+    state.threadModel = nonEmptyString(result.pendingModel);
+    if (reconcile || result.reset) {
+      state.modelReconciled = true;
+      state.parserVersion = ROLLOUT_PARSER_VERSION;
+    }
+    const stateChanged = previousState.offset !== state.offset ||
+      previousState.pending !== state.pending ||
+      previousState.currentTurnId !== state.currentTurnId ||
+      previousState.threadModel !== state.threadModel ||
+      previousState.modelReconciled !== state.modelReconciled ||
+      previousState.parserVersion !== state.parserVersion;
+    if (stateChanged) this.#markCacheDirty();
+    if (stateChanged) this.#invalidateViewModel();
   }
 
   async #readAppendedRolloutOnMain(state, reconcile) {
+    const previousCacheRevision = this.cacheRevision;
+    const previousState = {
+      offset: state.offset,
+      pending: state.pending,
+      currentTurnId: state.currentTurnId,
+      threadModel: state.threadModel,
+      modelReconciled: state.modelReconciled,
+      parserVersion: state.parserVersion,
+    };
     let info;
     try {
       info = await stat(state.path);
     } catch (error) {
       if (error.code === "ENOENT") {
         this.fileStates.delete(state.threadId);
-        this.cacheDirty = true;
+        this.#markCacheDirty();
         return;
       }
       throw error;
     }
     if (reconcile) {
+      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
       state.offset = 0;
       state.pending = "";
       state.currentTurnId = null;
+      state.threadModel = null;
     }
     if (info.size < state.offset) {
-      this.#clearRolloutTurns(state.threadId);
+      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
       state.offset = 0;
       state.pending = "";
       state.currentTurnId = null;
+      state.threadModel = null;
       state.modelReconciled = false;
     }
     await readAppendedChunks(state.path, state, (line) => {
@@ -624,9 +990,20 @@ export class TokenUsageManager {
       }
       this.#processRolloutRecord(record, state);
     });
-    if (reconcile) state.modelReconciled = true;
-    this.cacheDirty = true;
-    this.#invalidateViewModel();
+    if (reconcile) {
+      state.modelReconciled = true;
+      state.parserVersion = ROLLOUT_PARSER_VERSION;
+    }
+    const stateChanged = previousState.offset !== state.offset ||
+      previousState.pending !== state.pending ||
+      previousState.currentTurnId !== state.currentTurnId ||
+      previousState.threadModel !== state.threadModel ||
+      previousState.modelReconciled !== state.modelReconciled ||
+      previousState.parserVersion !== state.parserVersion;
+    if (stateChanged) this.#markCacheDirty();
+    if (stateChanged || this.cacheRevision !== previousCacheRevision) {
+      this.#invalidateViewModel();
+    }
   }
 
   #processRolloutRecord(record, state) {
@@ -635,25 +1012,50 @@ export class TokenUsageManager {
       const existing = this.turns.get(state.currentTurnId);
       const turn = existing ?? emptyTurn(state.currentTurnId, state.threadId, "rollout", state.path);
       const model = nonEmptyString(record.payload.model);
+      if (model) state.threadModel = model;
       setTurnModel(turn, model, "turn-context");
-      if (model) {
-        for (const segment of turn.segments) {
-          const sourcePriority = MODEL_SOURCE_PRIORITY[segment.modelSource] ?? 0;
-          if (!segment.model || sourcePriority < MODEL_SOURCE_PRIORITY["turn-context"]) {
-            segment.model = model;
-            segment.modelSource = "turn-context";
-          }
-        }
-      }
+      fillUnknownSegmentModels(turn, model, "turn-context");
       if (turn.source === "rollout") turn.updatedAt = parseTimestamp(record.timestamp);
       this.turns.set(turn.turnId, turn);
-      this.cacheDirty = true;
+      this.#markCacheDirty();
     }
     if (record.type === "response_item") {
       const turnId = record.payload?.internal_chat_message_metadata_passthrough?.turn_id;
       if (turnId) state.currentTurnId = String(turnId);
     }
     if (record.type !== "event_msg") return;
+
+    if (record.payload?.type === "thread_settings_applied") {
+      const model = nonEmptyString(record.payload.model) ??
+        nonEmptyString(record.payload.thread_settings?.model);
+      if (!model) return;
+      state.threadModel = model;
+      const currentTurn = state.currentTurnId ? this.turns.get(state.currentTurnId) : null;
+      if (currentTurn && !currentTurn.completed) {
+        setTurnModel(currentTurn, model, "thread-settings");
+        fillUnknownSegmentModels(currentTurn, model, "thread-settings");
+        this.#markCacheDirty();
+      }
+      return;
+    }
+
+    if (record.payload?.type === "task_started") {
+      const turnId = nonEmptyString(record.payload.turn_id);
+      if (!turnId) return;
+      state.currentTurnId = turnId;
+      const turn = this.turns.get(turnId) ?? emptyTurn(
+        turnId,
+        state.threadId,
+        "rollout",
+        state.path,
+      );
+      const model = nonEmptyString(record.payload.model) ?? state.threadModel;
+      setTurnModel(turn, model, "thread-settings");
+      fillUnknownSegmentModels(turn, model, "thread-settings");
+      this.turns.set(turnId, turn);
+      this.#markCacheDirty();
+      return;
+    }
 
     if (record.payload?.type === "turn_aborted") {
       const turnId = nonEmptyString(record.payload.turn_id) ?? state.currentTurnId;
@@ -665,13 +1067,13 @@ export class TokenUsageManager {
         turn.status = record.payload.reason === "interrupted" ? "interrupted" : "failed";
         turn.completed = true;
         turn.updatedAt = parseTimestamp(record.timestamp);
-        this.cacheDirty = true;
+        this.#markCacheDirty();
         return;
       }
       turn.completed = true;
       turn.status = record.payload.reason === "interrupted" ? "interrupted" : "failed";
       turn.updatedAt = parseTimestamp(record.timestamp);
-      this.cacheDirty = true;
+      this.#markCacheDirty();
       return;
     }
 
@@ -682,11 +1084,13 @@ export class TokenUsageManager {
       if (!last) return;
       const existing = this.turns.get(state.currentTurnId);
       if (existing?.source === "event") {
-        existing.cumulativeTotalTokens = positiveNumber(
-          record.payload.info?.total_token_usage?.total_tokens,
+        existing.cumulativeTotalTokens = Math.max(
+          positiveNumber(existing.cumulativeTotalTokens),
+          positiveNumber(record.payload.info?.total_token_usage?.total_tokens),
         );
-        existing.modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
-        this.cacheDirty = true;
+        const modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
+        if (modelContextWindow > 0) existing.modelContextWindow = modelContextWindow;
+        this.#markCacheDirty();
         return;
       }
       const turn = existing ?? emptyTurn(
@@ -702,7 +1106,7 @@ export class TokenUsageManager {
       turn.modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
       turn.updatedAt = parseTimestamp(record.timestamp);
       this.turns.set(turn.turnId, turn);
-      this.cacheDirty = true;
+      this.#markCacheDirty();
       return;
     }
 
@@ -712,15 +1116,15 @@ export class TokenUsageManager {
       turn.completed = true;
       turn.status = "completed";
       turn.updatedAt = parseTimestamp(record.timestamp);
-      this.cacheDirty = true;
+      this.#markCacheDirty();
     }
   }
 
-  #readRolloutInWorker(state, reconcile) {
+  #readRolloutInWorker(state, reconcile, onBatch, onReset) {
     const worker = this.#ensureRolloutWorker();
     const id = ++this.rolloutWorkerRequestId;
     return new Promise((resolve, reject) => {
-      this.rolloutWorkerRequests.set(id, { resolve, reject });
+      this.rolloutWorkerRequests.set(id, { resolve, reject, onBatch, onReset });
       try {
         worker.postMessage({
           id,
@@ -728,6 +1132,7 @@ export class TokenUsageManager {
           offset: state.offset,
           pending: state.pending,
           currentTurnId: state.currentTurnId,
+          pendingModel: state.threadModel,
           reconcile,
         });
       } catch (error) {
@@ -743,6 +1148,24 @@ export class TokenUsageManager {
     worker.on("message", (message) => {
       const pending = this.rolloutWorkerRequests.get(message?.id);
       if (!pending) return;
+      if (message?.type === "batch") {
+        try {
+          pending.onBatch?.(message.records ?? []);
+        } catch (error) {
+          this.rolloutWorkerRequests.delete(message.id);
+          pending.reject(error);
+        }
+        return;
+      }
+      if (message?.type === "reset") {
+        try {
+          pending.onReset?.();
+        } catch (error) {
+          this.rolloutWorkerRequests.delete(message.id);
+          pending.reject(error);
+        }
+        return;
+      }
       this.rolloutWorkerRequests.delete(message.id);
       if (message.ok) pending.resolve(message);
       else pending.reject(new Error(message.error || "rollout Worker 解析失败"));
@@ -775,11 +1198,165 @@ export class TokenUsageManager {
     void worker.terminate();
   }
 
-  #clearRolloutTurns(threadId) {
+  #clearRolloutTurns(threadId, { clearHistory = false } = {}) {
     for (const [turnId, turn] of this.turns) {
-      if (turn.threadId === threadId && turn.source === "rollout") this.turns.delete(turnId);
+      if (turn.threadId === threadId && turn.source === "rollout") {
+        this.turns.delete(turnId);
+        this.turnCostCache.delete(turnId);
+      }
+    }
+    if (clearHistory) {
+      this.historicalSegmentsByThread.delete(threadId);
+      this.historicalCostCache.delete(threadId);
     }
     this.#invalidateViewModel();
+  }
+
+  #pruneRolloutStates(protectedThreadId) {
+    if (this.fileStates.size < MAX_TRACKED_ROLLOUT_STATES) return;
+    const removable = [...this.fileStates.entries()]
+      .filter(([threadId]) => threadId !== protectedThreadId &&
+        threadId !== this.activeThreadId && !this.rolloutReadPromises.has(threadId))
+      .sort(([, left], [, right]) => positiveNumber(left.lastUsedAt) - positiveNumber(right.lastUsedAt));
+    while (this.fileStates.size >= MAX_TRACKED_ROLLOUT_STATES && removable.length > 0) {
+      const [threadId] = removable.shift();
+      this.fileStates.delete(threadId);
+      this.#markCacheDirty();
+    }
+  }
+
+  #pruneCompletedTurns() {
+    if (this.turns.size <= MAX_STORED_TURNS) return;
+    const removable = [...this.turns.values()]
+      .filter((turn) => turn.completed && turn.totalTokens > 0)
+      .sort((left, right) => left.updatedAt - right.updatedAt);
+    const target = this.turns.size - MAX_STORED_TURNS;
+    let pruned = 0;
+    for (const turn of removable) {
+      if (pruned >= target) break;
+      const cost = calculateTurnCost(turn, this.pricingManager);
+      let history = this.historicalSegmentsByThread.get(turn.taskKey);
+      if (!history) {
+        history = {
+          threadId: turn.taskKey,
+          segments: [],
+          pendingTurns: 0,
+          pendingTokens: 0,
+          costRevision: 0,
+          updatedAt: 0,
+        };
+        this.historicalSegmentsByThread.set(turn.taskKey, history);
+      }
+      if (cost?.available) {
+        for (const segment of turn.segments) mergeUsageSegment(history.segments, segment);
+        compactUsageSegments(history.segments);
+      } else {
+        history.pendingTurns = positiveInteger(history.pendingTurns) + 1;
+        history.pendingTokens = positiveNumber(history.pendingTokens) + positiveNumber(turn.totalTokens);
+      }
+      history.costRevision = positiveInteger(history.costRevision) + 1;
+      history.updatedAt = Date.now();
+      this.historicalCostCache.delete(turn.taskKey);
+      this.turns.delete(turn.turnId);
+      this.turnCostCache.delete(turn.turnId);
+      pruned += 1;
+    }
+    const historiesPruned = this.#pruneHistoricalThreads();
+    if (pruned > 0 || historiesPruned) {
+      this.#markCacheDirty();
+      this.#invalidateViewModel();
+    }
+  }
+
+  #pruneHistoricalThreads() {
+    if (this.historicalSegmentsByThread.size <= MAX_HISTORICAL_THREADS) return false;
+    const threadsWithTurns = new Set([...this.turns.values()].map((turn) => turn.taskKey));
+    const removable = [...this.historicalSegmentsByThread.values()]
+      .filter((history) => !threadsWithTurns.has(history.threadId))
+      .sort((left, right) => positiveNumber(left.updatedAt) - positiveNumber(right.updatedAt));
+    let pruned = false;
+    while (this.historicalSegmentsByThread.size > MAX_HISTORICAL_THREADS && removable.length > 0) {
+      const history = removable.shift();
+      this.historicalSegmentsByThread.delete(history.threadId);
+      this.historicalCostCache.delete(history.threadId);
+      pruned = true;
+    }
+    return pruned;
+  }
+
+  #scheduleUnknownRolloutReconciliation() {
+    if (this.rolloutReconcilePromise) {
+      this.rolloutReconcileRequested = true;
+      return;
+    }
+    if (this.rolloutPathsByThread.size === 0) return;
+    const elapsed = Date.now() - this.lastUnknownRolloutCheckAt;
+    if (elapsed < UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS) {
+      if (!this.unknownRolloutCheckTimer) {
+        this.unknownRolloutCheckTimer = setTimeout(() => {
+          this.unknownRolloutCheckTimer = null;
+          if (!this.closed) this.#scheduleUnknownRolloutReconciliation();
+        }, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS - elapsed);
+      }
+      return;
+    }
+    this.lastUnknownRolloutCheckAt = Date.now();
+    const possibleThreads = [...new Set([...this.turns.values()]
+      .filter((turn) => turn.totalTokens > 0 && turnHasUnknownModel(turn))
+      .map((turn) => turn.threadId)
+      .filter((threadId) => threadId && this.rolloutPathsByThread.has(threadId)))].slice(
+        -MAX_TRACKED_ROLLOUT_STATES,
+      );
+    if (possibleThreads.length === 0) return;
+    this.rolloutReconcilePromise = (async () => {
+      const candidates = (await Promise.all(possibleThreads.map(async (threadId) => {
+        const state = this.fileStates.get(threadId);
+        if (!state || !state.unknownModelChecked) return threadId;
+        try {
+          const info = await stat(state.path);
+          return info.size !== state.unknownModelCheckOffset ? threadId : null;
+        } catch (error) {
+          if (error.code !== "ENOENT") {
+            console.error(`[token-usage] 检查线程 ${threadId} rollout 变化失败: ${error.message}`);
+          }
+          return null;
+        }
+      }))).filter(Boolean);
+      if (candidates.length === 0) return;
+      let changed = false;
+      let nextCandidate = 0;
+      const reconcileWorker = async () => {
+        for (;;) {
+          const candidateIndex = nextCandidate++;
+          if (candidateIndex >= candidates.length) return;
+          const threadId = candidates[candidateIndex];
+          try {
+            const state = await this.#ensureRolloutState(threadId);
+            if (!state) continue;
+            const revision = this.cacheRevision;
+            await this.#readAppendedRollout(state);
+            if (!state.unknownModelChecked || state.unknownModelCheckOffset !== state.offset) {
+              state.unknownModelChecked = true;
+              state.unknownModelCheckOffset = state.offset;
+              this.#markCacheDirty();
+            }
+            changed ||= this.cacheRevision !== revision;
+          } catch (error) {
+            console.error(`[token-usage] 后台补全线程 ${threadId} 失败: ${error.message}`);
+          }
+        }
+      };
+      await Promise.all(Array.from({
+        length: Math.min(UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, candidates.length),
+      }, () => reconcileWorker()));
+      this.#queueCachePersist();
+      if (changed) this.#notifyChange(this.getViewModel());
+    })().finally(() => {
+      const rerun = this.rolloutReconcileRequested;
+      this.rolloutReconcileRequested = false;
+      this.rolloutReconcilePromise = null;
+      if (rerun && !this.closed) this.#scheduleUnknownRolloutReconciliation();
+    });
   }
 }
 
@@ -802,14 +1379,51 @@ function emptyTurn(turnId, threadId, source, rolloutPath = "") {
     modelContextWindow: 0,
     model: "",
     modelSource: "",
+    costRevision: 0,
     segments: [],
     updatedAt: 0,
   };
 }
 
 function addUsage(turn, usage, model, modelSource = turn.modelSource) {
-  for (const field of TOKEN_FIELDS) turn[toCamelCase(field)] += positiveNumber(usage[field]);
-  turn.segments.push({ model: model || "", modelSource: modelSource || "", usage });
+  const normalizedUsage = Object.fromEntries(
+    TOKEN_FIELDS.map((field) => [field, positiveNumber(usage?.[field])]),
+  );
+  for (const field of TOKEN_FIELDS) turn[toCamelCase(field)] += normalizedUsage[field];
+  const segmentModel = model || "";
+  const segmentSource = modelSource || "";
+  const lastSegment = turn.segments.at(-1);
+  if (lastSegment && lastSegment.model === segmentModel && lastSegment.modelSource === segmentSource) {
+    for (const field of TOKEN_FIELDS) {
+      lastSegment.usage[field] = positiveNumber(lastSegment.usage[field]) + normalizedUsage[field];
+    }
+  } else {
+    turn.segments.push({
+      model: segmentModel,
+      modelSource: segmentSource,
+      usage: normalizedUsage,
+    });
+  }
+  turn.costRevision = positiveInteger(turn.costRevision) + 1;
+}
+
+function turnHasUnknownModel(turn) {
+  return !nonEmptyString(turn?.model) ||
+    (Array.isArray(turn?.segments) && turn.segments.some((segment) => !nonEmptyString(segment?.model)));
+}
+
+function fillUnknownSegmentModels(turn, model, modelSource) {
+  const nextModel = nonEmptyString(model);
+  if (!nextModel) return;
+  if (turn.segments.some((segment) => segment.modelSource === "rerouted")) return;
+  let changed = false;
+  for (const segment of turn.segments) {
+    if (segment.model) continue;
+    segment.model = nextModel;
+    segment.modelSource = modelSource || segment.modelSource || "thread";
+    changed = true;
+  }
+  if (changed) turn.costRevision = positiveInteger(turn.costRevision) + 1;
 }
 
 function setTurnModel(turn, model, source = "thread") {
@@ -822,14 +1436,17 @@ function setTurnModel(turn, model, source = "thread") {
   if (turn.model === nextModel && currentSource === source) return false;
   turn.model = nextModel;
   turn.modelSource = source;
+  turn.costRevision = positiveInteger(turn.costRevision) + 1;
   return true;
 }
 
 function calculateTurnCost(turn, pricingManager) {
   let cost = null;
   const tiers = new Map();
+  const hasReroute = turn.segments.some((segment) => segment.modelSource === "rerouted");
   for (const segment of turn.segments) {
-    const segmentCost = pricingManager.calculate(segment.model || turn.model, segment.usage);
+    const segmentModel = segment.model || (hasReroute ? "" : turn.model);
+    const segmentCost = pricingManager.calculate(segmentModel, segment.usage);
     cost = accumulateTokenCost(cost, segmentCost);
     if (!segmentCost.available) continue;
     const tierKey = JSON.stringify([
@@ -876,6 +1493,7 @@ function normalizeCachedTurn(value) {
   turn.status = nonEmptyString(value.status);
   turn.model = String(value.model ?? "");
   turn.modelSource = String(value.modelSource ?? (turn.model ? "thread" : ""));
+  turn.costRevision = positiveInteger(value.costRevision);
   turn.cumulativeTotalTokens = positiveNumber(value.cumulativeTotalTokens);
   turn.modelContextWindow = positiveNumber(value.modelContextWindow);
   turn.updatedAt = positiveNumber(value.updatedAt);
@@ -886,6 +1504,7 @@ function normalizeCachedTurn(value) {
         usage: normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({}),
       }))
     : [];
+  if (turn.costRevision === 0 && (turn.model || turn.segments.length > 0)) turn.costRevision = 1;
   for (const field of TOKEN_FIELDS) {
     turn[toCamelCase(field)] = positiveNumber(value[toCamelCase(field)]);
   }
@@ -902,8 +1521,72 @@ function normalizeCachedFileState(value) {
     offset: positiveInteger(value.offset),
     pending: String(value.pending ?? ""),
     currentTurnId: nonEmptyString(value.currentTurnId),
+    threadModel: nonEmptyString(value.threadModel),
     modelReconciled: Boolean(value.modelReconciled),
+    parserVersion: positiveInteger(value.parserVersion),
+    unknownModelChecked: Boolean(value.unknownModelChecked),
+    unknownModelCheckOffset: positiveInteger(value.unknownModelCheckOffset),
+    lastUsedAt: positiveNumber(value.lastUsedAt),
   };
+}
+
+function normalizeCachedHistory(value) {
+  const threadId = nonEmptyString(value?.threadId);
+  if (!threadId || !Array.isArray(value?.segments)) return null;
+  const pendingTurns = positiveInteger(value.pendingTurns);
+  const segments = value.segments.map((segment) => ({
+    model: String(segment?.model ?? ""),
+    modelSource: String(segment?.modelSource ?? (segment?.model ? "thread" : "")),
+    usage: normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({}),
+  }));
+  if (segments.length === 0 && pendingTurns === 0) return null;
+  return {
+    threadId,
+    segments,
+    pendingTurns,
+    pendingTokens: positiveNumber(value.pendingTokens),
+    costRevision: positiveInteger(value.costRevision),
+    updatedAt: positiveNumber(value.updatedAt),
+  };
+}
+
+function mergeUsageSegment(segments, segment) {
+  const model = String(segment?.model ?? "");
+  const modelSource = String(segment?.modelSource ?? (model ? "thread" : ""));
+  const usage = normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({});
+  const last = segments.at(-1);
+  if (last && last.model === model && last.modelSource === modelSource) {
+    for (const field of TOKEN_FIELDS) {
+      last.usage[field] = positiveNumber(last.usage[field]) + usage[field];
+    }
+    return;
+  }
+  segments.push({ model, modelSource, usage });
+}
+
+function compactUsageSegments(segments) {
+  if (segments.length <= MAX_HISTORICAL_SEGMENTS) return;
+  const grouped = new Map();
+  for (const segment of segments) {
+    const model = String(segment?.model ?? "");
+    const modelSource = String(segment?.modelSource ?? (model ? "thread" : ""));
+    // Keep the short/long context pricing boundary separate when compacting;
+    // otherwise combining two segments could move all tokens to one tier.
+    const contextTier = Number(segment?.usage?.input_tokens) > 272_000 ? "long" : "short";
+    const key = `${model}\u0000${modelSource}\u0000${contextTier}`;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, {
+        model,
+        modelSource,
+        usage: normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({}),
+      });
+      continue;
+    }
+    const usage = normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({});
+    for (const field of TOKEN_FIELDS) existing.usage[field] += usage[field];
+  }
+  segments.splice(0, segments.length, ...grouped.values());
 }
 
 async function readAppendedChunks(path, state, onLine) {
@@ -991,10 +1674,11 @@ async function readJson(path) {
 }
 
 async function writeJsonAtomic(path, value) {
+  const content = `${JSON.stringify(value)}\n`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, {
+    await writeFile(temporaryPath, content, {
       encoding: "utf8",
       mode: 0o600,
     });

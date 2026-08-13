@@ -45,7 +45,7 @@ async function runLauncher() {
     console.log("[launcher] 收到重复启动，正在接管注入器");
     await closeSingleInstance(instanceLock);
     // 接管只替换注入器。Codex 是否需要重启由新实例的正常启动检查
-    // 根据中继代际（包含注入器版本）决定，不能在重复启动回调里强制重启。
+    // 根据中继协议代际决定，不能在重复启动回调里强制重启。
     relaunchSelf(spawn);
     process.exit(0);
   };

@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
+
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
 const DEEPSEEK_PROVIDER = "deepseek";
 const OPENAI_PROVIDER = "openai";
@@ -23,6 +25,10 @@ const OBSERVED_THREAD_METHODS = new Set([
 const TURN_INPUT_METHODS = new Set(["turn/start", "turn/steer"]);
 const ALLOWED_DEEPSEEK_EFFORTS = new Set(["low", "high", "max"]);
 const MAX_SERVER_INSPECTION_BYTES = 1024 * 1024;
+const PENDING_REQUEST_TTL_MS = 2 * 60 * 1000;
+const TURN_MODEL_TTL_MS = 15 * 60 * 1000;
+const THREAD_CONTEXT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const RELAY_CLEANUP_INTERVAL_MS = 60 * 1000;
 const JSON_RPC_ID_RE = /^\s*\{\s*"id"\s*:\s*(?:"([^"\\]*)"|(-?\d+(?:\.\d+)?))/;
 
 export async function runAppServerRelay() {
@@ -66,7 +72,15 @@ export async function runAppServerRelay() {
     String(process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "").trim(),
   );
   await writeRelayState(statePath);
-  const cleanup = () => Promise.all([removeRelayState(statePath), usageEventWriter.close()]);
+  let relayCleanupTimer = null;
+  let cleanedUp = false;
+  const cleanup = async () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    if (relayCleanupTimer) clearInterval(relayCleanupTimer);
+    relayCleanupTimer = null;
+    await Promise.all([removeRelayState(statePath), usageEventWriter.close()]);
+  };
   forwardSignals(child);
   child.once("error", (error) => fail(error));
   child.once("exit", (code, signal) => {
@@ -75,25 +89,21 @@ export async function runAppServerRelay() {
   process.once("exit", () => void cleanup());
 
   const pendingRequests = new Map();
-  const threadProviders = new Map();
-  const threadModels = new Map();
+  const threadContexts = new Map();
   const turnModels = new Map();
-  pipeLines(process.stdin, child.stdin, (line) => rewriteClientLine(line, {
+  const relayState = {
     deepSeekEnabled,
     officialModels,
     pendingRequests,
-    threadProviders,
-    threadModels,
+    threadContexts,
     turnModels,
+    modelRevision: 0,
     emitUsageEvent: usageEventWriter.write,
-  }));
-  pipeLines(child.stdout, process.stdout, (line) => rewriteServerLine(line, {
-    pendingRequests,
-    threadProviders,
-    threadModels,
-    turnModels,
-    emitUsageEvent: usageEventWriter.write,
-  }));
+  };
+  relayCleanupTimer = setInterval(() => pruneRelayState(relayState), RELAY_CLEANUP_INTERVAL_MS);
+  relayCleanupTimer.unref?.();
+  pipeLines(process.stdin, child.stdin, (line) => rewriteClientLine(line, relayState));
+  pipeLines(child.stdout, process.stdout, (line) => rewriteServerLine(line, relayState));
   pipeRaw(child.stderr, process.stderr);
 }
 
@@ -111,26 +121,56 @@ function rewriteClientLine(line, state) {
   const params = message.params && typeof message.params === "object"
     ? { ...message.params }
     : {};
+  const requestRevision = nextModelRevision(state);
 
   if (method === THREAD_SETTINGS_METHOD) {
-    const configuredModel = readModelSetting(params);
+    const configuredModel = readModelSetting(
+      params.threadSettings ?? params.thread_settings ?? params,
+    );
+    const previousContext = params.threadId
+      ? cloneThreadContext(getThreadContext(state.threadContexts, params.threadId))
+      : null;
     if (params.threadId && configuredModel.present) {
-      updateThreadModel(state.threadModels, params.threadId, configuredModel.model, "thread-settings");
+      updateThreadContext(state.threadContexts, params.threadId, {
+        model: configuredModel.model,
+        modelPresent: true,
+        source: "thread-settings",
+        revision: requestRevision,
+      });
+    }
+    if (message.id != null) {
+      rememberPendingRequest(state, message.id, {
+        method,
+        provider: null,
+        threadId: params.threadId ?? null,
+        model: configuredModel.present ? configuredModel.model : null,
+        modelSource: "thread-settings",
+        modelRevision: requestRevision,
+        previousContext,
+      });
     }
     return JSON.stringify({ ...message, params });
   }
 
   if (!THREAD_METHODS.has(method) && !TURN_INPUT_METHODS.has(method)) {
     if (message.id != null) {
-      state.pendingRequests.set(String(message.id), { method, provider: null, threadId: null });
+      rememberPendingRequest(state, message.id, {
+        method,
+        provider: null,
+        threadId: params.threadId ?? null,
+        model: null,
+        modelSource: "thread",
+        modelRevision: requestRevision,
+      });
     }
     return line;
   }
-  const threadModel = getThreadModel(state.threadModels, params.threadId);
+  const threadContext = getThreadContext(state.threadContexts, params.threadId);
+  const previousContext = params.threadId ? cloneThreadContext(threadContext) : null;
   const requestModel = readModelSetting(params);
-  const requestedModel = requestModel.present ? requestModel.model : threadModel?.model ?? null;
+  const requestedModel = requestModel.present ? requestModel.model : threadContext?.model ?? null;
   let provider = providerForModel(requestedModel, state.officialModels) ??
-    state.threadProviders.get(params.threadId) ?? null;
+    threadContext?.provider ?? null;
 
   if (THREAD_METHODS.has(method)) {
     if (provider === DEEPSEEK_PROVIDER && !state.deepSeekEnabled) {
@@ -141,7 +181,7 @@ function rewriteClientLine(line, state) {
   }
 
   if (TURN_INPUT_METHODS.has(method)) {
-    const knownProvider = state.threadProviders.get(params.threadId);
+    const knownProvider = threadContext?.provider ?? null;
     provider ??= knownProvider;
     if (method === "turn/start" && knownProvider && provider && knownProvider !== provider) {
       return jsonRpcError(message.id, "同一任务不能切换模型供应商；请新建任务后再选择目标模型");
@@ -163,39 +203,51 @@ function rewriteClientLine(line, state) {
       }
     }
     if (method === "turn/start" && params.threadId) {
-      if (requestedModel && requestModel.present) {
-        updateThreadModel(state.threadModels, params.threadId, requestedModel, "turn-request");
+      if (requestModel.present) {
+        updateThreadContext(state.threadContexts, params.threadId, {
+          model: requestedModel,
+          modelPresent: true,
+          source: "turn-request",
+          revision: requestRevision,
+        });
       }
       state.emitUsageEvent({
         type: "thread-active",
         threadId: params.threadId,
         model: requestedModel,
-        modelSource: requestModel.present ? "turn-request" : threadModel?.source ?? "thread",
+        modelSource: requestModel.present ? "turn-request" : threadContext?.source ?? "thread",
       });
     }
   }
 
   if (method === "thread/resume" && params.threadId) {
-    if (requestedModel && requestModel.present) {
-      updateThreadModel(state.threadModels, params.threadId, requestedModel, "thread-request");
+    if (requestModel.present) {
+      updateThreadContext(state.threadContexts, params.threadId, {
+        model: requestedModel,
+        modelPresent: true,
+        source: "thread-request",
+        revision: requestRevision,
+      });
     }
     state.emitUsageEvent({
       type: "thread-active",
       threadId: params.threadId,
       model: requestedModel,
-      modelSource: requestModel.present ? "thread-request" : threadModel?.source ?? "thread",
+      modelSource: requestModel.present ? "thread-request" : threadContext?.source ?? "thread",
     });
   }
 
   if (message.id != null && (THREAD_METHODS.has(method) || method === "turn/start")) {
-    state.pendingRequests.set(String(message.id), {
+    rememberPendingRequest(state, message.id, {
       method,
       provider,
       threadId: params.threadId,
       model: requestedModel,
       modelSource: requestModel.present
         ? "turn-request"
-        : threadModel?.source ?? "thread",
+        : threadContext?.source ?? "thread",
+      modelRevision: requestRevision,
+      previousContext: requestModel.present ? previousContext : null,
     });
   }
   return JSON.stringify({ ...message, params });
@@ -212,13 +264,24 @@ function rewriteServerLine(line, state) {
   } catch {
     return line;
   }
-  learnThreadProviders(message?.params, state.threadProviders);
-  learnThreadModels(message?.params, state.threadModels);
+  learnThreadContexts(message?.params, state, {
+    source: "thread-discovery",
+    revision: 0,
+  });
   captureUsageNotification(message, state);
   if (message?.id == null) return line;
   const pending = state.pendingRequests.get(String(message.id));
   if (!pending) return line;
   state.pendingRequests.delete(String(message.id));
+  if (message.error) {
+    restoreThreadContext(
+      state.threadContexts,
+      pending.threadId,
+      pending.previousContext,
+      pending.modelRevision,
+    );
+    return line;
+  }
   const result = message?.result;
   const thread = result?.thread ?? result;
   const threadId = thread?.id ?? pending.threadId;
@@ -226,16 +289,27 @@ function rewriteServerLine(line, state) {
     normalizedModel(thread?.modelProvider) ?? pending.provider;
   // thread/start, thread/resume and thread/fork return the selected model at
   // the response envelope level, while the nested Thread object does not.
-  const model = normalizedModel(result?.model) ??
-    normalizedModel(thread?.model) ?? pending.model;
-  if (threadId && provider) state.threadProviders.set(threadId, provider);
-  if (threadId && model) updateThreadModel(state.threadModels, threadId, model, "thread-response");
-  learnThreadProviders(message?.result, state.threadProviders);
-  learnThreadModels(message?.result, state.threadModels);
-  if (pending.method === "turn/start" && result?.turn?.id && pending.model) {
-    state.turnModels.set(String(result.turn.id), {
-      model: pending.model,
-      source: pending.modelSource ?? "thread",
+  const responseModel = normalizedModel(result?.model) ?? normalizedModel(thread?.model);
+  const model = responseModel ?? pending.model;
+  if (threadId && (provider || model)) {
+    updateThreadContext(state.threadContexts, threadId, {
+      model,
+      modelPresent: Boolean(model),
+      provider,
+      providerPresent: Boolean(provider),
+      source: "thread-response",
+      revision: pending.modelRevision ?? 0,
+    });
+  }
+  learnThreadContexts(message?.result, state, {
+    source: "thread-response",
+    revision: pending.modelRevision ?? 0,
+  });
+  const resolvedTurnModel = model;
+  if (pending.method === "turn/start" && result?.turn?.id && resolvedTurnModel) {
+    rememberTurnModel(state, result.turn.id, {
+      model: resolvedTurnModel,
+      source: responseModel ? "turn-response" : pending.modelSource ?? "thread",
     });
   }
   if (threadId && THREAD_METHODS.has(pending.method)) {
@@ -256,11 +330,39 @@ function completeLargeResponse(line, state) {
   const pending = state.pendingRequests.get(requestId);
   if (!pending) return;
   state.pendingRequests.delete(requestId);
-  const threadId = pending.threadId;
+  const resultIndex = line.indexOf('"result"');
+  const errorIndex = line.indexOf('"error"');
+  if (errorIndex >= 0 && (resultIndex < 0 || errorIndex < resultIndex)) {
+    restoreThreadContext(
+      state.threadContexts,
+      pending.threadId,
+      pending.previousContext,
+      pending.modelRevision,
+    );
+    return;
+  }
+  const threadId = extractResponseThreadId(line) ?? pending.threadId;
   const provider = extractResponseStringField(line, "modelProvider") ?? pending.provider;
-  const model = extractResponseStringField(line, "model") ?? pending.model;
-  if (threadId && provider) state.threadProviders.set(threadId, provider);
-  if (threadId && model) updateThreadModel(state.threadModels, threadId, model, "thread-response");
+  const responseModel = extractResponseStringField(line, "model");
+  const model = responseModel ?? pending.model;
+  if (threadId && (provider || model)) {
+    updateThreadContext(state.threadContexts, threadId, {
+      model,
+      modelPresent: Boolean(model),
+      provider,
+      providerPresent: Boolean(provider),
+      source: "thread-response",
+      revision: pending.modelRevision ?? 0,
+    });
+  }
+  const turnId = extractResponseTurnId(line);
+  const resolvedTurnModel = model;
+  if (pending.method === "turn/start" && turnId && resolvedTurnModel) {
+    rememberTurnModel(state, turnId, {
+      model: resolvedTurnModel,
+      source: responseModel ? "turn-response" : pending.modelSource ?? "thread",
+    });
+  }
   if (threadId && THREAD_METHODS.has(pending.method)) {
     state.emitUsageEvent({
       type: "thread-active",
@@ -271,39 +373,38 @@ function completeLargeResponse(line, state) {
   }
 }
 
-function learnThreadProviders(value, threadProviders) {
+function learnThreadContexts(value, state, { source, revision }) {
   if (!value || typeof value !== "object") return;
   const candidates = [
     value,
     value.thread,
     ...(Array.isArray(value.data) ? value.data : []),
   ].filter(Boolean);
+  if (value.thread?.id && value.model) {
+    candidates.push({ id: value.thread.id, model: value.model });
+  }
+  if (value.threadId && (value.model || value.modelProvider)) {
+    candidates.push({
+      id: value.threadId,
+      model: value.model,
+      modelProvider: value.modelProvider,
+    });
+  }
   for (const thread of candidates) {
-    if (thread?.id && thread?.modelProvider) {
-      threadProviders.set(thread.id, thread.modelProvider);
+    const configuredModel = readModelSetting(thread?.threadSettings ?? thread?.thread_settings);
+    const model = normalizedModel(thread?.model) ?? configuredModel.model;
+    const provider = normalizedModel(thread?.modelProvider);
+    const threadId = thread?.id ?? thread?.threadId;
+    if (threadId && (model || provider)) {
+      updateThreadContext(state.threadContexts, threadId, {
+        model,
+        modelPresent: Boolean(model),
+        provider,
+        providerPresent: Boolean(provider),
+        source,
+        revision,
+      });
     }
-  }
-}
-
-function learnThreadModels(value, threadModels) {
-  if (!value || typeof value !== "object") return;
-  const configuredModel = readModelSetting(value.threadSettings);
-  if (value.threadId && configuredModel.present) {
-    updateThreadModel(threadModels, value.threadId, configuredModel.model, "thread-settings");
-  }
-  const envelopeModel = normalizedModel(value.model);
-  const envelopeThreadId = value.thread?.id ?? value.threadId;
-  if (envelopeModel && envelopeThreadId) {
-    updateThreadModel(threadModels, envelopeThreadId, envelopeModel, "thread-response");
-  }
-  const candidates = [
-    value,
-    value.thread,
-    ...(Array.isArray(value.data) ? value.data : []),
-  ].filter(Boolean);
-  for (const thread of candidates) {
-    const model = normalizedModel(thread?.model);
-    if (thread?.id && model) updateThreadModel(threadModels, thread.id, model, "thread-response");
   }
 }
 
@@ -311,97 +412,209 @@ function captureUsageNotification(message, state) {
   const method = message?.method;
   const params = message?.params;
   if (!params || typeof params !== "object") return;
-  const configuredModel = readModelSetting(params.threadSettings);
+  const configuredModel = readModelSetting(params.threadSettings ?? params);
   if (method === "thread/settings/updated" && params.threadId && configuredModel.present) {
-    updateThreadModel(state.threadModels, params.threadId, configuredModel.model, "thread-settings");
+    updateThreadContext(state.threadContexts, params.threadId, {
+      model: configuredModel.model,
+      modelPresent: true,
+      source: "thread-settings",
+      revision: nextModelRevision(state),
+    });
     return;
   }
   if (method === "turn/started" && params.threadId && params.turn?.id) {
-    const tracked = state.turnModels.get(String(params.turn.id));
-    const threadModel = getThreadModel(state.threadModels, params.threadId);
-    const explicitModel = normalizedModel(params.model) ?? normalizedModel(params.turn.model);
-    const model = explicitModel ?? tracked?.model ?? threadModel?.model ?? null;
-    const source = explicitModel
-      ? "turn-started"
-      : tracked?.source ?? threadModel?.source ?? "thread";
-    if (model) state.turnModels.set(String(params.turn.id), { model, source });
+    const resolved = resolveTurnModel(state, params.threadId, params.turn.id, params);
+    const model = resolved.model;
+    const source = resolved.explicit ? "turn-started" : resolved.source;
+    if (model) rememberTurnModel(state, params.turn.id, { model, source });
     return;
   }
   if (method === "model/rerouted" && params.threadId) {
     const model = normalizedModel(params.toModel);
-    if (model && params.turnId) {
-      state.turnModels.set(String(params.turnId), { model, source: "rerouted" });
+    const turnId = params.turnId ?? params.turn?.id;
+    if (model && turnId) {
+      rememberTurnModel(state, turnId, { model, source: "rerouted" });
     }
     return;
   }
   if (method === "thread/tokenUsage/updated" && params.threadId && params.turnId) {
-    const tracked = state.turnModels.get(String(params.turnId));
-    const threadModel = getThreadModel(state.threadModels, params.threadId);
-    const explicitModel = normalizedModel(params.model) ?? normalizedModel(params.turn?.model);
-    const model = explicitModel ?? tracked?.model ?? threadModel?.model ?? null;
+    const resolved = resolveTurnModel(state, params.threadId, params.turnId, params);
     state.emitUsageEvent({
       type: "usage",
       threadId: params.threadId,
       turnId: params.turnId,
-      model,
-      modelSource: explicitModel ? "usage" : tracked?.source ?? threadModel?.source ?? "thread",
+      model: resolved.model,
+      modelSource: resolved.explicit ? "usage" : resolved.source,
       tokenUsage: params.tokenUsage,
     });
     return;
   }
   if (method === "turn/completed" && params.threadId && params.turn?.id) {
     const turnId = String(params.turn.id);
-    const tracked = state.turnModels.get(turnId);
-    const threadModel = getThreadModel(state.threadModels, params.threadId);
-    const explicitModel = normalizedModel(params.model) ?? normalizedModel(params.turn.model);
-    const model = explicitModel ?? tracked?.model ?? threadModel?.model ?? null;
+    const resolved = resolveTurnModel(state, params.threadId, turnId, params);
     state.emitUsageEvent({
       type: "turn-completed",
       threadId: params.threadId,
       turnId,
-      model,
-      modelSource: explicitModel ? "completed" : tracked?.source ?? threadModel?.source ?? "thread",
+      model: resolved.model,
+      modelSource: resolved.explicit ? "completed" : resolved.source,
       status: params.turn.status ?? null,
     });
     state.turnModels.delete(turnId);
+    return;
+  }
+  if (method === "turn/aborted" && params.threadId) {
+    const turnId = params.turnId ?? params.turn?.id;
+    if (!turnId) return;
+    const resolved = resolveTurnModel(state, params.threadId, turnId, params);
+    state.emitUsageEvent({
+      type: "turn-completed",
+      threadId: params.threadId,
+      turnId: String(turnId),
+      model: resolved.model,
+      modelSource: resolved.explicit ? "completed" : resolved.source,
+      status: params.reason === "interrupted" ? "interrupted" : "failed",
+    });
+    state.turnModels.delete(String(turnId));
   }
 }
 
 function readModelSetting(value) {
   if (!value || typeof value !== "object") return { present: false, model: null };
-  if (Object.prototype.hasOwnProperty.call(value, "model")) {
-    return { present: true, model: normalizedModel(value.model) };
+  const directModel = normalizedModel(value.model);
+  if (directModel) return { present: true, model: directModel };
+  const nestedSettings = value.threadSettings ?? value.thread_settings;
+  if (nestedSettings && nestedSettings !== value) {
+    const nestedModel = readModelSetting(nestedSettings);
+    if (nestedModel.present) return nestedModel;
   }
   const collaborationSettings = value.collaborationMode?.settings;
-  if (collaborationSettings &&
-    Object.prototype.hasOwnProperty.call(collaborationSettings, "model")) {
-    return { present: true, model: normalizedModel(collaborationSettings.model) };
-  }
+  const collaborationModel = normalizedModel(collaborationSettings?.model);
+  if (collaborationModel) return { present: true, model: collaborationModel };
+  // A null/empty model is a placeholder meaning that the caller did not
+  // override the thread model. It must not erase an already known context.
   return { present: false, model: null };
 }
 
-function getThreadModel(threadModels, threadId) {
+function getThreadContext(threadContexts, threadId) {
   if (!threadId) return null;
-  const value = threadModels.get(String(threadId));
-  if (!value) return null;
-  return typeof value === "string" ? { model: value, source: "thread" } : value;
+  const context = threadContexts.get(String(threadId)) ?? null;
+  if (context) context.lastSeenAt = Date.now();
+  return context;
 }
 
-function updateThreadModel(threadModels, threadId, model, source) {
+function cloneThreadContext(context) {
+  return context ? { ...context } : null;
+}
+
+function restoreThreadContext(threadContexts, threadId, previousContext, revision) {
   if (!threadId) return;
   const key = String(threadId);
-  if (model == null) {
-    threadModels.delete(key);
-    return;
+  const current = getThreadContext(threadContexts, key);
+  if (!current || current.revision !== revision) return;
+  if (previousContext) threadContexts.set(key, { ...previousContext, lastSeenAt: Date.now() });
+  else threadContexts.delete(key);
+}
+
+function updateThreadContext(
+  threadContexts,
+  threadId,
+  {
+    model,
+    modelPresent = false,
+    provider,
+    providerPresent = false,
+    source = "thread",
+    revision = 0,
+  } = {},
+) {
+  if (!threadId || (!modelPresent && !providerPresent)) return false;
+  const key = String(threadId);
+  const current = getThreadContext(threadContexts, key);
+  const nextRevision = Number.isInteger(revision) ? revision : 0;
+  if (current && nextRevision < current.revision) return false;
+  if (current && source === "thread-response" &&
+    current.source === "thread-response" && nextRevision === current.revision &&
+    ((modelPresent && current.model) || (providerPresent && current.provider))) {
+    return false;
   }
-  const normalized = normalizedModel(model);
-  if (!normalized) return;
-  const current = getThreadModel(threadModels, key);
-  // A stale thread/read or thread/start response must not overwrite a newer
-  // settings/request update. Settings and explicit requests are ordered by
-  // arrival, so they are always allowed to replace the thread default.
-  if (source === "thread-response" && current && current.source !== "thread-response") return;
-  threadModels.set(key, { model: normalized, source });
+  // Discovery from thread/read or thread/list is only a bootstrap fallback.
+  // It may fill a missing field, but it must never replace a value learned
+  // from an ordered request/response.
+  if (source === "thread-discovery" && current &&
+    ((modelPresent && current.model) || (providerPresent && current.provider))) {
+    return false;
+  }
+  const next = {
+    model: current?.model ?? null,
+    provider: current?.provider ?? null,
+    source,
+    revision: Math.max(nextRevision, current?.revision ?? 0),
+    lastSeenAt: Date.now(),
+  };
+  if (modelPresent) next.model = normalizedModel(model);
+  if (providerPresent) next.provider = normalizedModel(provider);
+  threadContexts.set(key, next);
+  return true;
+}
+
+function resolveTurnModel(state, threadId, turnId, value) {
+  const tracked = turnId ? state.turnModels.get(String(turnId)) : null;
+  if (tracked) tracked.lastSeenAt = Date.now();
+  const threadContext = getThreadContext(state.threadContexts, threadId);
+  const setting = readModelSetting(value);
+  // Usage notifications may carry a null placeholder when the model is not
+  // included. Treat that as absent so the per-turn/ thread fallback survives.
+  const explicit = setting.present && setting.model
+    ? setting
+    : { present: false, model: null };
+  return {
+    model: explicit.present
+      ? explicit.model
+      : tracked?.model ?? threadContext?.model ?? null,
+    explicit: explicit.present,
+    source: explicit.present
+      ? "event"
+      : tracked?.source ?? threadContext?.source ?? "thread",
+  };
+}
+
+function rememberPendingRequest(state, requestId, value) {
+  state.pendingRequests.set(String(requestId), {
+    ...value,
+    createdAt: Date.now(),
+  });
+}
+
+function rememberTurnModel(state, turnId, value) {
+  state.turnModels.set(String(turnId), {
+    ...value,
+    lastSeenAt: Date.now(),
+  });
+}
+
+function pruneRelayState(state) {
+  const now = Date.now();
+  for (const [requestId, request] of state.pendingRequests) {
+    if (now - Number(request.createdAt || 0) > PENDING_REQUEST_TTL_MS) {
+      state.pendingRequests.delete(requestId);
+    }
+  }
+  for (const [threadId, context] of state.threadContexts) {
+    if (now - Number(context.lastSeenAt || 0) > THREAD_CONTEXT_TTL_MS) {
+      state.threadContexts.delete(threadId);
+    }
+  }
+  for (const [turnId, model] of state.turnModels) {
+    if (now - Number(model.lastSeenAt || 0) > TURN_MODEL_TTL_MS) {
+      state.turnModels.delete(turnId);
+    }
+  }
+}
+
+function nextModelRevision(state) {
+  state.modelRevision += 1;
+  return state.modelRevision;
 }
 
 function normalizedModel(value) {
@@ -416,6 +629,34 @@ function extractResponseStringField(line, field) {
   const match = line.slice(resultIndex).match(
     new RegExp(`"${escapedField}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`),
   );
+  if (!match) return null;
+  try {
+    return normalizedModel(JSON.parse(`"${match[1]}"`));
+  } catch {
+    return null;
+  }
+}
+
+function extractResponseTurnId(line) {
+  const resultIndex = line.indexOf('"result"');
+  if (resultIndex < 0) return null;
+  const turnIndex = line.indexOf('"turn"', resultIndex);
+  if (turnIndex < 0) return null;
+  const match = line.slice(turnIndex).match(/"id"\s*:\s*"((?:\\.|[^"\\])*)"/);
+  if (!match) return null;
+  try {
+    return normalizedModel(JSON.parse(`"${match[1]}"`));
+  } catch {
+    return null;
+  }
+}
+
+function extractResponseThreadId(line) {
+  const resultIndex = line.indexOf('"result"');
+  if (resultIndex < 0) return null;
+  const threadIndex = line.indexOf('"thread"', resultIndex);
+  if (threadIndex < 0) return null;
+  const match = line.slice(threadIndex).match(/"id"\s*:\s*"((?:\\.|[^"\\])*)"/);
   if (!match) return null;
   try {
     return normalizedModel(JSON.parse(`"${match[1]}"`));
@@ -533,7 +774,8 @@ async function writeRelayState(path) {
   if (!path) return;
   await writeFile(path, `${JSON.stringify({
     pid: process.pid,
-    generation: process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+    generation: process.env.CODEX_QUOTA_BRIDGE_GENERATION ??
+      `usage-events-v${RELAY_PROTOCOL_VERSION}`,
     startedAt: Date.now(),
   })}\n`, { encoding: "utf8", mode: 0o600 });
 }
@@ -572,25 +814,52 @@ function fail(error) {
 function createUsageEventWriter(path) {
   const sessionId = randomUUID();
   let sequence = 0;
+  let buffer = [];
+  let flushTimer = null;
+  let closed = false;
   let tail = Promise.resolve();
+  const directoryReady = path
+    ? mkdir(dirname(path), { recursive: true, mode: 0o700 })
+    : Promise.resolve();
+  const flush = () => {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (!path || buffer.length === 0) return tail;
+    const batch = buffer;
+    buffer = [];
+    const content = `${batch.map((payload) => JSON.stringify(payload)).join("\n")}\n`;
+    tail = tail
+      .then(async () => {
+        await directoryReady;
+        await appendFile(path, content, { encoding: "utf8", mode: 0o600 });
+      })
+      .catch((error) => {
+        console.error(`记录 Token 用量事件失败: ${error.message}`);
+      });
+    return tail;
+  };
   const write = (event) => {
-    if (!path || !event?.type) return;
+    if (closed || !path || !event?.type) return;
     const payload = {
       ...event,
       eventId: `${sessionId}:${++sequence}`,
       recordedAt: Date.now(),
     };
-    tail = tail
-      .then(async () => {
-        await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-        await appendFile(path, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
-      })
-      .catch((error) => {
-        console.error(`记录 Token 用量事件失败: ${error.message}`);
-      });
+    buffer.push(payload);
+    if (buffer.length >= 32) {
+      void flush();
+    } else if (!flushTimer) {
+      flushTimer = setTimeout(() => void flush(), 25);
+    }
   };
   return {
     write,
-    close: () => tail,
+    close: async () => {
+      closed = true;
+      await flush();
+      await tail;
+    },
   };
 }

@@ -1,3 +1,5 @@
+export const WIDGET_RUNTIME_VERSION = 54;
+
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
   const ANCHOR_GAP = 10;
@@ -9,10 +11,12 @@ export function calculatePopoverMaxHeight(chipTop) {
 
 export function installQuotaWidget(
   calculateMaxHeight = (chipTop) => Math.max(0, Math.min(720, Math.floor(Number(chipTop) - 54))),
+  runtimeVersion = WIDGET_RUNTIME_VERSION,
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const VERSION = 49;
+  const VERSION = runtimeVersion;
+  const MAX_CONVERSATION_USAGE_CACHE = 240;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -27,6 +31,8 @@ export function installQuotaWidget(
       tokenUsage: { status: "ready", turns: [] },
     },
     dataJson: "",
+    dataRevision: null,
+    tokenUsageRevision: null,
     root: null,
     shadow: null,
     observer: null,
@@ -46,6 +52,13 @@ export function installQuotaWidget(
     conversationTooltipBridge: null,
     conversationTooltipTarget: null,
     conversationTooltipPointer: null,
+    conversationUsageByTurn: new Map(),
+    conversationTurnNodes: new Map(),
+    conversationUsageLines: new Map(),
+    conversationDomDirty: true,
+    conversationObserverRoot: null,
+    mountObserver: null,
+    mountCheckFrame: null,
   };
 
   const styleText = `
@@ -359,24 +372,54 @@ export function installQuotaWidget(
     });
   }
 
-  function placeConversationTokenUsageLine(line, host, assistantNode) {
+  function placeConversationTokenUsageLine(line, host) {
     if (!line || !host) return;
-    if (assistantNode?.parentElement) {
-      if (line.parentElement !== assistantNode.parentElement ||
-        line.previousElementSibling !== assistantNode) {
-        assistantNode.after(line);
-      }
-      return;
+    let footer = [...host.children].find((child) =>
+      child.matches?.("[data-codex-token-usage-footer]"));
+    if (!footer) {
+      footer = document.createElement("div");
+      footer.setAttribute("data-codex-token-usage-footer", "");
+      footer.style.cssText = "display:block;width:100%;margin-top:2px";
     }
-    if (line.parentElement !== host || line !== host.lastElementChild) host.append(line);
+    if (footer.parentElement !== host || footer !== host.lastElementChild) host.append(footer);
+    if (line.parentElement !== footer) footer.append(line);
   }
 
   function renderConversationTokenUsage() {
-    const usageItems = Array.isArray(state.data.tokenUsage?.turns)
+    const incomingUsageItems = Array.isArray(state.data.tokenUsage?.turns)
       ? state.data.tokenUsage.turns
       : [];
-    const turnNodes = new Map([...document.querySelectorAll("[data-content-search-turn-key]")]
-      .map((node) => [node.getAttribute("data-content-search-turn-key"), node]));
+    const incomingIds = new Set();
+    for (const usage of incomingUsageItems) {
+      const turnId = String(usage?.turnId ?? "");
+      if (turnId && Number(usage.totalTokens) > 0) {
+        incomingIds.add(turnId);
+        state.conversationUsageByTurn.set(turnId, usage);
+      }
+    }
+    if (incomingIds.size > 0) {
+      for (const turnId of state.conversationUsageByTurn.keys()) {
+        if (!incomingIds.has(turnId)) state.conversationUsageByTurn.delete(turnId);
+      }
+    } else if (state.data.tokenUsage?.status === "ready") {
+      state.conversationUsageByTurn.clear();
+    }
+    if (state.conversationUsageByTurn.size > MAX_CONVERSATION_USAGE_CACHE) {
+      const retained = [...state.conversationUsageByTurn.values()]
+        .sort((left, right) => Number(left.updatedAt) - Number(right.updatedAt))
+        .slice(-MAX_CONVERSATION_USAGE_CACHE);
+      state.conversationUsageByTurn = new Map(
+        retained.map((usage) => [String(usage.turnId), usage]),
+      );
+    }
+    const usageItems = [...state.conversationUsageByTurn.values()];
+    bindConversationObserver();
+    if (state.conversationDomDirty) {
+      state.conversationTurnNodes = new Map([...document.querySelectorAll("[data-content-search-turn-key]")]
+        .map((node) => [node.getAttribute("data-content-search-turn-key"), node]));
+      state.conversationDomDirty = false;
+    }
+    const turnNodes = state.conversationTurnNodes;
     const visibleTurnIds = new Set();
 
     for (const usage of usageItems) {
@@ -385,8 +428,8 @@ export function installQuotaWidget(
       if (!turnId || !turnNode || Number(usage.totalTokens) <= 0) continue;
       visibleTurnIds.add(turnId);
       const host = turnNode.firstElementChild ?? turnNode;
-      const assistantNode = turnNode.querySelector('[data-local-conversation-final-assistant="true"]');
-      let line = turnNode.querySelector("[data-codex-token-usage]");
+      let line = state.conversationUsageLines.get(turnId);
+      if (!line?.isConnected) line = turnNode.querySelector("[data-codex-token-usage]");
       if (!line) {
         line = document.createElement("div");
         line.setAttribute("data-codex-token-usage", turnId);
@@ -412,7 +455,8 @@ export function installQuotaWidget(
         line.addEventListener("focus", () => showConversationTokenTooltip(line));
         line.addEventListener("blur", () => hideConversationTokenTooltip(line));
       }
-      placeConversationTokenUsageLine(line, host, assistantNode);
+      state.conversationUsageLines.set(turnId, line);
+      placeConversationTokenUsageLine(line, host);
       line.__codexTokenUsage = usage;
       const cost = usage.cost ?? {};
       const costLabel = usage.completed ? (cost.label ?? "本轮费用") : "实时估算";
@@ -435,12 +479,17 @@ export function installQuotaWidget(
       }
     }
 
-    document.querySelectorAll("[data-codex-token-usage]").forEach((line) => {
-      if (!visibleTurnIds.has(line.getAttribute("data-codex-token-usage"))) {
+    for (const [turnId, line] of state.conversationUsageLines) {
+      if (!visibleTurnIds.has(turnId) || !line.isConnected) {
         hideConversationTokenTooltip(line);
+        const footer = line.parentElement?.matches?.("[data-codex-token-usage-footer]")
+          ? line.parentElement
+          : null;
         line.remove();
+        if (footer && footer.childElementCount === 0) footer.remove();
+        state.conversationUsageLines.delete(turnId);
       }
-    });
+    }
   }
 
   function showConversationTokenTooltip(line, event = null) {
@@ -543,7 +592,9 @@ export function installQuotaWidget(
     cumulativeAmount.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
     cumulativeAmount.textContent = cost.cumulativeAvailable
       ? formatCny(cost.cumulativeCny)
-      : "暂不可算";
+      : Number(cost.cumulativeCny) > 0
+        ? `已确认 ${formatCny(cost.cumulativeCny)} · 待确认 ${Number(cost.cumulativePendingTurns) || 1} 轮`
+        : "待确认";
     cumulative.append(cumulativeLabel, cumulativeAmount);
     tooltip.append(cumulative);
 
@@ -1258,18 +1309,43 @@ export function installQuotaWidget(
   }
 
   const conversationTurnSelector = "[data-content-search-turn-key]";
+  function findConversationObserverRoot() {
+    const firstTurn = document.querySelector(conversationTurnSelector);
+    if (!firstTurn) return null;
+    let candidate = firstTurn.parentElement;
+    while (candidate && candidate !== document.body) {
+      if (candidate.querySelectorAll(conversationTurnSelector).length > 1) return candidate;
+      candidate = candidate.parentElement;
+    }
+    return firstTurn.parentElement;
+  }
+
+  function bindConversationObserver() {
+    if (state.conversationObserverRoot?.isConnected) return;
+    const root = findConversationObserverRoot();
+    if (root === state.conversationObserverRoot) return;
+    state.observer?.disconnect();
+    state.conversationObserverRoot = root;
+    if (root) {
+      state.observer?.observe(root, { childList: true, subtree: true });
+    }
+  }
+
   function mutationTouchesConversation(mutations) {
     return mutations.some((mutation) => {
       const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes]
         .filter((node) => node.nodeType === Node.ELEMENT_NODE);
       if (changedNodes.length > 0 && changedNodes.every((node) =>
-        node.matches?.("[data-codex-token-usage]") ||
-        node.querySelector?.("[data-codex-token-usage]"))) {
+        node.matches?.("[data-codex-token-usage], [data-codex-token-usage-footer]"))) {
         return false;
       }
       const target = mutation.target;
-      if (target?.closest?.("[data-codex-token-usage]")) return false;
-      if (target?.closest?.(conversationTurnSelector)) return true;
+      if (target?.closest?.("[data-codex-token-usage], [data-codex-token-usage-footer]")) return false;
+      const turnTarget = target?.closest?.(conversationTurnSelector);
+      if (turnTarget) {
+        const turnId = turnTarget.getAttribute("data-content-search-turn-key");
+        return !state.conversationUsageLines.get(turnId)?.isConnected;
+      }
       return changedNodes.some((node) =>
         node.matches?.(conversationTurnSelector) ||
         node.querySelector?.(conversationTurnSelector));
@@ -1277,12 +1353,30 @@ export function installQuotaWidget(
   }
 
   state.observer = new MutationObserver((mutations) => {
-    if (!state.root?.isConnected) ensureMounted();
     if (mutationTouchesConversation(mutations)) {
+      state.conversationDomDirty = true;
       scheduleConversationTokenUsageRender();
     }
   });
-  state.observer.observe(document.documentElement, { childList: true, subtree: true });
+  state.mountObserver = new MutationObserver(() => {
+    if (state.mountCheckFrame != null) return;
+    state.mountCheckFrame = window.requestAnimationFrame(() => {
+      state.mountCheckFrame = null;
+      if (!state.root?.isConnected) ensureMounted();
+      const firstTurn = document.querySelector(conversationTurnSelector);
+      if (firstTurn && state.conversationObserverRoot?.isConnected &&
+        !state.conversationObserverRoot.contains(firstTurn)) {
+        state.observer?.disconnect();
+        state.conversationObserverRoot = null;
+        state.conversationDomDirty = true;
+      }
+      if (!state.conversationObserverRoot?.isConnected) {
+        state.conversationDomDirty = true;
+        scheduleConversationTokenUsageRender();
+      }
+    });
+  });
+  state.mountObserver.observe(document.documentElement, { childList: true, subtree: true });
   state.resizeHandler = () => {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (wrap) positionPopover(wrap);
@@ -1302,8 +1396,9 @@ export function installQuotaWidget(
 
   window[GLOBAL_KEY] = {
     version: VERSION,
-    update(data) {
-      const json = JSON.stringify(data ?? {});
+    update(data, revision = null) {
+      const json = revision == null ? JSON.stringify(data ?? {}) : `revision:${revision}`;
+      if (revision != null && revision === state.dataRevision) return;
       if (json === state.dataJson) return;
       if (state.deepSeekSubmittedKey != null &&
         String(data?.deepSeek?.apiKey ?? "") === state.deepSeekSubmittedKey) {
@@ -1312,9 +1407,47 @@ export function installQuotaWidget(
         state.deepSeekSubmittedKey = null;
       }
       state.dataJson = json;
+      state.dataRevision = revision;
+      state.tokenUsageRevision = revision;
       state.data = data ?? state.data;
       ensureMounted();
       render();
+    },
+    updateTokenUsage(tokenUsage, revision = null) {
+      if (revision != null && revision === state.tokenUsageRevision) return;
+      state.tokenUsageRevision = revision;
+      state.data = { ...state.data, tokenUsage: tokenUsage ?? { status: "ready", turns: [] } };
+      ensureMounted();
+      scheduleConversationTokenUsageRender();
+    },
+    updateTokenUsageDelta(delta, revision = null) {
+      if (revision != null && revision === state.tokenUsageRevision) return;
+      const current = state.data.tokenUsage ?? { status: "ready", turns: [] };
+      const turnsById = new Map(
+        (Array.isArray(current.turns) ? current.turns : [])
+          .map((turn) => [String(turn?.turnId ?? ""), turn])
+          .filter(([turnId]) => turnId),
+      );
+      for (const turnId of Array.isArray(delta?.removedTurnIds) ? delta.removedTurnIds : []) {
+        turnsById.delete(String(turnId));
+      }
+      for (const turn of Array.isArray(delta?.updates) ? delta.updates : []) {
+        const turnId = String(turn?.turnId ?? "");
+        if (turnId) turnsById.set(turnId, turn);
+      }
+      const nextTokenUsage = {
+        ...current,
+        status: delta?.status ?? current.status,
+        error: Object.prototype.hasOwnProperty.call(delta ?? {}, "error")
+          ? delta.error
+          : current.error,
+        turns: [...turnsById.values()].sort((left, right) =>
+          Number(left?.updatedAt) - Number(right?.updatedAt)),
+      };
+      state.tokenUsageRevision = revision;
+      state.data = { ...state.data, tokenUsage: nextTokenUsage };
+      ensureMounted();
+      scheduleConversationTokenUsageRender();
     },
     drainActions() {
       return state.actions.splice(0);
@@ -1322,6 +1455,12 @@ export function installQuotaWidget(
     destroy() {
       state.observer?.disconnect();
       state.observer = null;
+      state.mountObserver?.disconnect();
+      state.mountObserver = null;
+      if (state.mountCheckFrame != null) {
+        window.cancelAnimationFrame(state.mountCheckFrame);
+        state.mountCheckFrame = null;
+      }
       clearHoverGrace();
       if (state.conversationRenderFrame != null) {
         window.cancelAnimationFrame(state.conversationRenderFrame);
@@ -1329,13 +1468,17 @@ export function installQuotaWidget(
       }
       window.removeEventListener("resize", state.resizeHandler);
       document.removeEventListener("pointerdown", state.documentPointerHandler, true);
-      document.querySelectorAll("[data-codex-token-usage]").forEach((line) => line.remove());
+      document.querySelectorAll("[data-codex-token-usage], [data-codex-token-usage-footer]")
+        .forEach((node) => node.remove());
       state.conversationTooltip?.remove();
       state.conversationTooltipBridge?.remove();
       state.conversationTooltip = null;
       state.conversationTooltipBridge = null;
       state.conversationTooltipTarget = null;
       state.conversationTooltipPointer = null;
+      state.conversationTurnNodes.clear();
+      state.conversationUsageLines.clear();
+      state.conversationObserverRoot = null;
       state.root?.remove();
       delete window[GLOBAL_KEY];
     },
@@ -1344,11 +1487,30 @@ export function installQuotaWidget(
 }
 
 export function widgetInstallExpression() {
-  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()})`;
+  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()},${WIDGET_RUNTIME_VERSION})`;
+}
+
+export function widgetRuntimeVersionExpression() {
+  return "window.__codexQuotaWidget?.version ?? null";
 }
 
 export function widgetUpdateExpression(data) {
   return `window.__codexQuotaWidget?.update(${JSON.stringify(data)})`;
+}
+
+export function widgetUpdateExpressionJson(serializedData, revision = null) {
+  const revisionArgument = revision == null ? "" : `,${JSON.stringify(revision)}`;
+  return `window.__codexQuotaWidget?.update(${String(serializedData)}${revisionArgument})`;
+}
+
+export function widgetTokenUsageUpdateExpressionJson(serializedTokenUsage, revision = null) {
+  const revisionArgument = revision == null ? "" : `,${JSON.stringify(revision)}`;
+  return `window.__codexQuotaWidget?.updateTokenUsage(${String(serializedTokenUsage)}${revisionArgument})`;
+}
+
+export function widgetTokenUsageDeltaUpdateExpressionJson(serializedDelta, revision = null) {
+  const revisionArgument = revision == null ? "" : `,${JSON.stringify(revision)}`;
+  return `window.__codexQuotaWidget?.updateTokenUsageDelta(${String(serializedDelta)}${revisionArgument})`;
 }
 
 export function widgetDrainActionsExpression() {

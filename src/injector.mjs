@@ -8,7 +8,10 @@ import { TokenUsageManager } from "./token-usage.mjs";
 import {
   widgetDrainActionsExpression,
   widgetInstallExpression,
-  widgetUpdateExpression,
+  widgetTokenUsageDeltaUpdateExpressionJson,
+  widgetUpdateExpressionJson,
+  widgetRuntimeVersionExpression,
+  WIDGET_RUNTIME_VERSION,
 } from "./widget.mjs";
 
 const DEFAULT_PORT = 9229;
@@ -16,6 +19,9 @@ const TARGET_POLL_MS = 1_500;
 const QUOTA_REFRESH_MS = 60_000;
 const DEEPSEEK_BALANCE_REFRESH_MS = 5 * 60_000;
 const STARTUP_GRACE_MS = 30_000;
+const TOKEN_USAGE_FALLBACK_MS = 15_000;
+const WIDGET_HEALTH_CHECK_MS = 15_000;
+const TOKEN_USAGE_STABILITY_GRACE_MS = 5_000;
 
 export async function runInjector({
   port = DEFAULT_PORT,
@@ -39,9 +45,18 @@ export async function runInjector({
   let cdp = null;
   let targetId = null;
   let widgetInstalled = false;
-  let lastPushedJson = null;
+  let lastStaticJson = null;
+  let lastTokenUsageSignatures = new Map();
+  let lastTokenUsageStatus = null;
+  let lastTokenUsageError = null;
+  let widgetUpdateRevision = 0;
   let widgetUpdatePromise = null;
   let widgetUpdateRequested = false;
+  let widgetDataDirty = true;
+  let widgetDataRevision = 0;
+  let lastAccountOperationJson = null;
+  let lastStableTokenUsage = null;
+  let lastStableTokenUsageAt = 0;
   let removeTokenUsageListener = () => {};
   let activeAction = null;
   let restartingCodex = false;
@@ -52,13 +67,29 @@ export async function runInjector({
   let quotaRefreshPromise = null;
   let quotaRefreshRequested = false;
   let deepSeekBalanceTimer = null;
+  let tokenUsageFallbackTimer = null;
+  let lastWidgetHealthCheckAt = 0;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
+
+  function markWidgetDataDirty() {
+    widgetDataDirty = true;
+    widgetDataRevision += 1;
+  }
+
+  function syncAsyncAccountOperation() {
+    const operationJson = JSON.stringify(accountManager.operation ?? null);
+    if (operationJson === lastAccountOperationJson) return;
+    lastAccountOperationJson = operationJson;
+    markWidgetDataDirty();
+  }
 
   const stop = () => {
     stopped = true;
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
+    clearTimeout(tokenUsageFallbackTimer);
     quotaRefreshTimer = null;
+    tokenUsageFallbackTimer = null;
     removeTokenUsageListener();
     removeTokenUsageListener = () => {};
     cdp?.close();
@@ -73,6 +104,9 @@ export async function runInjector({
       console.error(`[lifecycle] 退出前同步 Codex 凭证失败: ${error.message}`);
     });
     stop();
+    await tokenUsageManager.flush().catch((error) => {
+      console.error(`[token-usage] 退出前保存缓存失败: ${error.message}`);
+    });
     setTimeout(() => process.exit(0), 250);
   };
   process.once("SIGINT", () => void stopAndExit());
@@ -81,6 +115,7 @@ export async function runInjector({
   async function refreshQuotas() {
     if (accountManager.store.list().length > 0) {
       await accountManager.refreshAll();
+      markWidgetDataDirty();
     }
   }
 
@@ -104,6 +139,7 @@ export async function runInjector({
         try {
           await refreshQuotas();
         } catch (error) {
+          markWidgetDataDirty();
           console.error(`[quota] ${error.message}`);
         }
       } while (quotaRefreshRequested && !stopped);
@@ -117,6 +153,7 @@ export async function runInjector({
   }
 
   async function connectAndInject() {
+    let reconnected = false;
     if (!cdp?.isConnected) {
       const target = await findCodexTarget(port);
       if (!target) return false;
@@ -124,43 +161,157 @@ export async function runInjector({
       cdp = new CdpClient(target.webSocketDebuggerUrl);
       await cdp.connect();
       targetId = target.id;
-      lastPushedJson = null;
+      lastStaticJson = null;
+      lastTokenUsageSignatures = new Map();
+      lastTokenUsageStatus = null;
+      lastTokenUsageError = null;
+      widgetUpdateRevision = 0;
       widgetInstalled = false;
+      lastWidgetHealthCheckAt = 0;
+      lastAccountOperationJson = null;
+      markWidgetDataDirty();
+      reconnected = true;
       await contextManager.refresh();
     }
     if (!widgetInstalled) {
       await cdp.evaluate(widgetInstallExpression());
       widgetInstalled = true;
+      lastWidgetHealthCheckAt = Date.now();
+      markWidgetDataDirty();
     }
-    const tokenRefresh = tokenUsageManager.refresh().catch((error) => {
-      console.error(`[token-usage] 刷新失败: ${error.message}`);
-    });
-    if (once) await tokenRefresh;
-    void tokenRefresh
-      .then(() => {
-        if (!once) return requestWidgetUpdate();
-        return undefined;
-      })
-      .catch((error) => {
-        console.error(`[token-usage] 实时 Widget 刷新失败: ${error.message}`);
+    if (reconnected) {
+      const tokenRefresh = tokenUsageManager.refresh().catch((error) => {
+        console.error(`[token-usage] 刷新失败: ${error.message}`);
       });
+      if (once) await tokenRefresh;
+      void tokenRefresh
+        .then(() => {
+          if (!once) return requestWidgetUpdate();
+          return undefined;
+        })
+        .catch((error) => {
+          console.error(`[token-usage] 实时 Widget 刷新失败: ${error.message}`);
+        });
+      scheduleTokenUsageFallback();
+    }
     await requestWidgetUpdate();
     return true;
+  }
+
+  function scheduleTokenUsageFallback() {
+    clearTimeout(tokenUsageFallbackTimer);
+    if (stopped || once) return;
+    tokenUsageFallbackTimer = setTimeout(async () => {
+      tokenUsageFallbackTimer = null;
+      try {
+        await tokenUsageManager.refresh({ notify: true });
+      } catch (error) {
+        console.error(`[token-usage] 兜底刷新失败: ${error.message}`);
+      } finally {
+        scheduleTokenUsageFallback();
+      }
+    }, TOKEN_USAGE_FALLBACK_MS);
   }
 
   async function pushWidgetViewModel() {
     const currentCdp = cdp;
     if (!currentCdp?.isConnected || stopped) return false;
+    if (widgetInstalled && Date.now() - lastWidgetHealthCheckAt >= WIDGET_HEALTH_CHECK_MS) {
+      lastWidgetHealthCheckAt = Date.now();
+      const runtimeVersion = await currentCdp.evaluate(widgetRuntimeVersionExpression());
+      if (runtimeVersion !== WIDGET_RUNTIME_VERSION) {
+        await currentCdp.evaluate(widgetInstallExpression());
+        widgetInstalled = true;
+        lastStaticJson = null;
+        lastTokenUsageSignatures = new Map();
+        lastTokenUsageStatus = null;
+        lastTokenUsageError = null;
+        widgetUpdateRevision = 0;
+        markWidgetDataDirty();
+      }
+    }
+    if (!widgetDataDirty) return cdp === currentCdp;
+    const dataRevisionAtStart = widgetDataRevision;
+    const tokenUsage = tokenUsageManager.getViewModel();
+    const hasCurrentTurns = Array.isArray(tokenUsage.turns) && tokenUsage.turns.length > 0;
+    if (tokenUsage.status === "ready" &&
+      (hasCurrentTurns || !lastStableTokenUsage)) {
+      lastStableTokenUsage = tokenUsage;
+      lastStableTokenUsageAt = Date.now();
+    }
+    const keepStableTokenUsage = lastStableTokenUsage &&
+      Date.now() - lastStableTokenUsageAt < TOKEN_USAGE_STABILITY_GRACE_MS;
+    if (!hasCurrentTurns && tokenUsage.status === "ready" && !keepStableTokenUsage) {
+      lastStableTokenUsage = tokenUsage;
+      lastStableTokenUsageAt = Date.now();
+    }
+    const stableTokenUsage = keepStableTokenUsage &&
+      (!hasCurrentTurns || tokenUsage.status !== "ready")
+      ? {
+          ...lastStableTokenUsage,
+          status: tokenUsage.status,
+          error: tokenUsage.error,
+        }
+      : tokenUsage;
     const viewModel = {
       ...accountManager.getViewModel(),
       context: contextManager.getViewModel(),
       deepSeek: deepSeekManager.getViewModel(),
-      tokenUsage: tokenUsageManager.getViewModel(),
+      tokenUsage: stableTokenUsage,
     };
-    const viewJson = JSON.stringify(viewModel);
-    if (viewJson !== lastPushedJson) {
-      await currentCdp.evaluate(widgetUpdateExpression(viewModel));
-      if (cdp === currentCdp) lastPushedJson = viewJson;
+    const staticViewModel = {
+      accounts: viewModel.accounts,
+      windows: viewModel.windows,
+      currentAccountId: viewModel.currentAccountId,
+      operation: viewModel.operation,
+      context: viewModel.context,
+      deepSeek: viewModel.deepSeek,
+    };
+    const staticJson = JSON.stringify(staticViewModel);
+    const nextTokenUsageSignatures = new Map();
+    const tokenUsageUpdates = [];
+    for (const turn of Array.isArray(stableTokenUsage.turns) ? stableTokenUsage.turns : []) {
+      const turnId = String(turn?.turnId ?? "");
+      if (!turnId) continue;
+      const signature = JSON.stringify(turn);
+      nextTokenUsageSignatures.set(turnId, signature);
+      if (signature !== lastTokenUsageSignatures.get(turnId)) tokenUsageUpdates.push(turn);
+    }
+    const removedTurnIds = [...lastTokenUsageSignatures.keys()]
+      .filter((turnId) => !nextTokenUsageSignatures.has(turnId));
+    const tokenUsageDelta = {
+      status: stableTokenUsage.status,
+      error: stableTokenUsage.error ?? null,
+      updates: tokenUsageUpdates,
+      removedTurnIds,
+    };
+    const tokenUsageChanged = stableTokenUsage.status !== lastTokenUsageStatus ||
+      (stableTokenUsage.error ?? null) !== lastTokenUsageError ||
+      tokenUsageUpdates.length > 0 || removedTurnIds.length > 0;
+    if (staticJson !== lastStaticJson) {
+      await currentCdp.evaluate(widgetUpdateExpressionJson(
+        JSON.stringify({ ...staticViewModel, tokenUsage: stableTokenUsage }),
+        ++widgetUpdateRevision,
+      ));
+      if (cdp === currentCdp) {
+        lastStaticJson = staticJson;
+        lastTokenUsageSignatures = nextTokenUsageSignatures;
+        lastTokenUsageStatus = stableTokenUsage.status;
+        lastTokenUsageError = stableTokenUsage.error ?? null;
+      }
+    } else if (tokenUsageChanged) {
+      await currentCdp.evaluate(widgetTokenUsageDeltaUpdateExpressionJson(
+        JSON.stringify(tokenUsageDelta),
+        ++widgetUpdateRevision,
+      ));
+      if (cdp === currentCdp) {
+        lastTokenUsageSignatures = nextTokenUsageSignatures;
+        lastTokenUsageStatus = stableTokenUsage.status;
+        lastTokenUsageError = stableTokenUsage.error ?? null;
+      }
+    }
+    if (cdp === currentCdp && widgetDataRevision === dataRevisionAtStart) {
+      widgetDataDirty = false;
     }
     return cdp === currentCdp;
   }
@@ -181,12 +332,14 @@ export async function runInjector({
   }
 
   removeTokenUsageListener = tokenUsageManager.onChange(() => {
+    markWidgetDataDirty();
     void requestWidgetUpdate().catch((error) => {
       console.error(`[token-usage] 事件驱动 Widget 刷新失败: ${error.message}`);
     });
   });
 
   async function startAction(action) {
+    markWidgetDataDirty();
     try {
       switch (action?.type) {
         case "oauth-add":
@@ -249,7 +402,12 @@ export async function runInjector({
             cdp = null;
             targetId = null;
             widgetInstalled = false;
-            lastPushedJson = null;
+            lastStaticJson = null;
+            lastWidgetHealthCheckAt = 0;
+            markWidgetDataDirty();
+            lastTokenUsageSignatures = new Map();
+            lastTokenUsageStatus = null;
+            lastTokenUsageError = null;
             scheduleQuotaRefresh(0);
           } finally {
             restartingCodex = false;
@@ -280,7 +438,12 @@ export async function runInjector({
       cdp = null;
       targetId = null;
       widgetInstalled = false;
-      lastPushedJson = null;
+      lastStaticJson = null;
+      lastWidgetHealthCheckAt = 0;
+      markWidgetDataDirty();
+      lastTokenUsageSignatures = new Map();
+      lastTokenUsageStatus = null;
+      lastTokenUsageError = null;
     } finally {
       restartingCodex = false;
     }
@@ -296,6 +459,10 @@ export async function runInjector({
       } catch (error) {
         console.error(`[deepseek-balance] ${error.message}`);
       } finally {
+        markWidgetDataDirty();
+        void requestWidgetUpdate().catch((error) => {
+          console.error(`[deepseek-balance] Widget 刷新失败: ${error.message}`);
+        });
         scheduleDeepSeekBalanceRefresh();
       }
     }, DEEPSEEK_BALANCE_REFRESH_MS);
@@ -310,9 +477,15 @@ export async function runInjector({
     void runQuotaRefresh();
     const deepSeek = deepSeekManager.getViewModel();
     if (deepSeek.enabled && deepSeek.configured) {
-      void deepSeekManager.refreshBalance().catch((error) => {
-        console.error(`[deepseek-balance] ${error.message}`);
-      });
+      void deepSeekManager.refreshBalance()
+        .then(() => {
+          markWidgetDataDirty();
+          return requestWidgetUpdate();
+        })
+        .catch((error) => {
+          markWidgetDataDirty();
+          console.error(`[deepseek-balance] ${error.message}`);
+        });
       scheduleDeepSeekBalanceRefresh();
     }
   }
@@ -328,6 +501,7 @@ export async function runInjector({
       }
     }
     try {
+      syncAsyncAccountOperation();
       const injected = await connectAndInject();
       if (injected && !activeAction) {
         const actions = await cdp.evaluate(widgetDrainActionsExpression());
@@ -336,6 +510,10 @@ export async function runInjector({
             for (const action of actions) await startAction(action);
           })().finally(() => {
             activeAction = null;
+            markWidgetDataDirty();
+            void requestWidgetUpdate().catch((error) => {
+              console.error(`[widget] 操作后刷新失败: ${error.message}`);
+            });
           });
         }
       }
@@ -346,15 +524,23 @@ export async function runInjector({
       cdp = null;
       targetId = null;
       widgetInstalled = false;
+      lastWidgetHealthCheckAt = 0;
+      markWidgetDataDirty();
     }
     await delay(TARGET_POLL_MS);
   }
 
   if (once) {
     stop();
+    await tokenUsageManager.flush().catch((error) => {
+      console.error(`[token-usage] 保存缓存失败: ${error.message}`);
+    });
     return accountManager.getViewModel();
   }
   stop();
+  await tokenUsageManager.flush().catch((error) => {
+    console.error(`[token-usage] 保存缓存失败: ${error.message}`);
+  });
 }
 
 function delay(ms) {

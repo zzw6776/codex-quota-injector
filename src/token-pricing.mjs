@@ -70,12 +70,25 @@ export class TokenPricingManager {
     this.exchangeRate = { ...FALLBACK_EXCHANGE_RATE };
     this.lastRefreshAttemptAt = 0;
     this.refreshPromise = null;
+    this.changeListeners = new Set();
+  }
+
+  onChange(listener) {
+    if (typeof listener !== "function") return () => {};
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
   }
 
   async initialize() {
     const cached = normalizeExchangeRate(await readJson(this.cachePath));
     if (cached) this.exchangeRate = cached;
-    await this.refreshExchangeRate({ force: true });
+    // A stale exchange rate is acceptable for the first paint. Refresh in the
+    // background so Token usage and rollout parsing are not gated by network
+    // latency or the six-second request timeout.
+    void this.refreshExchangeRate({ force: true }).catch((error) => {
+      console.error(`[exchange-rate] ${error.message}`);
+    });
+    return this.exchangeRate;
   }
 
   async refreshExchangeRate({ force = false } = {}) {
@@ -182,6 +195,13 @@ export class TokenPricingManager {
       fallback: false,
     };
     this.exchangeRate = next;
+    for (const listener of this.changeListeners) {
+      try {
+        listener(next);
+      } catch (error) {
+        console.error(`[exchange-rate] 汇率变更监听器失败: ${error.message}`);
+      }
+    }
     await writeJsonAtomic(this.cachePath, next).catch((error) => {
       console.error(`[exchange-rate] 无法保存汇率缓存: ${error.message}`);
     });
@@ -197,9 +217,13 @@ export function accumulateTokenCost(current, next) {
         next?.reason || "本轮部分请求无法计算费用",
       );
     }
-    return { ...next };
+    return current ? { ...current } : { ...next };
   }
-  if (!current?.available) return cloneCost(next);
+  // Once a segment is unknown or otherwise unavailable, do not revive the
+  // aggregate with later known segments. Reviving would display a partial
+  // cost while silently dropping the unknown tokens.
+  if (current && !current.available) return { ...current };
+  if (!current) return cloneCost(next);
   if (current.currency !== next.currency || current.provider !== next.provider) {
     return unavailableCost(next.requestedModel, "同一轮包含不同的模型供应商，无法合并费用");
   }
