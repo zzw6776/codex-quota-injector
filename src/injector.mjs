@@ -28,13 +28,17 @@ export async function runInjector({
   prepareLaunch = () => prepareCodexLaunch({ deepSeekManager, contextManager }),
 } = {}) {
   await accountManager.initialize();
-  await tokenUsageManager.initialize();
   if (!managersInitialized) {
     await contextManager.initialize();
     await deepSeekManager.initialize();
   }
+  const tokenInitialization = tokenUsageManager.initialize().catch((error) => {
+    console.error(`[token-usage] 初始化失败: ${error.message}`);
+  });
+  if (once) await tokenInitialization;
   let cdp = null;
   let targetId = null;
+  let widgetInstalled = false;
   let lastPushedJson = null;
   let activeAction = null;
   let restartingCodex = false;
@@ -116,10 +120,17 @@ export async function runInjector({
       await cdp.connect();
       targetId = target.id;
       lastPushedJson = null;
+      widgetInstalled = false;
       await contextManager.refresh();
     }
-    await cdp.evaluate(widgetInstallExpression());
-    await tokenUsageManager.refresh();
+    if (!widgetInstalled) {
+      await cdp.evaluate(widgetInstallExpression());
+      widgetInstalled = true;
+    }
+    const tokenRefresh = tokenUsageManager.refresh().catch((error) => {
+      console.error(`[token-usage] 刷新失败: ${error.message}`);
+    });
+    if (once) await tokenRefresh;
     const viewModel = {
       ...accountManager.getViewModel(),
       context: contextManager.getViewModel(),
@@ -196,6 +207,7 @@ export async function runInjector({
             cdp?.close();
             cdp = null;
             targetId = null;
+            widgetInstalled = false;
             lastPushedJson = null;
             scheduleQuotaRefresh(0);
           } finally {
@@ -226,6 +238,7 @@ export async function runInjector({
       cdp?.close();
       cdp = null;
       targetId = null;
+      widgetInstalled = false;
       lastPushedJson = null;
     } finally {
       restartingCodex = false;
@@ -291,6 +304,7 @@ export async function runInjector({
       cdp?.close();
       cdp = null;
       targetId = null;
+      widgetInstalled = false;
     }
     await delay(TARGET_POLL_MS);
   }

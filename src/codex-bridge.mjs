@@ -5,7 +5,7 @@ import { basename, join, resolve } from "node:path";
 
 import { defaultAccountDataDir, resolveCodexCliExecutable } from "./platform.mjs";
 
-const BRIDGE_GENERATION = "usage-events-v2";
+const BRIDGE_GENERATION = "usage-events-v3";
 
 export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
   if (process.platform !== "darwin") return { env: {}, relay: null };

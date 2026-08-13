@@ -16,6 +16,8 @@ const THREAD_METHODS = new Set(["thread/start", "thread/resume", "thread/fork"])
 const OBSERVED_THREAD_METHODS = new Set([...THREAD_METHODS, "thread/read", "thread/list"]);
 const TURN_INPUT_METHODS = new Set(["turn/start", "turn/steer"]);
 const ALLOWED_DEEPSEEK_EFFORTS = new Set(["low", "high", "max"]);
+const MAX_SERVER_INSPECTION_BYTES = 1024 * 1024;
+const JSON_RPC_ID_RE = /^\s*\{\s*"id"\s*:\s*(?:"([^"\\]*)"|(-?\d+(?:\.\d+)?))/;
 
 export async function runAppServerRelay() {
   const upstreamExecutable = String(process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI ?? "").trim();
@@ -171,6 +173,10 @@ function rewriteClientLine(line, state) {
 }
 
 function rewriteServerLine(line, state) {
+  if (line.length > MAX_SERVER_INSPECTION_BYTES) {
+    completeLargeResponse(line, state);
+    return line;
+  }
   let message;
   try {
     message = JSON.parse(line);
@@ -196,6 +202,21 @@ function rewriteServerLine(line, state) {
     state.emitUsageEvent({ type: "thread-active", threadId, model });
   }
   return line;
+}
+
+function completeLargeResponse(line, state) {
+  const match = line.match(JSON_RPC_ID_RE);
+  if (!match) return;
+  const requestId = match[1] ?? match[2];
+  const pending = state.pendingRequests.get(requestId);
+  if (!pending) return;
+  state.pendingRequests.delete(requestId);
+  const threadId = pending.threadId;
+  if (threadId && pending.provider) state.threadProviders.set(threadId, pending.provider);
+  if (threadId && pending.model) state.threadModels.set(threadId, pending.model);
+  if (threadId && THREAD_METHODS.has(pending.method)) {
+    state.emitUsageEvent({ type: "thread-active", threadId, model: pending.model });
+  }
 }
 
 function learnThreadProviders(value, threadProviders) {

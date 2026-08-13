@@ -12,7 +12,7 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
-  const VERSION = 47;
+  const VERSION = 48;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -1243,9 +1243,30 @@ export function installQuotaWidget(
     return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   }
 
-  state.observer = new MutationObserver(() => {
-    ensureMounted();
-    scheduleConversationTokenUsageRender();
+  const conversationTurnSelector = "[data-content-search-turn-key]";
+  function mutationTouchesConversation(mutations) {
+    return mutations.some((mutation) => {
+      const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes]
+        .filter((node) => node.nodeType === Node.ELEMENT_NODE);
+      if (changedNodes.length > 0 && changedNodes.every((node) =>
+        node.matches?.("[data-codex-token-usage]") ||
+        node.querySelector?.("[data-codex-token-usage]"))) {
+        return false;
+      }
+      const target = mutation.target;
+      if (target?.closest?.("[data-codex-token-usage]")) return false;
+      if (target?.closest?.(conversationTurnSelector)) return true;
+      return changedNodes.some((node) =>
+        node.matches?.(conversationTurnSelector) ||
+        node.querySelector?.(conversationTurnSelector));
+    });
+  }
+
+  state.observer = new MutationObserver((mutations) => {
+    if (!state.root?.isConnected) ensureMounted();
+    if (mutationTouchesConversation(mutations)) {
+      scheduleConversationTokenUsageRender();
+    }
   });
   state.observer.observe(document.documentElement, { childList: true, subtree: true });
   state.resizeHandler = () => {
@@ -1286,6 +1307,7 @@ export function installQuotaWidget(
     },
     destroy() {
       state.observer?.disconnect();
+      state.observer = null;
       clearHoverGrace();
       if (state.conversationRenderFrame != null) {
         window.cancelAnimationFrame(state.conversationRenderFrame);
