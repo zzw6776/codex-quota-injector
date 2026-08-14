@@ -413,6 +413,7 @@ export class TokenUsageManager {
           modelSource: _modelSource,
           segments: _segments,
           rolloutPath: _rolloutPath,
+          generationStartAt: _generationStartAt,
           costRevision: _costRevision,
           ...publicTurn
         } = turn;
@@ -726,6 +727,7 @@ export class TokenUsageManager {
       const modelSource = event.modelSource ?? "thread";
       const incomingTotal = positiveNumber(event.tokenUsage?.total?.totalTokens);
       const previousTotal = positiveNumber(turn.cumulativeTotalTokens);
+      const previousOutputTokens = positiveNumber(turn.outputTokens);
       if (model) {
         // A reroute starts a new model segment. Unknown tokens before that
         // boundary must stay unresolved instead of being relabeled with the
@@ -745,6 +747,9 @@ export class TokenUsageManager {
           turn.model || model,
           turn.modelSource || modelSource,
         );
+        if (turn.outputTokens > previousOutputTokens) {
+          updateTotalGenerationRate(turn, updatedAt);
+        }
       }
       turn.cumulativeTotalTokens = Math.max(previousTotal, incomingTotal);
       const modelContextWindow = positiveNumber(event.tokenUsage?.modelContextWindow);
@@ -1099,7 +1104,11 @@ export class TokenUsageManager {
         "rollout",
         state.path,
       );
+      const previousOutputTokens = positiveNumber(turn.outputTokens);
       addUsage(turn, last, turn.model, turn.modelSource);
+      if (turn.outputTokens > previousOutputTokens) {
+        updateTotalGenerationRate(turn, parseTimestamp(record.timestamp));
+      }
       turn.cumulativeTotalTokens = positiveNumber(
         record.payload.info?.total_token_usage?.total_tokens,
       );
@@ -1379,6 +1388,8 @@ function emptyTurn(turnId, threadId, source, rolloutPath = "") {
     modelContextWindow: 0,
     model: "",
     modelSource: "",
+    generationStartAt: 0,
+    totalGenerationRate: null,
     costRevision: 0,
     segments: [],
     updatedAt: 0,
@@ -1405,6 +1416,20 @@ function addUsage(turn, usage, model, modelSource = turn.modelSource) {
     });
   }
   turn.costRevision = positiveInteger(turn.costRevision) + 1;
+}
+
+function updateTotalGenerationRate(turn, updatedAt) {
+  // outputTokens is the total generated-token counter, including reasoning
+  // tokens. Keep this separate from the visible-text counter in the UI.
+  const timestamp = positiveNumber(updatedAt);
+  if (!timestamp || positiveNumber(turn.outputTokens) <= 0) return;
+  if (!positiveNumber(turn.generationStartAt)) {
+    turn.generationStartAt = timestamp;
+    return;
+  }
+  const elapsedSeconds = (timestamp - turn.generationStartAt) / 1_000;
+  if (elapsedSeconds <= 0) return;
+  turn.totalGenerationRate = turn.outputTokens / elapsedSeconds;
 }
 
 function turnHasUnknownModel(turn) {
@@ -1493,6 +1518,8 @@ function normalizeCachedTurn(value) {
   turn.status = nonEmptyString(value.status);
   turn.model = String(value.model ?? "");
   turn.modelSource = String(value.modelSource ?? (turn.model ? "thread" : ""));
+  turn.generationStartAt = positiveNumber(value.generationStartAt);
+  turn.totalGenerationRate = positiveNumber(value.totalGenerationRate) || null;
   turn.costRevision = positiveInteger(value.costRevision);
   turn.cumulativeTotalTokens = positiveNumber(value.cumulativeTotalTokens);
   turn.modelContextWindow = positiveNumber(value.modelContextWindow);

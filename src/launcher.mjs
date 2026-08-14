@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { isSea } from "node:sea";
+
 if (process.env.CODEX_QUOTA_ROLE === "app-server-relay") {
   void import("./app-server-relay.mjs")
     .then(({ runAppServerRelay }) => runAppServerRelay())
@@ -38,6 +40,11 @@ async function runLauncher() {
   let launchOptions = { env: {}, relay: null };
   const contextManager = new CodexContextManager();
   const deepSeekManager = new DeepSeekManager();
+
+  if (isSea()) {
+    console.log("[launcher] 正式版启动，正在结束其他注入器进程");
+    await stopOtherInjectorProcesses();
+  }
 
   const restartFromTakeover = async () => {
     if (takeoverInProgress) return;

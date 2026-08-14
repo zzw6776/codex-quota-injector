@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 54;
+export const WIDGET_RUNTIME_VERSION = 57;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -17,6 +17,7 @@ export function installQuotaWidget(
   const ROOT_ID = "codex-quota-injector-root";
   const VERSION = runtimeVersion;
   const MAX_CONVERSATION_USAGE_CACHE = 240;
+  const CONVERSATION_TOOLTIP_DELAY_MS = 500;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
 
@@ -50,6 +51,9 @@ export function installQuotaWidget(
     conversationRenderFrame: null,
     conversationTooltip: null,
     conversationTooltipBridge: null,
+    conversationTooltipTimer: null,
+    conversationTooltipPendingLine: null,
+    conversationTooltipPendingPointer: null,
     conversationTooltipTarget: null,
     conversationTooltipPointer: null,
     conversationUsageByTurn: new Map(),
@@ -447,7 +451,7 @@ export function installQuotaWidget(
           "opacity:.82",
           "user-select:text",
         ].join(";");
-        line.addEventListener("pointerenter", (event) => showConversationTokenTooltip(line, event));
+        line.addEventListener("pointerenter", (event) => scheduleConversationTokenTooltip(line, event));
         line.addEventListener("pointermove", (event) => moveConversationTokenTooltip(line, event));
         line.addEventListener("pointerleave", (event) => {
           if (!isConversationTooltipArea(event.relatedTarget)) hideConversationTokenTooltip(line);
@@ -463,12 +467,16 @@ export function installQuotaWidget(
       const costSummary = cost.available
         ? `${costLabel} ${formatCny(cost.totalCny)}`
         : "费用暂不可算";
+      const generationRate = Number(usage.totalGenerationRate) > 0
+        ? `速率 ${formatGenerationRate(usage.totalGenerationRate)}`
+        : null;
       const summary = [
         `${usage.completed ? "本轮" : "实时"} Token ${formatTokenCount(usage.totalTokens)}`,
         `输入 ${formatTokenCount(usage.inputTokens)}`,
         `缓存输入 ${formatTokenCount(usage.cachedInputTokens)}`,
         `输出 ${formatTokenCount(usage.outputTokens)}`,
         `累计 ${formatTokenCount(usage.cumulativeTotalTokens)}`,
+        ...(generationRate ? [generationRate] : []),
         costSummary,
       ].join(" · ");
       if (line.textContent !== summary) line.textContent = summary;
@@ -493,6 +501,7 @@ export function installQuotaWidget(
   }
 
   function showConversationTokenTooltip(line, event = null) {
+    clearConversationTooltipTimer();
     const usage = line?.__codexTokenUsage;
     if (!usage) return;
     const tooltip = ensureConversationTokenTooltip();
@@ -554,6 +563,14 @@ export function installQuotaWidget(
       `${formatTokenCount(inputSummary.cachedInputTokens)} / ${formatTokenCount(inputSummary.inputTokens)}`,
     );
     appendTierRows("输出", "output", (tierUsage) => tierUsage.output_tokens);
+    appendConversationTooltipMetricRow(
+      rows,
+      "速率",
+      formatGenerationRate(usage.totalGenerationRate),
+      Number(usage.totalGenerationRate) > 0
+        ? "包含推理输出，按流式事件估算"
+        : "等待更多流式数据",
+    );
 
     const reasoningTiers = tiers.filter((tier) => tier.usage.reasoning_output_tokens > 0);
     if (reasoningTiers.length > 0) {
@@ -627,7 +644,28 @@ export function installQuotaWidget(
     tooltip.style.visibility = "visible";
   }
 
+  function scheduleConversationTokenTooltip(line, event) {
+    clearConversationTooltipTimer();
+    if (!line?.__codexTokenUsage) return;
+    state.conversationTooltipPendingLine = line;
+    state.conversationTooltipPendingPointer = conversationTooltipPointer(event, line);
+    state.conversationTooltipTimer = window.setTimeout(() => {
+      const pendingLine = state.conversationTooltipPendingLine;
+      const pendingPointer = state.conversationTooltipPendingPointer;
+      clearConversationTooltipTimer();
+      if (!pendingLine?.isConnected || !pendingLine.__codexTokenUsage) return;
+      showConversationTokenTooltip(
+        pendingLine,
+        pendingPointer ? { clientX: pendingPointer.x, clientY: pendingPointer.y } : null,
+      );
+    }, CONVERSATION_TOOLTIP_DELAY_MS);
+  }
+
   function moveConversationTokenTooltip(line, event) {
+    if (state.conversationTooltipPendingLine === line) {
+      state.conversationTooltipPendingPointer = conversationTooltipPointer(event, line);
+      return;
+    }
     if (state.conversationTooltipTarget !== line || state.conversationTooltip?.hidden) return;
     state.conversationTooltipPointer = conversationTooltipPointer(event, line);
     positionConversationTokenTooltip(line);
@@ -891,11 +929,21 @@ export function installQuotaWidget(
   }
 
   function hideConversationTokenTooltip(line = null) {
-    if (line && state.conversationTooltipTarget !== line) return;
+    if (line && state.conversationTooltipTarget !== line && state.conversationTooltipPendingLine !== line) return;
+    clearConversationTooltipTimer();
     if (state.conversationTooltip) state.conversationTooltip.hidden = true;
     if (state.conversationTooltipBridge) state.conversationTooltipBridge.hidden = true;
     state.conversationTooltipTarget = null;
     state.conversationTooltipPointer = null;
+  }
+
+  function clearConversationTooltipTimer() {
+    if (state.conversationTooltipTimer != null) {
+      window.clearTimeout(state.conversationTooltipTimer);
+      state.conversationTooltipTimer = null;
+    }
+    state.conversationTooltipPendingLine = null;
+    state.conversationTooltipPendingPointer = null;
   }
 
   function renderContextPage(busy) {
@@ -1276,6 +1324,16 @@ export function installQuotaWidget(
     })}M`;
   }
 
+  function formatGenerationRate(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "—";
+    const digits = number >= 100 ? 0 : number >= 10 ? 1 : 2;
+    return `${number.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })} tok/s`;
+  }
+
   function formatCny(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || number < 0) return "¥0.000000";
@@ -1462,6 +1520,7 @@ export function installQuotaWidget(
         state.mountCheckFrame = null;
       }
       clearHoverGrace();
+      clearConversationTooltipTimer();
       if (state.conversationRenderFrame != null) {
         window.cancelAnimationFrame(state.conversationRenderFrame);
         state.conversationRenderFrame = null;
@@ -1474,6 +1533,9 @@ export function installQuotaWidget(
       state.conversationTooltipBridge?.remove();
       state.conversationTooltip = null;
       state.conversationTooltipBridge = null;
+      state.conversationTooltipTimer = null;
+      state.conversationTooltipPendingLine = null;
+      state.conversationTooltipPendingPointer = null;
       state.conversationTooltipTarget = null;
       state.conversationTooltipPointer = null;
       state.conversationTurnNodes.clear();

@@ -142,7 +142,7 @@ export class TokenPricingManager {
       normalizedModel,
       provider: "openai",
       currency: "USD",
-      label: "API参考价",
+      label: "价格",
       contextTier: longContext ? "long" : "short",
       rates,
       usage,
