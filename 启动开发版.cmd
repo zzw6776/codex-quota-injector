@@ -19,15 +19,11 @@ if not exist "node_modules\" (
   )
 )
 
-echo Stopping any running Codex Quota Injector...
-for /f %%P in ('powershell.exe -NoProfile -NonInteractive -Command "Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 49229 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique"') do (
-  taskkill.exe /PID %%P /T /F >nul 2>&1
-)
-taskkill.exe /IM "Codex Quota Injector.exe" /T /F >nul 2>&1
-
 echo Starting Codex Quota Injector development version...
 call npm run launch
-if errorlevel 1 (
+set "exitCode=%errorlevel%"
+if not "%exitCode%"=="0" (
   echo Launch failed. Check the message above or injector.log.
   pause
 )
+exit /b %exitCode%

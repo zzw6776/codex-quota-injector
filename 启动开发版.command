@@ -37,36 +37,6 @@ if [[ ! -d "node_modules" ]]; then
   fi
 fi
 
-echo "Stopping any running Codex Quota Injector..."
-injector_pids=()
-while IFS= read -r pid; do
-  if [[ "$pid" =~ '^[0-9]+$' ]]; then
-    injector_pids+=("$pid")
-  fi
-done < <(/usr/sbin/lsof -nP -iTCP:49229 -sTCP:LISTEN -t 2>/dev/null)
-
-if (( ${#injector_pids[@]} > 0 )); then
-  kill -TERM "${injector_pids[@]}" 2>/dev/null || true
-fi
-/usr/bin/pkill -TERM -x "Codex Quota Injector" 2>/dev/null || true
-
-for _ in {1..20}; do
-  if ! /usr/sbin/lsof -nP -iTCP:49229 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.25
-done
-
-remaining_pids=()
-while IFS= read -r pid; do
-  if [[ "$pid" =~ '^[0-9]+$' ]]; then
-    remaining_pids+=("$pid")
-  fi
-done < <(/usr/sbin/lsof -nP -iTCP:49229 -sTCP:LISTEN -t 2>/dev/null)
-if (( ${#remaining_pids[@]} > 0 )); then
-  kill -KILL "${remaining_pids[@]}" 2>/dev/null || true
-fi
-
 echo "Starting Codex Quota Injector development version..."
 if ! npm run launch; then
   echo "Launch failed. Check the message above or injector.log."

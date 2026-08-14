@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import packageJson from "../package.json" with { type: "json" };
 import { isSea } from "node:sea";
 
 if (process.env.CODEX_QUOTA_ROLE === "app-server-relay") {
@@ -14,7 +15,6 @@ if (process.env.CODEX_QUOTA_ROLE === "app-server-relay") {
 }
 
 async function runLauncher() {
-  const { spawn } = await import("node:child_process");
   const { prepareCodexLaunch } = await import("./codex-bridge.mjs");
   const { CodexContextManager } = await import("./codex-context.mjs");
   const { DeepSeekManager } = await import("./deepseek-manager.mjs");
@@ -24,7 +24,6 @@ async function runLauncher() {
     isCodexRunning,
     isRelayStateCurrent,
     restartCodex,
-    stopOtherInjectorProcesses,
   } = await import("./platform.mjs");
   const {
     acquireSingleInstance,
@@ -33,6 +32,8 @@ async function runLauncher() {
   } = await import("./single-instance.mjs");
 
   const port = Number(process.env.CODEX_QUOTA_CDP_PORT ?? 9229);
+  const instanceMode = isSea() ? "formal" : "dev";
+  const instanceVersion = String(packageJson.version ?? "0.0.0");
   process.title = "Codex Quota Injector";
   const logPath = installFileLogger();
   let instanceLock = null;
@@ -41,30 +42,25 @@ async function runLauncher() {
   const contextManager = new CodexContextManager();
   const deepSeekManager = new DeepSeekManager();
 
-  if (isSea()) {
-    console.log("[launcher] 正式版启动，正在结束其他注入器进程");
-    await stopOtherInjectorProcesses();
-  }
-
-  const restartFromTakeover = async () => {
+  const restartFromTakeover = async (request) => {
     if (takeoverInProgress) return;
     takeoverInProgress = true;
-    console.log("[launcher] 收到重复启动，正在接管注入器");
+    console.log(`[launcher] ${request?.mode ?? "unknown"} v${request?.version ?? "unknown"} 请求接管，正在退出当前实例`);
     await closeSingleInstance(instanceLock);
-    // 接管只替换注入器。Codex 是否需要重启由新实例的正常启动检查
-    // 根据中继协议代际决定，不能在重复启动回调里强制重启。
-    relaunchSelf(spawn);
     process.exit(0);
   };
 
   try {
     try {
-      instanceLock = await acquireSingleInstance({ onTakeover: restartFromTakeover });
+      instanceLock = await acquireSingleInstance({
+        mode: instanceMode,
+        version: instanceVersion,
+        onTakeover: restartFromTakeover,
+      });
     } catch (error) {
       if (!(error instanceof SingleInstanceTakeoverError)) throw error;
-      console.warn("[launcher] 旧注入器未响应，强制结束后接管启动");
-      await stopOtherInjectorProcesses();
-      instanceLock = await acquireSingleInstance({ onTakeover: restartFromTakeover });
+      console.warn(`[launcher] ${error.message}`);
+      return;
     }
     if (!instanceLock) return;
 
@@ -115,12 +111,4 @@ async function runLauncher() {
     }
   }
 
-  function relaunchSelf(spawnImpl) {
-    const child = spawnImpl(process.execPath, process.argv.slice(1), {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    child.unref();
-  }
 }
