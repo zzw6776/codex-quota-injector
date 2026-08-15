@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import deepSeekModel from "./deepseek-model.json" with { type: "json" };
 import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
 
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
@@ -16,6 +17,7 @@ const PROVIDER_CONFIG =
   `env_key="${DEEPSEEK_ENV_KEY}",wire_api="responses"}`;
 const THREAD_METHODS = new Set(["thread/start", "thread/resume", "thread/fork"]);
 const THREAD_SETTINGS_METHOD = "thread/settings/update";
+const MODEL_LIST_METHOD = "model/list";
 const OBSERVED_THREAD_METHODS = new Set([
   ...THREAD_METHODS,
   "thread/read",
@@ -32,9 +34,12 @@ const RELAY_CLEANUP_INTERVAL_MS = 60 * 1000;
 const JSON_RPC_ID_RE = /^\s*\{\s*"id"\s*:\s*(?:"([^"\\]*)"|(-?\d+(?:\.\d+)?))/;
 
 export async function runAppServerRelay() {
-  const upstreamExecutable = String(process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI ?? "").trim();
+  const relayConfig = await readJson(process.env.CODEX_QUOTA_RELAY_CONFIG);
+  const upstreamExecutable = String(
+    relayConfig?.upstreamExecutable ?? process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI ?? "",
+  ).trim();
   if (!upstreamExecutable || upstreamExecutable === process.execPath) {
-    throw new Error("CODEX_QUOTA_UPSTREAM_CODEX_CLI 未配置或指向了中继自身");
+    throw new Error("模型中继配置缺少有效的官方 Codex CLI 路径，或路径指向了中继自身");
   }
 
   const originalArgs = process.argv.slice(2);
@@ -44,12 +49,16 @@ export async function runAppServerRelay() {
     return;
   }
 
-  const settings = await readJson(process.env.CODEX_QUOTA_PROVIDER_SETTINGS).catch((error) => {
+  const providerSettingsPath = relayConfig?.providerSettingsPath ??
+    process.env.CODEX_QUOTA_PROVIDER_SETTINGS;
+  const settings = await readJson(providerSettingsPath).catch((error) => {
     console.error(`DeepSeek 本地配置读取失败，已按停用处理: ${error.message}`);
     return null;
   });
   const deepSeekEnabled = Boolean(settings?.enabled && settings?.apiKey);
-  const catalogPath = String(process.env.CODEX_QUOTA_MODEL_CATALOG ?? "").trim();
+  const catalogPath = String(
+    relayConfig?.modelCatalogPath ?? process.env.CODEX_QUOTA_MODEL_CATALOG ?? "",
+  ).trim();
   const officialModels = await readOfficialModelSlugs(catalogPath);
   officialModels.delete(DEEPSEEK_MODEL);
 
@@ -62,16 +71,28 @@ export async function runAppServerRelay() {
   const env = { ...process.env, CODEX_CLI_PATH: upstreamExecutable };
   if (deepSeekEnabled) env[DEEPSEEK_ENV_KEY] = settings.apiKey;
   else delete env[DEEPSEEK_ENV_KEY];
+  clearRelayEnvironment(env);
   delete env.CODEX_APP_SERVER_FORCE_CLI;
   delete env.CODEX_APP_SERVER_WS_URL;
-  delete env.CODEX_QUOTA_ROLE;
+  env.CODEX_CLI_PATH = upstreamExecutable;
 
-  const child = spawn(upstreamExecutable, args, { env, stdio: ["pipe", "pipe", "pipe"] });
-  const statePath = String(process.env.CODEX_QUOTA_RELAY_STATE ?? "").trim();
+  const child = spawn(upstreamExecutable, args, {
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: process.platform === "win32",
+  });
+  const statePath = String(
+    relayConfig?.relayStatePath ?? process.env.CODEX_QUOTA_RELAY_STATE ?? "",
+  ).trim();
   const usageEventWriter = createUsageEventWriter(
-    String(process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "").trim(),
+    String(
+      relayConfig?.tokenUsageEventsPath ?? process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "",
+    ).trim(),
   );
-  await writeRelayState(statePath);
+  await writeRelayState(
+    statePath,
+    relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+  );
   let relayCleanupTimer = null;
   let cleanedUp = false;
   const cleanup = async () => {
@@ -98,6 +119,7 @@ export async function runAppServerRelay() {
     threadContexts,
     turnModels,
     modelRevision: 0,
+    modelListStatus: null,
     emitUsageEvent: usageEventWriter.write,
   };
   relayCleanupTimer = setInterval(() => pruneRelayState(relayState), RELAY_CLEANUP_INTERVAL_MS);
@@ -117,10 +139,19 @@ function rewriteClientLine(line, state) {
   if (!message || typeof message !== "object") return line;
 
   const method = message.method;
-  if (!OBSERVED_THREAD_METHODS.has(method) && !TURN_INPUT_METHODS.has(method)) return line;
   const params = message.params && typeof message.params === "object"
     ? { ...message.params }
     : {};
+  if (method === MODEL_LIST_METHOD) {
+    if (message.id != null) {
+      rememberPendingRequest(state, message.id, {
+        method,
+        cursor: params.cursor ?? null,
+      });
+    }
+    return line;
+  }
+  if (!OBSERVED_THREAD_METHODS.has(method) && !TURN_INPUT_METHODS.has(method)) return line;
   const requestRevision = nextModelRevision(state);
 
   if (method === THREAD_SETTINGS_METHOD) {
@@ -282,6 +313,9 @@ function rewriteServerLine(line, state) {
     );
     return line;
   }
+  if (pending.method === MODEL_LIST_METHOD) {
+    return rewriteModelListResponse(line, message, state, pending);
+  }
   const result = message?.result;
   const thread = result?.thread ?? result;
   const threadId = thread?.id ?? pending.threadId;
@@ -321,6 +355,76 @@ function rewriteServerLine(line, state) {
     });
   }
   return line;
+}
+
+function rewriteModelListResponse(line, message, state, pending) {
+  const models = message?.result?.data;
+  if (!Array.isArray(models)) {
+    reportModelListStatus(state, "invalid", "model/list 返回格式无法识别，未修改响应");
+    return line;
+  }
+
+  const hasDeepSeek = models.some((model) =>
+    normalizedModel(model?.id) === DEEPSEEK_MODEL ||
+    normalizedModel(model?.model) === DEEPSEEK_MODEL
+  );
+  if (!state.deepSeekEnabled) {
+    reportModelListStatus(state, "disabled", "DeepSeek 未启用，不向模型列表补充选项");
+    return line;
+  }
+  if (hasDeepSeek) {
+    reportModelListStatus(state, "present", "DeepSeek 模型选项已由官方 app-server 返回");
+    return line;
+  }
+  if (pending.cursor != null && String(pending.cursor).trim()) return line;
+
+  reportModelListStatus(state, "injected", "model/list 缺少 DeepSeek，已在首屏响应中补齐");
+  return JSON.stringify({
+    ...message,
+    result: {
+      ...message.result,
+      data: [...models, createDeepSeekAppServerModel()],
+    },
+  });
+}
+
+function createDeepSeekAppServerModel() {
+  const reasoningLevels = Array.isArray(deepSeekModel.supported_reasoning_levels)
+    ? deepSeekModel.supported_reasoning_levels
+    : [];
+  const inputModalities = Array.isArray(deepSeekModel.input_modalities)
+    ? deepSeekModel.input_modalities.filter((value) => ["text", "image", "audio"].includes(value))
+    : [];
+  return {
+    id: deepSeekModel.slug,
+    model: deepSeekModel.slug,
+    upgrade: deepSeekModel.upgrade ?? null,
+    upgradeInfo: null,
+    availabilityNux: deepSeekModel.availability_nux ?? null,
+    displayName: deepSeekModel.display_name,
+    description: deepSeekModel.description,
+    hidden: deepSeekModel.visibility === "hide",
+    supportedReasoningEfforts: reasoningLevels.map((level) => ({
+      reasoningEffort: level.effort,
+      description: level.description,
+    })),
+    defaultReasoningEffort: deepSeekModel.default_reasoning_level ??
+      reasoningLevels[0]?.effort ?? "high",
+    inputModalities,
+    supportsPersonality: Object.keys(
+      deepSeekModel.model_messages?.instructions_variables ?? {},
+    ).some((key) => key.startsWith("personality_")),
+    additionalSpeedTiers: [],
+    serviceTiers: [],
+    defaultServiceTier: deepSeekModel.default_service_tier ?? null,
+    isDefault: false,
+  };
+}
+
+function reportModelListStatus(state, status, message) {
+  if (state.modelListStatus === status) return;
+  state.modelListStatus = status;
+  console.error(`[codex-quota-relay] ${message}`);
 }
 
 function completeLargeResponse(line, state) {
@@ -745,9 +849,15 @@ function writeWithBackpressure(output, chunk, input) {
 
 async function runPassthrough(upstreamExecutable, args) {
   const env = { ...process.env, CODEX_CLI_PATH: upstreamExecutable };
+  clearRelayEnvironment(env);
   delete env.CODEX_APP_SERVER_FORCE_CLI;
-  delete env.CODEX_QUOTA_ROLE;
-  const child = spawn(upstreamExecutable, args, { env, stdio: "inherit" });
+  delete env.CODEX_APP_SERVER_WS_URL;
+  env.CODEX_CLI_PATH = upstreamExecutable;
+  const child = spawn(upstreamExecutable, args, {
+    env,
+    stdio: "inherit",
+    windowsHide: process.platform === "win32",
+  });
   forwardSignals(child);
   child.once("error", fail);
   child.once("exit", (code, signal) => exitLikeChild(code, signal));
@@ -770,14 +880,36 @@ async function readJson(path) {
   }
 }
 
-async function writeRelayState(path) {
+async function writeRelayState(path, generation) {
   if (!path) return;
+  const resolvedGeneration = generation ??
+    process.env.CODEX_QUOTA_BRIDGE_GENERATION ??
+    `usage-events-v${RELAY_PROTOCOL_VERSION}`;
+  const processStartedAt = Math.max(
+    0,
+    Math.floor(Date.now() - process.uptime() * 1000),
+  );
   await writeFile(path, `${JSON.stringify({
     pid: process.pid,
-    generation: process.env.CODEX_QUOTA_BRIDGE_GENERATION ??
-      `usage-events-v${RELAY_PROTOCOL_VERSION}`,
+    generation: resolvedGeneration,
+    processStartedAt,
     startedAt: Date.now(),
   })}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+function clearRelayEnvironment(env) {
+  for (const key of [
+    "CODEX_QUOTA_RELAY_CONFIG",
+    "CODEX_QUOTA_ROLE",
+    "CODEX_QUOTA_UPSTREAM_CODEX_CLI",
+    "CODEX_QUOTA_PROVIDER_SETTINGS",
+    "CODEX_QUOTA_MODEL_CATALOG",
+    "CODEX_QUOTA_RELAY_STATE",
+    "CODEX_QUOTA_TOKEN_USAGE_EVENTS",
+    "CODEX_QUOTA_BRIDGE_GENERATION",
+  ]) {
+    delete env[key];
+  }
 }
 
 async function removeRelayState(path) {

@@ -40,7 +40,7 @@ export class DeepSeekManager {
 
   getViewModel() {
     return {
-      supported: process.platform === "darwin",
+      supported: process.platform === "darwin" || process.platform === "win32",
       enabled: this.settings.enabled,
       apiKey: this.settings.apiKey,
       configured: Boolean(this.settings.apiKey),

@@ -799,12 +799,21 @@ export class TokenUsageManager {
       this.activeThreadHintAt = 0;
       this.#markCacheDirty();
     }
-    if (!this.activeThreadId && paths.length > 0) {
-      const latestPath = [...paths].sort((left, right) => basename(right).localeCompare(basename(left)))[0];
-      this.activeThreadId = threadIdFromRolloutPath(latestPath);
+    if (paths.length === 0) return;
+
+    // Windows 在没有可用 App Server relay 活动事件时，通过最近写入的 rollout 文件跟踪活动会话。
+    const latestPath = process.platform === "win32"
+      ? await findLatestRolloutPath(paths)
+      : [...paths].sort((left, right) => basename(right).localeCompare(basename(left)))[0];
+    const latestThreadId = threadIdFromRolloutPath(latestPath);
+    if (latestThreadId &&
+      (!this.activeThreadId ||
+        (process.platform === "win32" && !activeHintFresh &&
+          this.activeThreadId !== latestThreadId))) {
+      this.activeThreadId = latestThreadId;
       this.activeThreadHint = false;
       this.activeThreadHintAt = 0;
-      if (this.activeThreadId) this.#markCacheDirty();
+      this.#markCacheDirty();
     }
   }
 
@@ -1655,6 +1664,24 @@ async function collectRolloutFiles(root, depth) {
     }
   }));
   return paths;
+}
+
+async function findLatestRolloutPath(paths) {
+  const fallback = [...paths].sort((left, right) => basename(right).localeCompare(basename(left)))[0];
+  const candidates = await Promise.all(paths.map(async (path) => {
+    try {
+      const info = await stat(path);
+      return { path, modifiedAt: info.mtimeMs };
+    } catch {
+      return null;
+    }
+  }));
+  return candidates
+    .filter(Boolean)
+    .sort((left, right) =>
+      right.modifiedAt - left.modifiedAt ||
+      basename(right.path).localeCompare(basename(left.path))
+    )[0]?.path ?? fallback;
 }
 
 function threadIdFromRolloutPath(path) {

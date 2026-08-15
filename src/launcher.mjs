@@ -3,7 +3,11 @@
 import packageJson from "../package.json" with { type: "json" };
 import { isSea } from "node:sea";
 
-if (process.env.CODEX_QUOTA_ROLE === "app-server-relay") {
+if (
+  process.env.CODEX_QUOTA_ROLE === "app-server-relay" ||
+  (String(process.env.CODEX_QUOTA_RELAY_CONFIG ?? "").trim() &&
+    String(process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI ?? "").trim())
+) {
   void import("./app-server-relay.mjs")
     .then(({ runAppServerRelay }) => runAppServerRelay())
     .catch((error) => {
@@ -21,8 +25,9 @@ async function runLauncher() {
   const { installFileLogger } = await import("./file-logger.mjs");
   const { runInjector } = await import("./injector.mjs");
   const {
+    activateCodex,
+    isCodexLaunchReady,
     isCodexRunning,
-    isRelayStateCurrent,
     restartCodex,
   } = await import("./platform.mjs");
   const {
@@ -85,30 +90,14 @@ async function runLauncher() {
   }
 
   async function ensureCodexDebugMode(cdpPort, options) {
-    const debugReady = await hasCodexDebugPort(cdpPort);
-    const relayReady = !options.relay
-      ? true
-      : options.relay.expectAbsent
-        ? !await isRelayStateCurrent(options.relay.statePath)
-        : await isRelayStateCurrent(options.relay.statePath, options.relay.generation);
-    if (debugReady && relayReady) {
+    const ready = await isCodexRunning() && await isCodexLaunchReady(cdpPort, options);
+    if (ready) {
+      await activateCodex();
       console.log(`[launcher] Codex 已处于调试及模型中继模式（端口 ${cdpPort}）`);
       return;
     }
     console.log(`[launcher] 正在以调试及模型中继模式重启 Codex（端口 ${cdpPort}）`);
     await restartCodex(cdpPort, options);
-  }
-
-  async function hasCodexDebugPort(cdpPort) {
-    if (!await isCodexRunning()) return false;
-    try {
-      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
-        signal: AbortSignal.timeout(2_000),
-      });
-      return response.ok;
-    } catch {
-      return false;
-    }
   }
 
 }

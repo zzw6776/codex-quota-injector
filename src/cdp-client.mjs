@@ -132,12 +132,19 @@ export class CdpClient {
   }
 }
 
+const CODEX_DEBUG_HOSTS = ["127.0.0.1", "[::1]"];
+
+export async function isCodexDebugPortReady(port, { timeoutMs = 2_000 } = {}) {
+  try {
+    await fetchCodexJson(port, "/json/version", { timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function findCodexTarget(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
-    signal: AbortSignal.timeout(3_000),
-  });
-  if (!response.ok) throw new Error(`CDP target list returned ${response.status}`);
-  const targets = await response.json();
+  const targets = await fetchCodexJson(port, "/json/list");
   const appPages = targets.filter(
     (target) =>
       target.type === "page" &&
@@ -157,4 +164,29 @@ export async function findCodexTarget(port) {
     appPages[0] ??
     null
   );
+}
+
+async function fetchCodexJson(port, path, { timeoutMs = 3_000 } = {}) {
+  const controllers = CODEX_DEBUG_HOSTS.map(() => new AbortController());
+  try {
+    return await Promise.any(CODEX_DEBUG_HOSTS.map(async (host, index) => {
+      const response = await fetch(`http://${host}:${port}${path}`, {
+        signal: AbortSignal.any([
+          controllers[index].signal,
+          AbortSignal.timeout(timeoutMs),
+        ]),
+      });
+      if (!response.ok) {
+        throw new Error(`${host} returned HTTP ${response.status}`);
+      }
+      return response.json();
+    }));
+  } catch (error) {
+    const details = error instanceof AggregateError
+      ? error.errors.map((item) => item?.message ?? String(item)).join("; ")
+      : error?.message ?? String(error);
+    throw new Error(`CDP loopback endpoints unavailable on port ${port}: ${details}`);
+  } finally {
+    for (const controller of controllers) controller.abort();
+  }
 }

@@ -29,7 +29,7 @@ async function doctor(cdpPort) {
     const target = await findCodexTarget(cdpPort);
     console.log(target ? `CDP: ready (${target.url})` : "CDP: ready, Codex page not found");
   } catch {
-    console.log(`CDP: unavailable on 127.0.0.1:${cdpPort}`);
+    console.log(`CDP: unavailable on local loopback port ${cdpPort}`);
   }
   const quota = await getQuota();
   console.log(`Quota: ${JSON.stringify(quota)}`);

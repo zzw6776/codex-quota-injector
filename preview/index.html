@@ -51,9 +51,11 @@
     </main>
     <script type="module">
       import { installQuotaWidget } from "/src/widget.mjs";
+      const packageJson = await fetch("/package.json").then((response) => response.json());
       installQuotaWidget();
       const now = Math.floor(Date.now() / 1000);
       window.__codexQuotaWidget.update({
+        version: packageJson.version,
         currentAccountId: "account-1",
         accounts: [
           {
@@ -86,6 +88,16 @@
           { label: "Weekly", remainingPercent: 86, resetsAt: now + 3 * 86400 },
         ],
         operation: null,
+        deepSeek: {
+          enabled: true,
+          balance: {
+            available: true,
+            items: [
+              { currency: "USD", totalBalance: "12.34" },
+              { currency: "CNY", totalBalance: "88.00" },
+            ],
+          },
+        },
       });
     </script>
   </body>

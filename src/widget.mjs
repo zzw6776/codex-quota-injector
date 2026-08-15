@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 57;
+export const WIDGET_RUNTIME_VERSION = 59;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -158,6 +158,9 @@ export function installQuotaWidget(
     .operation .oauth-cancel { flex: 0 0 auto; padding: 3px 7px; }
     .operation.success { color: #7ecb9b; background: rgba(52,168,92,.09); }
     .operation.error { color: #ef8e86; background: rgba(220,76,63,.09); }
+    .panel-version { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.07); color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
+    .panel-version-text { margin-left: auto; white-space: nowrap; }
+    .panel-balance { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .add-panel { margin-top: 11px; padding-top: 11px; border-top: 1px solid rgba(255,255,255,.07); }
     .add-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .toolbar-actions { display: flex; align-items: center; gap: 7px; }
@@ -243,7 +246,7 @@ export function installQuotaWidget(
     .quota-wrap.is-light .provider-icon-btn:hover, .quota-wrap.is-light .provider-icon-btn:focus-visible {
       color: #363740; background: rgba(0,0,0,.06);
     }
-    .quota-wrap.is-light .add-panel, .quota-wrap.is-light details { border-color: rgba(0,0,0,.09); }
+    .quota-wrap.is-light .add-panel, .quota-wrap.is-light .panel-version, .quota-wrap.is-light details { border-color: rgba(0,0,0,.09); }
     .quota-wrap.is-light input, .quota-wrap.is-light textarea { color: #202124; border-color: rgba(0,0,0,.13); background: rgba(0,0,0,.025); }
     .quota-wrap.is-light .operation { color: #666670; background: rgba(0,0,0,.04); }
     .quota-wrap.is-light .context-summary, .quota-wrap.is-light .model-card,
@@ -332,6 +335,14 @@ export function installQuotaWidget(
     const busy = state.data.operation?.state === "loading";
     const contextPage = state.page === "context";
     const providerPage = state.page === "provider";
+    const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
+    const deepSeekBalance = (() => {
+      const provider = state.data.deepSeek ?? {};
+      const items = Array.isArray(provider.balance?.items) ? provider.balance.items : [];
+      return items
+        .map((item) => `${escapeHtml(item.currency)} ${escapeHtml(item.totalBalance)}`)
+        .join(" · ");
+    })();
     const popoverClass = contextPage
       ? "quota-popover context-popover"
       : providerPage
@@ -354,9 +365,12 @@ export function installQuotaWidget(
             <details><summary>API Key</summary><form class="api-key-form"><input name="name" placeholder="账号名称（可选）" ${busy ? "disabled" : ""}><input name="apiKey" type="password" autocomplete="off" placeholder="OpenAI API Key" required ${busy ? "disabled" : ""}><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>添加 API Key</button></form></details>
           </div>
         </section>`;
+    const versionFooter = appVersion
+      ? `<div class="panel-version">${deepSeekBalance ? `<span class="panel-balance">DeepSeek 余额 ${deepSeekBalance}</span>` : ""}<span class="panel-version-text">v${appVersion}</span></div>`
+      : "";
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : providerPage ? "DeepSeek 设置" : "Codex 账号与额度"}">${popoverContent}</section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : providerPage ? "DeepSeek 设置" : "Codex 账号与额度"}">${popoverContent}${versionFooter}</section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       nextPopover.showPopover();
@@ -1000,7 +1014,7 @@ export function installQuotaWidget(
         <div class="provider-field"><label>DeepSeek API Key（本地明文保存并完整回显）</label><input class="provider-key" name="apiKey" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(key)}" placeholder="sk-..." ${supported && !pendingRestart ? "" : "disabled"}></div>
         <div class="provider-warning">Key 保存在 ${escapeHtml(provider.settingsPath ?? "本地 provider-settings.json")}；不会写入系统安全存储。保存、停用或删除后都会重启 Codex。</div>
         <div class="provider-actions"><button class="btn deepseek-remove" type="button" ${configured && !pendingRestart ? "" : "disabled"}>删除并重启 Codex</button><button class="btn primary" type="submit" ${supported && !pendingRestart ? "" : "disabled"}>保存并重启 Codex</button></div>
-        ${supported ? "" : '<div class="quota-error">DeepSeek 模型共存当前仅支持 macOS。</div>'}
+        ${supported ? "" : '<div class="quota-error">DeepSeek 模型共存当前仅支持 macOS 和 Windows。</div>'}
       </form>
       ${statusMessage}
       <section class="balance-section"><div class="balance-head"><span>账户余额${provider.balance ? ` · ${provider.balance.available ? "账户可用" : "账户不可用"}` : ""} · ${escapeHtml(formatUpdatedAt(provider.balanceUpdatedAt))}</span><button class="btn deepseek-refresh-balance" type="button" ${!configured || provider.balanceRefreshing ? "disabled" : ""}>${provider.balanceRefreshing ? "查询中" : "查询余额"}</button></div><div class="balance-grid">${balanceHtml}</div>${balanceError}</section>`;

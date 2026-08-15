@@ -5,6 +5,7 @@ import { prepareCodexLaunch } from "./codex-bridge.mjs";
 import { DeepSeekManager } from "./deepseek-manager.mjs";
 import { isCodexRunning, restartCodex } from "./platform.mjs";
 import { TokenUsageManager } from "./token-usage.mjs";
+import packageJson from "../package.json" with { type: "json" };
 import {
   widgetDrainActionsExpression,
   widgetInstallExpression,
@@ -15,6 +16,7 @@ import {
 } from "./widget.mjs";
 
 const DEFAULT_PORT = 9229;
+const APP_VERSION = String(packageJson.version ?? "0.0.0");
 const TARGET_POLL_MS = 1_500;
 const QUOTA_REFRESH_MS = 60_000;
 const DEEPSEEK_BALANCE_REFRESH_MS = 5 * 60_000;
@@ -22,6 +24,7 @@ const STARTUP_GRACE_MS = 30_000;
 const TOKEN_USAGE_FALLBACK_MS = 15_000;
 const WIDGET_HEALTH_CHECK_MS = 15_000;
 const TOKEN_USAGE_STABILITY_GRACE_MS = 5_000;
+const INJECTION_ERROR_LOG_INTERVAL_MS = 10_000;
 
 export async function runInjector({
   port = DEFAULT_PORT,
@@ -69,6 +72,8 @@ export async function runInjector({
   let deepSeekBalanceTimer = null;
   let tokenUsageFallbackTimer = null;
   let lastWidgetHealthCheckAt = 0;
+  let lastInjectionError = null;
+  let lastInjectionErrorAt = 0;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
 
   function markWidgetDataDirty() {
@@ -156,7 +161,7 @@ export async function runInjector({
     let reconnected = false;
     if (!cdp?.isConnected) {
       const target = await findCodexTarget(port);
-      if (!target) return false;
+      if (!target) throw new Error("CDP 已连接，但未找到 Codex 主页面");
       cdp?.close();
       cdp = new CdpClient(target.webSocketDebuggerUrl);
       await cdp.connect();
@@ -195,6 +200,12 @@ export async function runInjector({
       scheduleTokenUsageFallback();
     }
     await requestWidgetUpdate();
+    if (reconnected) {
+      if (lastInjectionError) console.log("[injector] Codex 页面连接已恢复");
+      console.log(`[injector] 已连接并注入 Codex 主页面（${targetId}）`);
+      lastInjectionError = null;
+      lastInjectionErrorAt = 0;
+    }
     return true;
   }
 
@@ -260,6 +271,7 @@ export async function runInjector({
       tokenUsage: stableTokenUsage,
     };
     const staticViewModel = {
+      version: APP_VERSION,
       accounts: viewModel.accounts,
       windows: viewModel.windows,
       currentAccountId: viewModel.currentAccountId,
@@ -520,6 +532,13 @@ export async function runInjector({
       if (injected && once) break;
     } catch (error) {
       if (once) throw error;
+      const message = error?.message ?? String(error);
+      const now = Date.now();
+      if (message !== lastInjectionError || now - lastInjectionErrorAt >= INJECTION_ERROR_LOG_INTERVAL_MS) {
+        console.error(`[injector] 连接或注入失败: ${message}`);
+        lastInjectionError = message;
+        lastInjectionErrorAt = now;
+      }
       cdp?.close();
       cdp = null;
       targetId = null;
