@@ -4,16 +4,18 @@ import { isCodexDebugPortReady } from "./cdp-client.mjs";
 import {
   access,
   copyFile,
+  cp,
   mkdir,
   readFile,
   readdir,
   rename,
+  rm,
   stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -26,9 +28,13 @@ const WINDOWS_EXECUTABLE_NAMES = ["ChatGPT.exe", "Codex.exe"];
 const WINDOWS_CODEX_CACHE_DIR = "codex-upstream";
 const WINDOWS_CODEX_CACHE_FILE = "codex-upstream.exe";
 const WINDOWS_CODEX_CACHE_MANIFEST = "manifest.json";
+const WINDOWS_CODEX_APP_CACHE_DIR = "codex-app";
+const WINDOWS_CODEX_APP_CACHE_MANIFEST = "manifest.json";
 const RELAY_PROCESS_START_TIME_TOLERANCE_MS = 30_000;
 
 let cachedCodexExecutable = null;
+let cachedWindowsStoreExecutable = null;
+let cachedWindowsStoreAppId = null;
 
 export function defaultAccountDataDir() {
   if (process.env.CODEX_QUOTA_DATA_DIR) return process.env.CODEX_QUOTA_DATA_DIR;
@@ -127,12 +133,16 @@ export async function listCodexProcessIds() {
   }
   if (process.platform === "win32") {
     const expected = powershellQuote(executable.toLowerCase());
+    const cacheRoot = powershellQuote(`${windowsCodexAppCacheRoot().toLowerCase()}\\`);
     const script = `
 $expected='${expected}';
+$cacheRoot='${cacheRoot}';
 Get-CimInstance Win32_Process |
   Where-Object {
     ($_.Name -eq 'ChatGPT.exe' -or $_.Name -eq 'Codex.exe') -and
-    $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant() -eq $expected -and
+    $_.ExecutablePath -and
+    ($_.ExecutablePath.ToLowerInvariant() -eq $expected -or
+      $_.ExecutablePath.ToLowerInvariant().StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) -and
     ($_.CommandLine -notmatch '--type=|crashpad_handler')
   } |
   ForEach-Object { Write-Output $_.ProcessId }
@@ -173,11 +183,13 @@ export async function stopCodex({ timeoutMs = 2_000 } = {}) {
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if ((await listCodexProcessIds()).length === 0) return;
-    await delay(250);
+    if (!isAnyProcessAlive(processIds)) return;
+    await delay(100);
   }
 
-  const remaining = await listCodexProcessIds();
+  const remaining = processIds.filter(isProcessAlive);
+  if (remaining.length === 0) return;
+
   if (process.platform === "win32") {
     for (const processId of remaining) {
       await execFileAsync("taskkill.exe", ["/PID", String(processId), "/T", "/F"], {
@@ -194,12 +206,25 @@ export async function stopCodex({ timeoutMs = 2_000 } = {}) {
     }
   }
 
-  const forceDeadline = Date.now() + (process.platform === "win32" ? 2_000 : 5_000);
+  const forceDeadline = Date.now() + (process.platform === "win32" ? 1_000 : 3_000);
   while (Date.now() < forceDeadline) {
-    if ((await listCodexProcessIds()).length === 0) return;
-    await delay(250);
+    if (!isAnyProcessAlive(remaining)) return;
+    await delay(100);
   }
   throw new Error("Codex 进程未能在超时内退出");
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isAnyProcessAlive(pids) {
+  return pids.some(isProcessAlive);
 }
 
 export async function launchCodex(
@@ -224,17 +249,23 @@ export async function launchCodex(
   }
 
   if (process.platform === "win32") {
-    const child = spawn(executable, args, {
-      detached: true,
-      windowsHide: true,
-      stdio: "ignore",
-      env: { ...process.env, ...env },
-    });
-    await new Promise((resolve, reject) => {
-      child.once("spawn", resolve);
-      child.once("error", reject);
-    });
-    child.unref();
+    const launchableExecutable = isWindowsStoreExecutable(executable)
+      ? await materializeWindowsStoreCodexExecutable(executable)
+      : executable;
+    let child;
+    try {
+      child = spawn(launchableExecutable, args, {
+        detached: true,
+        windowsHide: false,
+        stdio: "ignore",
+        env: { ...process.env, ...env },
+      });
+      await waitForChildSpawn(child);
+      child.unref();
+    } catch (error) {
+      if (error?.code !== "EPERM") throw error;
+      await launchWindowsExecutableThroughShell(launchableExecutable, args, env);
+    }
     return;
   }
 
@@ -280,16 +311,36 @@ export async function activateCodex(providedExecutable = null) {
     if (process.platform !== "win32") return false;
 
     const executable = providedExecutable ?? await resolveCodexExecutable();
+    const processIds = await listCodexProcessIds();
     const appId = await detectWindowsStoreCodexAppId(executable);
-    if (!appId) {
-      console.warn("[launcher] 未找到 Windows Codex 官方应用入口，无法激活现有窗口");
-      return false;
+    const pidArrayLiteral = processIds.map((pid) => Number(pid)).filter(Boolean).join(",");
+    const escapedAppId = appId ? powershellQuote(appId) : "";
+
+    const script = `
+$shell=New-Object -ComObject WScript.Shell;
+$pids=@(${pidArrayLiteral});
+foreach ($p in $pids) {
+  if ($shell.AppActivate($p)) { Write-Output 'activated'; exit 0 }
+}
+if ('${escapedAppId}') {
+  Start-Process 'explorer.exe' -ArgumentList 'shell:AppsFolder\\${escapedAppId}' -WindowStyle Hidden;
+  Write-Output 'app_invoked';
+  exit 0;
+}
+`;
+    const stdout = await runPowerShell(script).catch(() => "");
+    const result = firstNonEmptyLine(stdout);
+    if (result === "activated") {
+      console.log(`[launcher] 已激活 Codex 窗口`);
+      return true;
     }
-    await execFileAsync("explorer.exe", [`shell:AppsFolder\\${appId}`], {
-      windowsHide: true,
-    });
-    console.log(`[launcher] 已通过 Windows 官方入口激活 Codex 窗口（${appId}）`);
-    return true;
+    if (result === "app_invoked") {
+      console.log(`[launcher] 已通过 Windows 官方入口激活 Codex 窗口（${appId}）`);
+      return true;
+    }
+
+    console.warn("[launcher] Codex 已运行，但未能自动置前窗口");
+    return false;
   } catch (error) {
     console.warn(`[launcher] Codex 窗口激活失败: ${error.message}`);
     return false;
@@ -353,11 +404,15 @@ function parseProcessList(processList, executable) {
 }
 
 async function detectRunningWindowsCodexExecutable() {
+  const cacheRoot = powershellQuote(`${windowsCodexAppCacheRoot().toLowerCase()}\\`);
   const script = `
+$cacheRoot='${cacheRoot}';
 Get-CimInstance Win32_Process |
   Where-Object {
     ($_.Name -eq 'ChatGPT.exe' -or $_.Name -eq 'Codex.exe') -and
-    $_.ExecutablePath -and ($_.CommandLine -notmatch '--type=|crashpad_handler')
+    $_.ExecutablePath -and
+    ($_.ExecutablePath.ToLowerInvariant().StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) -eq $false -and
+    ($_.CommandLine -notmatch '--type=|crashpad_handler')
   } |
   Select-Object -First 1 -ExpandProperty ExecutablePath
 `;
@@ -448,6 +503,56 @@ async function materializeWindowsCodexCli(source) {
   }
 }
 
+async function materializeWindowsStoreCodexExecutable(source) {
+  const sourceInfo = await stat(source);
+  const sourceDirectory = dirname(source);
+  const targetName = basename(source);
+  const cacheKey = `${sourceInfo.size}-${Math.trunc(sourceInfo.mtimeMs)}`;
+  const cacheDirectory = join(windowsCodexAppCacheRoot(), cacheKey);
+  const target = join(cacheDirectory, targetName);
+  const manifestPath = join(cacheDirectory, WINDOWS_CODEX_APP_CACHE_MANIFEST);
+  const expectedManifest = {
+    version: 1,
+    sourcePath: source,
+    sourceSize: sourceInfo.size,
+    sourceMtimeMs: sourceInfo.mtimeMs,
+    targetName,
+  };
+  const manifest = await readJsonFile(manifestPath);
+  if (JSON.stringify(manifest) === JSON.stringify(expectedManifest) &&
+    await isFileWithSize(target, sourceInfo.size)) {
+    return target;
+  }
+
+  await mkdir(dirname(cacheDirectory), { recursive: true, mode: 0o700 });
+  const temporaryDirectory = `${cacheDirectory}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await cp(sourceDirectory, temporaryDirectory, {
+      recursive: true,
+      force: true,
+      preserveTimestamps: true,
+    });
+    await writeFile(
+      join(temporaryDirectory, WINDOWS_CODEX_APP_CACHE_MANIFEST),
+      `${JSON.stringify(expectedManifest)}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    await rename(temporaryDirectory, cacheDirectory);
+  } catch (error) {
+    await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+    if (await isFileWithSize(target, sourceInfo.size)) return target;
+    throw new Error(`无法准备 Windows Store Codex 启动副本：${error.message}`);
+  }
+
+  if (await isFileWithSize(target, sourceInfo.size)) return target;
+  throw new Error(`Windows Store Codex 启动副本无效：${target}`);
+}
+
+function windowsCodexAppCacheRoot() {
+  const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
+  return join(localAppData, "Codex Quota Injector", WINDOWS_CODEX_APP_CACHE_DIR);
+}
+
 async function readJsonFile(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
@@ -467,6 +572,9 @@ async function isFileWithSize(path, size) {
 }
 
 async function detectWindowsStoreCodexExecutable() {
+  if (cachedWindowsStoreExecutable && await exists(cachedWindowsStoreExecutable)) {
+    return cachedWindowsStoreExecutable;
+  }
   const script = `
 $names=@('OpenAI.ChatGPT','OpenAI.ChatGPT-Desktop','OpenAI.Codex');
 $pkg=$names |
@@ -491,10 +599,13 @@ if ($pkg) {
 }
 `;
   const stdout = await runPowerShell(script).catch(() => "");
-  return firstNonEmptyLine(stdout);
+  const result = firstNonEmptyLine(stdout);
+  if (result) cachedWindowsStoreExecutable = result;
+  return result;
 }
 
 async function detectWindowsStoreCodexAppId(executable) {
+  if (cachedWindowsStoreAppId) return cachedWindowsStoreAppId;
   const target = powershellQuote(executable);
   const script = `
 $targetPath=[IO.Path]::GetFullPath('${target}');
@@ -506,6 +617,22 @@ $package=Get-AppxPackage |
   } |
   Sort-Object @{Expression={$_.InstallLocation.Length};Descending=$true} |
   Select-Object -First 1;
+if (-not $package) {
+  $package=@('OpenAI.ChatGPT','OpenAI.ChatGPT-Desktop','OpenAI.Codex') |
+    ForEach-Object { Get-AppxPackage -Name $_ -ErrorAction SilentlyContinue } |
+    Sort-Object @{Expression={if ($_.Name -like 'OpenAI.ChatGPT*') {0} else {1}}}, @{Expression={$_.Version};Descending=$true} |
+    Select-Object -First 1;
+}
+if (-not $package) {
+  $package=Get-AppxPackage |
+    Where-Object {
+      $_.Name -like 'OpenAI.ChatGPT*' -or $_.Name -like 'OpenAI.Codex*' -or
+      $_.PackageFamilyName -like 'OpenAI.ChatGPT*' -or
+      $_.PackageFamilyName -like 'OpenAI.Codex*'
+    } |
+    Sort-Object @{Expression={if ($_.Name -like 'OpenAI.ChatGPT*' -or $_.PackageFamilyName -like 'OpenAI.ChatGPT*') {0} else {1}}}, @{Expression={$_.Version};Descending=$true} |
+    Select-Object -First 1;
+}
 if ($package) {
   $app=Get-StartApps |
     Where-Object { $_.AppID -like ($package.PackageFamilyName + '!*') } |
@@ -514,7 +641,39 @@ if ($package) {
 }
 `;
   const stdout = await runPowerShell(script).catch(() => "");
-  return firstNonEmptyLine(stdout);
+  const result = firstNonEmptyLine(stdout);
+  if (result) cachedWindowsStoreAppId = result;
+  return result;
+}
+
+function isWindowsStoreExecutable(executable) {
+  const normalizedExecutable = resolve(executable).toLowerCase();
+  return normalizedExecutable.includes("\\windowsapps\\");
+}
+
+async function launchWindowsExecutableThroughShell(executable, args, env) {
+  const child = spawn(process.env.ComSpec || "cmd.exe", [
+    "/d",
+    "/c",
+    "start",
+    "",
+    executable,
+    ...args,
+  ], {
+    detached: true,
+    windowsHide: true,
+    stdio: "ignore",
+    env: { ...process.env, ...env },
+  });
+  await waitForChildSpawn(child);
+  child.unref();
+}
+
+function waitForChildSpawn(child) {
+  return new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
 }
 
 function windowsCommonExecutableCandidates() {

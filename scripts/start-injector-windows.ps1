@@ -46,32 +46,10 @@ try {
     throw "node_modules was not found; run npm install in the project directory first"
   }
 
-  $relayBuilder = Join-Path $projectRoot "scripts\build-windows-relay.mjs"
-  $relaySourceFiles = @(
-    Get-ChildItem -LiteralPath (Join-Path $projectRoot "src") -Recurse -File
-    Get-Item -LiteralPath (Join-Path $projectRoot "package.json")
-    Get-Item -LiteralPath (Join-Path $projectRoot "package-lock.json")
-    Get-Item -LiteralPath (Join-Path $projectRoot "scripts\build-sea.mjs")
-    Get-Item -LiteralPath $relayBuilder
-  )
-  $relaySourceEntries = @(
-    foreach ($sourceFile in $relaySourceFiles) {
-      [pscustomobject]@{
-        SortKey = -join ([Text.Encoding]::UTF8.GetBytes($sourceFile.FullName) |
-          ForEach-Object { $_.ToString("X2") })
-        SourceFile = $sourceFile
-      }
-    }
-  ) | Sort-Object -Property SortKey
-  $relayHashes = @(
-    foreach ($sourceEntry in $relaySourceEntries) {
-      (Get-FileHash -LiteralPath $sourceEntry.SourceFile.FullName -Algorithm SHA256).Hash
-    }
-  )
-  $relayFingerprint = ($relayHashes -join "").Substring(0, 16).ToLowerInvariant()
-  $relayExecutable = Join-Path $projectRoot "build\codex-quota-relay-$relayFingerprint.exe"
+  $relayExecutable = Join-Path $projectRoot "build\codex-quota-relay.exe"
   if (-not (Test-Path -LiteralPath $relayExecutable -PathType Leaf)) {
-    Write-LauncherLog ("Building Windows development relay ({0})" -f $relayFingerprint)
+    Write-LauncherLog "Preparing Windows development relay"
+    $relayBuilder = Join-Path $projectRoot "scripts\build-windows-relay.mjs"
     $relayBuildArguments = @(
       "--node-binary",
       $nodeExecutable,
@@ -100,7 +78,7 @@ try {
     if ($relayInfo.Length -le 0) {
       throw "Windows development relay is empty"
     }
-    Write-LauncherLog ("Reusing Windows development relay ({0})" -f $relayFingerprint)
+    Write-LauncherLog "Reusing Windows development relay"
   }
   $env:CODEX_QUOTA_RELAY_EXECUTABLE = $relayExecutable
 
