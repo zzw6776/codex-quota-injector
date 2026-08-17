@@ -145,23 +145,33 @@ export async function isCodexDebugPortReady(port, { timeoutMs = 2_000 } = {}) {
 
 export async function findCodexTarget(port) {
   const targets = await fetchCodexJson(port, "/json/list");
-  const appPages = targets.filter(
+  const pages = targets.filter(
     (target) =>
       target.type === "page" &&
       typeof target.url === "string" &&
-      target.url.startsWith("app://") &&
       target.webSocketDebuggerUrl,
   );
+  if (pages.length === 0) return null;
+
+  const appPages = pages.filter((target) => target.url.startsWith("app://"));
+  if (appPages.length > 0) {
+    return (
+      appPages.find((target) => target.url === "app://-/index.html") ??
+      appPages.find((target) => {
+        try {
+          return !new URL(target.url).searchParams.has("initialRoute");
+        } catch {
+          return false;
+        }
+      }) ??
+      appPages[0]
+    );
+  }
+
   return (
-    appPages.find((target) => target.url === "app://-/index.html") ??
-    appPages.find((target) => {
-      try {
-        return !new URL(target.url).searchParams.has("initialRoute");
-      } catch {
-        return false;
-      }
-    }) ??
-    appPages[0] ??
+    pages.find((target) => target.url.includes("chatgpt.com") || target.url.includes("openai.com")) ??
+    pages.find((target) => !target.url.startsWith("chrome-extension://") && target.url !== "about:blank") ??
+    pages[0] ??
     null
   );
 }

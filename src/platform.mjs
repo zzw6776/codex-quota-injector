@@ -71,6 +71,7 @@ export function defaultLogDir() {
   );
 }
 
+
 export async function resolveCodexExecutable({ refresh = false } = {}) {
   if (!refresh && cachedCodexExecutable && await exists(cachedCodexExecutable)) {
     return cachedCodexExecutable;
@@ -134,16 +135,21 @@ export async function listCodexProcessIds() {
   if (process.platform === "win32") {
     const expected = powershellQuote(executable.toLowerCase());
     const cacheRoot = powershellQuote(`${windowsCodexAppCacheRoot().toLowerCase()}\\`);
+    const upstreamRoot = powershellQuote(`${windowsCodexUpstreamRoot().toLowerCase()}\\`);
     const script = `
 $expected='${expected}';
 $cacheRoot='${cacheRoot}';
+$upstreamRoot='${upstreamRoot}';
 Get-CimInstance Win32_Process |
   Where-Object {
-    ($_.Name -eq 'ChatGPT.exe' -or $_.Name -eq 'Codex.exe') -and
-    $_.ExecutablePath -and
-    ($_.ExecutablePath.ToLowerInvariant() -eq $expected -or
-      $_.ExecutablePath.ToLowerInvariant().StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) -and
-    ($_.CommandLine -notmatch '--type=|crashpad_handler')
+    (($_.Name -eq 'ChatGPT.exe' -or $_.Name -eq 'Codex.exe') -and
+      $_.ExecutablePath -and
+      ($_.ExecutablePath.ToLowerInvariant() -eq $expected -or
+        $_.ExecutablePath.ToLowerInvariant().StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) -and
+      ($_.CommandLine -notmatch '--type=|crashpad_handler')) -or
+    ($_.Name -eq 'codex-upstream.exe' -and
+      $_.ExecutablePath -and
+      $_.ExecutablePath.ToLowerInvariant().StartsWith($upstreamRoot, [StringComparison]::OrdinalIgnoreCase))
   } |
   ForEach-Object { Write-Output $_.ProcessId }
 `;
@@ -282,11 +288,7 @@ export async function restartCodex(port, options = {}) {
     return;
   }
 
-  if (process.platform === "win32") {
-    throw new Error(formatCodexReadinessError(port, readiness));
-  }
-
-  console.warn("[launcher] Codex 首次启动未开放调试端口，正在重新启动");
+  console.warn("[launcher] Codex 首次启动未就绪，正在重新启动重试");
   await stopCodex();
   await launchCodex(port, { ...options, executable });
   readiness = await waitForCodexLaunchReady(port, options);
@@ -553,6 +555,11 @@ function windowsCodexAppCacheRoot() {
   return join(localAppData, "Codex Quota Injector", WINDOWS_CODEX_APP_CACHE_DIR);
 }
 
+function windowsCodexUpstreamRoot() {
+  const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+  return join(appData, "Codex Quota Injector", WINDOWS_CODEX_CACHE_DIR);
+}
+
 async function readJsonFile(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
@@ -728,7 +735,7 @@ async function exists(path) {
   }
 }
 
-async function waitForCodexLaunchReady(port, options, { timeoutMs = 10_000 } = {}) {
+async function waitForCodexLaunchReady(port, options, { timeoutMs = 20_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let readiness = { ready: false, debugReady: false, relayReady: false };
   while (Date.now() < deadline) {
