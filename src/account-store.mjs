@@ -345,8 +345,12 @@ function normalizeAccount(raw) {
 
 function normalizeQuota(quota) {
   if (!quota || typeof quota !== "object") return null;
+  const credits = normalizeCredits(quota.credits);
   if (Array.isArray(quota.windows)) {
-    return { windows: quota.windows.filter(Boolean) };
+    return {
+      windows: quota.windows.filter(Boolean),
+      ...(credits ? { credits } : {}),
+    };
   }
   const windows = [];
   const hasFlags =
@@ -357,7 +361,29 @@ function normalizeQuota(quota) {
   if (!hasFlags || quota.weekly_window_present === true) {
     windows.push(cockpitWindow(quota, "weekly"));
   }
-  return { windows: windows.filter(Boolean) };
+  return {
+    windows: windows.filter(Boolean),
+    ...(credits ? { credits } : {}),
+  };
+}
+
+function normalizeCredits(credits) {
+  if (!credits || typeof credits !== "object") return null;
+  const hasCredits = Boolean(credits.has_credits || credits.hasCredits);
+  const unlimited = Boolean(credits.unlimited);
+  const rawBalance = credits.balance != null ? Number(credits.balance) : null;
+  const balance = Number.isFinite(rawBalance) ? rawBalance : null;
+  const creditQuantity = balance != null ? Math.floor(balance) : null;
+  const usdAmount = creditQuantity != null ? Number((creditQuantity * 0.04).toFixed(2)) : null;
+  const formattedUsd = usdAmount != null ? `US$${usdAmount.toFixed(2)}` : null;
+  return {
+    hasCredits,
+    unlimited,
+    balance,
+    creditQuantity,
+    usdAmount,
+    formattedUsd,
+  };
 }
 
 function cockpitWindow(quota, prefix) {

@@ -14,9 +14,13 @@ import { basename, dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
 
 import { defaultAccountDataDir } from "./platform.mjs";
-import { accumulateTokenCost, TokenPricingManager } from "./token-pricing.mjs";
+import {
+  accumulateTokenCost,
+  resolveContextTier,
+  TokenPricingManager,
+} from "./token-pricing.mjs";
 
-const CACHE_VERSION = 6;
+const CACHE_VERSION = 7;
 const DISCOVERY_INTERVAL_MS = 5_000;
 const MAX_VIEW_TURNS = 120;
 const MAX_STORED_TURNS = 2_000;
@@ -24,8 +28,8 @@ const MAX_TRACKED_ROLLOUT_STATES = 256;
 const MAX_HISTORICAL_THREADS = 2_048;
 const MAX_HISTORICAL_SEGMENTS = 128;
 const READ_CHUNK_BYTES = 1024 * 1024;
-const COST_CACHE_VERSION = 1;
-const ROLLOUT_PARSER_VERSION = 2;
+const COST_CACHE_VERSION = 2;
+const ROLLOUT_PARSER_VERSION = 3;
 const MAX_SEEN_EVENT_IDS = 50_000;
 const CACHE_PERSIST_DELAY_MS = 10_000;
 const UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS = 10_000;
@@ -537,7 +541,7 @@ export class TokenUsageManager {
   async #loadCache() {
     const cached = await readJson(this.cachePath);
     const cachedVersion = positiveInteger(cached?.version);
-    if (!cached || ![4, 5, CACHE_VERSION].includes(cachedVersion)) return;
+    if (!cached || cachedVersion !== CACHE_VERSION) return;
     this.eventState = {
       offset: positiveInteger(cached.eventState?.offset),
       pending: String(cached.eventState?.pending ?? ""),
@@ -1412,8 +1416,15 @@ function addUsage(turn, usage, model, modelSource = turn.modelSource) {
   for (const field of TOKEN_FIELDS) turn[toCamelCase(field)] += normalizedUsage[field];
   const segmentModel = model || "";
   const segmentSource = modelSource || "";
+  const rawInput = positiveNumber(normalizedUsage.input_tokens);
+  const contextTier = resolveContextTier(segmentModel || turn.model, rawInput);
   const lastSegment = turn.segments.at(-1);
-  if (lastSegment && lastSegment.model === segmentModel && lastSegment.modelSource === segmentSource) {
+  if (
+    lastSegment &&
+    lastSegment.model === segmentModel &&
+    lastSegment.modelSource === segmentSource &&
+    (lastSegment.contextTier ?? "short") === contextTier
+  ) {
     for (const field of TOKEN_FIELDS) {
       lastSegment.usage[field] = positiveNumber(lastSegment.usage[field]) + normalizedUsage[field];
     }
@@ -1421,6 +1432,7 @@ function addUsage(turn, usage, model, modelSource = turn.modelSource) {
     turn.segments.push({
       model: segmentModel,
       modelSource: segmentSource,
+      contextTier,
       usage: normalizedUsage,
     });
   }
@@ -1480,7 +1492,9 @@ function calculateTurnCost(turn, pricingManager) {
   const hasReroute = turn.segments.some((segment) => segment.modelSource === "rerouted");
   for (const segment of turn.segments) {
     const segmentModel = segment.model || (hasReroute ? "" : turn.model);
-    const segmentCost = pricingManager.calculate(segmentModel, segment.usage);
+    const segmentCost = pricingManager.calculate(segmentModel, segment.usage, {
+      contextTier: segment.contextTier,
+    });
     cost = accumulateTokenCost(cost, segmentCost);
     if (!segmentCost.available) continue;
     const tierKey = JSON.stringify([
@@ -1534,11 +1548,21 @@ function normalizeCachedTurn(value) {
   turn.modelContextWindow = positiveNumber(value.modelContextWindow);
   turn.updatedAt = positiveNumber(value.updatedAt);
   turn.segments = Array.isArray(value.segments)
-    ? value.segments.map((segment) => ({
-        model: String(segment?.model ?? ""),
-        modelSource: String(segment?.modelSource ?? (segment?.model ? "thread" : "")),
-        usage: normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({}),
-      }))
+    ? value.segments.map((segment) => {
+        const model = String(segment?.model ?? "");
+        const modelSource = String(segment?.modelSource ?? (model ? "thread" : ""));
+        const modelContextWindow = positiveNumber(value?.modelContextWindow);
+        const contextTier = segment?.contextTier ||
+          (modelContextWindow > 0 && modelContextWindow <= 272_000
+            ? "short"
+            : resolveContextTier(model, usage.input_tokens));
+        return {
+          model,
+          modelSource,
+          contextTier,
+          usage,
+        };
+      })
     : [];
   if (turn.costRevision === 0 && (turn.model || turn.segments.length > 0)) turn.costRevision = 1;
   for (const field of TOKEN_FIELDS) {
@@ -1570,11 +1594,18 @@ function normalizeCachedHistory(value) {
   const threadId = nonEmptyString(value?.threadId);
   if (!threadId || !Array.isArray(value?.segments)) return null;
   const pendingTurns = positiveInteger(value.pendingTurns);
-  const segments = value.segments.map((segment) => ({
-    model: String(segment?.model ?? ""),
-    modelSource: String(segment?.modelSource ?? (segment?.model ? "thread" : "")),
-    usage: normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({}),
-  }));
+  const segments = value.segments.map((segment) => {
+    const model = String(segment?.model ?? "");
+    const modelSource = String(segment?.modelSource ?? (model ? "thread" : ""));
+    const usage = normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({});
+    const contextTier = segment?.contextTier || resolveContextTier(model, usage.input_tokens);
+    return {
+      model,
+      modelSource,
+      contextTier,
+      usage,
+    };
+  });
   if (segments.length === 0 && pendingTurns === 0) return null;
   return {
     threadId,
@@ -1590,14 +1621,21 @@ function mergeUsageSegment(segments, segment) {
   const model = String(segment?.model ?? "");
   const modelSource = String(segment?.modelSource ?? (model ? "thread" : ""));
   const usage = normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({});
+  const rawInput = positiveNumber(usage.input_tokens);
+  const contextTier = segment?.contextTier || resolveContextTier(model, rawInput);
   const last = segments.at(-1);
-  if (last && last.model === model && last.modelSource === modelSource) {
+  if (
+    last &&
+    last.model === model &&
+    last.modelSource === modelSource &&
+    (last.contextTier ?? "short") === contextTier
+  ) {
     for (const field of TOKEN_FIELDS) {
       last.usage[field] = positiveNumber(last.usage[field]) + usage[field];
     }
     return;
   }
-  segments.push({ model, modelSource, usage });
+  segments.push({ model, modelSource, contextTier, usage });
 }
 
 function compactUsageSegments(segments) {
@@ -1606,20 +1644,19 @@ function compactUsageSegments(segments) {
   for (const segment of segments) {
     const model = String(segment?.model ?? "");
     const modelSource = String(segment?.modelSource ?? (model ? "thread" : ""));
-    // Keep the short/long context pricing boundary separate when compacting;
-    // otherwise combining two segments could move all tokens to one tier.
-    const contextTier = Number(segment?.usage?.input_tokens) > 272_000 ? "long" : "short";
+    const usage = normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({});
+    const contextTier = segment?.contextTier || resolveContextTier(model, usage.input_tokens);
     const key = `${model}\u0000${modelSource}\u0000${contextTier}`;
     const existing = grouped.get(key);
     if (!existing) {
       grouped.set(key, {
         model,
         modelSource,
-        usage: normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({}),
+        contextTier,
+        usage,
       });
       continue;
     }
-    const usage = normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({});
     for (const field of TOKEN_FIELDS) existing.usage[field] += usage[field];
   }
   segments.splice(0, segments.length, ...grouped.values());

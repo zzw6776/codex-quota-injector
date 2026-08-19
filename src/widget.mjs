@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 59;
+export const WIDGET_RUNTIME_VERSION = 66;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -15,11 +15,41 @@ export function installQuotaWidget(
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
+  const GLOBAL_STYLE_ID = "codex-quota-injector-global-style";
   const VERSION = runtimeVersion;
   const MAX_CONVERSATION_USAGE_CACHE = 240;
   const CONVERSATION_TOOLTIP_DELAY_MS = 500;
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   window[GLOBAL_KEY]?.destroy?.();
+
+  const globalStyleText = `
+    button[aria-label*="语音聊天"],
+    button[aria-label*="語音聊天"],
+    button[aria-label*="voice chat" i],
+    button[aria-label*="chat de voz" i],
+    button[aria-label*="Sprach-Chat" i],
+    button[aria-label*="chat vocal" i],
+    button[aria-label*="音声チャット"],
+    button[aria-label*="开始新的语音"],
+    button[aria-label*="開始新的語音"],
+    button[aria-label*="Start a new voice" i],
+    button[aria-label*="Start voice chat" i],
+    div.flex.items-center.gap-1 > span.contents:has(> button) {
+      display: none !important;
+    }
+  `;
+
+  function ensureGlobalStyle() {
+    let style = document.getElementById(GLOBAL_STYLE_ID);
+    if (!style) {
+      style = document.createElement("style");
+      style.id = GLOBAL_STYLE_ID;
+      (document.head ?? document.documentElement).append(style);
+    }
+    if (style.textContent !== globalStyleText) {
+      style.textContent = globalStyleText;
+    }
+  }
 
   const state = {
     data: {
@@ -135,15 +165,17 @@ export function installQuotaWidget(
     .badges { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
     .badge { padding: 2px 6px; border-radius: 999px; background: rgba(255,255,255,.07); color: var(--token-text-secondary, #aaaab5); font-size: 10px; line-height: 16px; }
     .badge.current { color: #d9b8ff; background: rgba(217,184,255,.12); }
-    .expiry { margin-top: 5px; color: var(--token-text-secondary, #aaaab5); font-size: 11px; line-height: 16px; }
+    .expiry { margin-top: 5px; color: var(--token-text-secondary, #aaaab5); font-size: 10.5px; line-height: 15px; }
     .account-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; white-space: nowrap; }
     .window-list { display: grid; gap: 7px; margin-top: 9px; }
-    .window-row { display: grid; grid-template-columns: 58px 42px minmax(70px, 1fr); align-items: center; gap: 8px; font-size: 11px; }
+    .window-row { display: grid; grid-template-columns: 58px 42px minmax(70px, 1fr); align-items: center; gap: 5px 8px; font-size: 11px; }
     .window-label { color: var(--token-text-secondary, #aaaab5); }
     .window-left { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
     .window-track { height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.08); }
     .window-track i { display: block; height: 100%; border-radius: inherit; background: #d9b8ff; }
-    .window-reset { grid-column: 2 / 4; margin-top: -3px; color: var(--token-text-secondary, #8f8f9b); font-size: 10px; }
+    .window-subline { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--token-text-secondary, #aaaab5); font-size: 10.5px; line-height: 15px; }
+    .window-credit { color: var(--token-text-secondary, #aaaab5); }
+    .window-reset { margin-left: auto; text-align: right; white-space: nowrap; color: var(--token-text-secondary, #aaaab5); }
     .btn { appearance: none; border: 1px solid rgba(255,255,255,.11); border-radius: 8px; cursor: pointer; padding: 5px 9px; color: inherit; background: rgba(255,255,255,.045); font-size: 11px; }
     .btn:hover { background: rgba(255,255,255,.09); }
     .btn.primary { border-color: rgba(217,184,255,.24); color: #e5cdfd; background: rgba(217,184,255,.1); }
@@ -231,6 +263,7 @@ export function installQuotaWidget(
     .quota-wrap.is-light .badge { color: #676771; background: rgba(0,0,0,.055); }
     .quota-wrap.is-light .badge.current { color: #754694; background: rgba(116,69,143,.1); }
     .quota-wrap.is-light .expiry, .quota-wrap.is-light .window-label, .quota-wrap.is-light .window-reset,
+    .quota-wrap.is-light .window-credit, .quota-wrap.is-light .window-subline,
     .quota-wrap.is-light summary, .quota-wrap.is-light .empty { color: #6f6f79; }
     .quota-wrap.is-light .window-track { background: rgba(0,0,0,.08); }
     .quota-wrap.is-light .window-track i { background: #9b68bb; }
@@ -271,6 +304,7 @@ export function installQuotaWidget(
   }
 
   function ensureMounted() {
+    ensureGlobalStyle();
     const profileButton = findProfileButton();
     const profileRow = profileButton?.parentElement;
     if (!profileRow) {
@@ -336,6 +370,15 @@ export function installQuotaWidget(
     const contextPage = state.page === "context";
     const providerPage = state.page === "provider";
     const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
+    const codexBalance = (() => {
+      const current = accounts.find((a) => a.current) ?? accounts[0];
+      const credits = current?.credits;
+      if (!credits) return "";
+      if (credits.unlimited) return "无限";
+      if (credits.formattedUsd) return credits.formattedUsd;
+      if (Number.isFinite(credits.creditQuantity)) return `${credits.creditQuantity} 点`;
+      return "";
+    })();
     const deepSeekBalance = (() => {
       const provider = state.data.deepSeek ?? {};
       const items = Array.isArray(provider.balance?.items) ? provider.balance.items : [];
@@ -343,6 +386,12 @@ export function installQuotaWidget(
         .map((item) => `${escapeHtml(item.currency)} ${escapeHtml(item.totalBalance)}`)
         .join(" · ");
     })();
+    const balanceItems = [];
+    if (codexBalance) balanceItems.push(`Codex 余额 ${codexBalance}`);
+    if (deepSeekBalance) balanceItems.push(`DeepSeek 余额 ${deepSeekBalance}`);
+    const balanceHtml = balanceItems.length
+      ? `<span class="panel-balance">${balanceItems.join(" · ")}</span>`
+      : "";
     const popoverClass = contextPage
       ? "quota-popover context-popover"
       : providerPage
@@ -366,7 +415,7 @@ export function installQuotaWidget(
           </div>
         </section>`;
     const versionFooter = appVersion
-      ? `<div class="panel-version">${deepSeekBalance ? `<span class="panel-balance">DeepSeek 余额 ${deepSeekBalance}</span>` : ""}<span class="panel-version-text">v${appVersion}</span></div>`
+      ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text">v${appVersion}</span></div>`
       : "";
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
@@ -633,10 +682,15 @@ export function installQuotaWidget(
     footer.style.cssText = "display:grid;gap:2px;margin-top:7px;color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px;line-height:15px";
     const pricing = document.createElement("span");
     if (cost.provider === "openai") {
-      const tiers = Array.isArray(cost.contextTiers) && cost.contextTiers.includes("long")
-        ? "包含长上下文请求"
-        : "短上下文";
-      pricing.textContent = `OpenAI 标准 API 价格 · ${tiers}`;
+      const hasShort = Array.isArray(cost.contextTiers) && cost.contextTiers.includes("short");
+      const hasLong = Array.isArray(cost.contextTiers) && cost.contextTiers.includes("long");
+      let tiersText = "短上下文";
+      if (hasShort && hasLong) {
+        tiersText = "混合上下文";
+      } else if (hasLong) {
+        tiersText = "长上下文";
+      }
+      pricing.textContent = `OpenAI 标准 API 价格 · ${tiersText}`;
     } else if (cost.provider === "deepseek") {
       pricing.textContent = "DeepSeek API 官方价格";
     } else {
@@ -778,11 +832,19 @@ export function installQuotaWidget(
     const models = new Set(tiers.map((tier) => tier.cost?.normalizedModel).filter(Boolean));
     const contextTiers = new Set(tiers.map((tier) => tier.cost?.contextTier).filter(Boolean));
     const showModel = models.size > 1;
-    const showContext = contextTiers.has("short") && contextTiers.has("long");
+    const isMixed = contextTiers.has("short") && contextTiers.has("long");
+    const isPureLong = contextTiers.has("long") && !contextTiers.has("short");
     return tiers.map((tier) => {
+      const tierName = tier.cost?.contextTier;
+      let contextLabel = "";
+      if (isMixed) {
+        contextLabel = formatContextTier(tierName);
+      } else if (isPureLong && tierName === "long") {
+        contextLabel = "长";
+      }
       const labels = [
         showModel ? tier.cost?.normalizedModel : "",
-        showContext ? formatContextTier(tier.cost?.contextTier) : "",
+        contextLabel,
       ].filter(Boolean);
       return {
         ...tier,
@@ -1058,8 +1120,10 @@ export function installQuotaWidget(
   function renderAccount(account) {
     const windows = Array.isArray(account.windows) ? account.windows : [];
     const quotaHtml = windows.length
-      ? `<div class="window-list">${windows.map(renderWindow).join("")}</div>`
-      : '<div class="expiry">暂无额度数据</div>';
+      ? `<div class="window-list">${windows.map((quota, idx) => renderWindow(quota, idx === 0 ? account : null)).join("")}</div>`
+      : account.credits?.formattedUsd
+        ? `<div class="window-list"><div class="window-row"><div class="window-subline"><span class="window-credit">点数：${escapeHtml(account.credits.formattedUsd)}</span></div></div></div>`
+        : '<div class="expiry">暂无额度数据</div>';
     const expiry = formatExpiry(account.subscriptionActiveUntil);
     const updatedAt = formatUpdatedAt(account.quotaUpdatedAt);
     const busy = state.data.operation?.state === "loading";
@@ -1078,9 +1142,23 @@ export function installQuotaWidget(
     </article>`;
   }
 
-  function renderWindow(quota) {
+  function renderWindow(quota, account = null) {
     const remaining = number(quota.remainingPercent);
-    return `<div class="window-row"><span class="window-label">${escapeHtml(quota.label ?? "Usage")}</span><span class="window-left ${levelClass(remaining)}">${remaining}%</span><span class="window-track"><i style="width:${remaining}%"></i></span><span class="window-reset">重置：${escapeHtml(formatReset(quota.resetsAt))}</span></div>`;
+    const creditText = account?.credits?.formattedUsd
+      ? `点数：${escapeHtml(account.credits.formattedUsd)}`
+      : account?.credits?.unlimited
+        ? "点数：无限"
+        : "";
+    const resetText = quota.resetsAt ? `重置：${escapeHtml(formatReset(quota.resetsAt))}` : "";
+    return `<div class="window-row">
+      <span class="window-label">${escapeHtml(quota.label ?? "Usage")}</span>
+      <span class="window-left ${levelClass(remaining)}">${remaining}%</span>
+      <span class="window-track"><i style="width:${remaining}%"></i></span>
+      <div class="window-subline">
+        <span class="window-credit">${creditText}</span>
+        <span class="window-reset">${resetText}</span>
+      </div>
+    </div>`;
   }
 
   function bindEvents(wrap) {
@@ -1555,6 +1633,7 @@ export function installQuotaWidget(
       state.conversationTurnNodes.clear();
       state.conversationUsageLines.clear();
       state.conversationObserverRoot = null;
+      document.getElementById(GLOBAL_STYLE_ID)?.remove();
       state.root?.remove();
       delete window[GLOBAL_KEY];
     },

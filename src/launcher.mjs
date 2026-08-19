@@ -90,7 +90,8 @@ async function runLauncher() {
   }
 
   async function ensureCodexDebugMode(cdpPort, options) {
-    const ready = await isCodexRunning() && await isCodexLaunchReady(cdpPort, options);
+    const isRunning = await isCodexRunning();
+    const ready = isRunning && await isCodexLaunchReady(cdpPort, options);
     if (ready) {
       await activateCodex();
       console.log(`[launcher] Codex 已处于调试及模型中继模式（端口 ${cdpPort}）`);

@@ -111,7 +111,7 @@ export class TokenPricingManager {
     return task;
   }
 
-  calculate(model, usage) {
+  calculate(model, usage, options = {}) {
     const requestedModel = String(model ?? "").trim();
     const normalizedModel = MODEL_ALIASES[requestedModel] ?? requestedModel;
     if (DEEPSEEK_PRICES[normalizedModel]) {
@@ -131,8 +131,9 @@ export class TokenPricingManager {
     if (!modelPricing) {
       return unavailableCost(requestedModel, "当前模型没有对应的官方价格配置");
     }
-    const inputTokens = positiveNumber(usage?.input_tokens);
-    const longContext = inputTokens > LONG_CONTEXT_THRESHOLD;
+    const explicitTier = options?.contextTier;
+    const longContext = explicitTier === "long" ||
+      (explicitTier !== "short" && positiveNumber(usage?.input_tokens) > LONG_CONTEXT_THRESHOLD);
     const rates = longContext ? modelPricing.long : modelPricing.short;
     if (!rates) {
       return unavailableCost(requestedModel, "当前模型没有长上下文价格");
@@ -367,6 +368,17 @@ async function readJson(path) {
     if (error?.code === "ENOENT" || error instanceof SyntaxError) return null;
     throw error;
   }
+}
+
+export function resolveContextTier(model, inputTokens) {
+  const requestedModel = String(model ?? "").trim();
+  const normalizedModel = MODEL_ALIASES[requestedModel] ?? requestedModel;
+  if (DEEPSEEK_PRICES[normalizedModel]) return "standard";
+  const modelPricing = OPENAI_PRICES[normalizedModel];
+  if (!modelPricing) return "standard";
+  return modelPricing.long && positiveNumber(inputTokens) > LONG_CONTEXT_THRESHOLD
+    ? "long"
+    : "short";
 }
 
 async function writeJsonAtomic(path, value) {

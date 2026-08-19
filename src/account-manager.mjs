@@ -104,6 +104,7 @@ export class AccountManager {
       accounts,
       currentAccountId: current?.id ?? null,
       windows: current?.windows ?? [],
+      credits: current?.credits ?? null,
       operation: this.operation,
     };
   }
@@ -643,7 +644,8 @@ export async function fetchQuota(account) {
   ]
     .filter(Boolean)
     .map(normalizeUsageWindow);
-  return { windows, planType: usage.plan_type ?? null };
+  const credits = normalizeCredits(usage.credits);
+  return { windows, planType: usage.plan_type ?? null, credits };
 }
 
 export async function fetchSubscription(account) {
@@ -774,10 +776,30 @@ function toPublicAccount(account, current) {
     planType: account.planType,
     subscriptionActiveUntil: account.subscriptionActiveUntil,
     windows: account.quota?.windows ?? [],
+    credits: account.quota?.credits ?? null,
     quotaUpdatedAt: account.quotaUpdatedAt,
     quotaError: account.quotaError,
     authStatus: account.authStatus,
     current,
+  };
+}
+
+function normalizeCredits(credits) {
+  if (!credits || typeof credits !== "object") return null;
+  const hasCredits = Boolean(credits.has_credits || credits.hasCredits);
+  const unlimited = Boolean(credits.unlimited);
+  const rawBalance = credits.balance != null ? Number(credits.balance) : null;
+  const balance = Number.isFinite(rawBalance) ? rawBalance : null;
+  const creditQuantity = balance != null ? Math.floor(balance) : null;
+  const usdAmount = creditQuantity != null ? Number((creditQuantity * 0.04).toFixed(2)) : null;
+  const formattedUsd = usdAmount != null ? `US$${usdAmount.toFixed(2)}` : null;
+  return {
+    hasCredits,
+    unlimited,
+    balance,
+    creditQuantity,
+    usdAmount,
+    formattedUsd,
   };
 }
 
