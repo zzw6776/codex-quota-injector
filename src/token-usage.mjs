@@ -321,10 +321,17 @@ export class TokenUsageManager {
     this.initializing = true;
     const task = (async () => {
       await this.pricingManager.initialize();
-      await this.#loadCache();
-      await this.#refreshOnce({ forceDiscovery: true });
+      try {
+        await this.#loadCache();
+      } catch (error) {
+        this.#discardLoadedCache();
+        console.error(
+          `[token-usage] Token 缓存恢复失败，已忽略缓存并继续实时监听：${error?.stack || error}`,
+        );
+      }
       if (this.closed) return this.getViewModel();
       this.#startEventWatcher();
+      await this.#refreshOnce({ forceDiscovery: true });
       this.initialized = true;
       const viewModel = this.getViewModel();
       this.#notifyChange(viewModel);
@@ -397,19 +404,21 @@ export class TokenUsageManager {
     const mappedTurns = [...this.turns.values()]
       // `activeThreadId` identifies the rollout file currently being tailed;
       // it is not a single-session view of the app. Multiple threads can be
-      // running at the same time, so every live turn with usage must remain
+      // running at the same time, so every live turn, including a turn still
+      // waiting for its first usage event, must remain
       // available to the widget regardless of which thread was started last.
-      .filter((turn) => turn.totalTokens > 0)
+      .filter((turn) => turn.totalTokens > 0 || (turn.source === "event" && turn.updatedAt > 0))
       .sort((left, right) => left.updatedAt - right.updatedAt)
       .map((turn) => {
-        const rawCost = this.#getCachedTurnCost(turn);
+        const hasUsage = turn.totalTokens > 0;
+        const rawCost = hasUsage ? this.#getCachedTurnCost(turn) : null;
         const cost = this.pricingManager.toViewModel(rawCost);
         const taskCost = cumulativeCosts.get(turn.taskKey) ?? {
           totalCny: 0,
           pendingTurns: 0,
         };
-        if (cost.available) taskCost.totalCny += positiveNumber(cost.totalCny);
-        else taskCost.pendingTurns += 1;
+        if (hasUsage && cost.available) taskCost.totalCny += positiveNumber(cost.totalCny);
+        else if ((hasUsage && !cost.available) || turn.completed) taskCost.pendingTurns += 1;
         cumulativeCosts.set(turn.taskKey, taskCost);
         const {
           taskKey: _taskKey,
@@ -489,7 +498,7 @@ export class TokenUsageManager {
   #startEventWatcher() {
     if (this.closed || this.eventWatcher) return;
     try {
-      this.eventWatcher = watch(
+      const watcher = watch(
         dirname(this.eventPath),
         { persistent: false },
         (_eventType, fileName) => {
@@ -503,15 +512,23 @@ export class TokenUsageManager {
           }, EVENT_WATCH_DEBOUNCE_MS);
         },
       );
-      this.eventWatcher.on("error", (error) => {
-        console.error(`[token-usage] Token 事件监听失败: ${error.message}`);
+      this.eventWatcher = watcher;
+      watcher.on("error", (error) => {
+        if (this.eventWatcher === watcher) {
+          this.eventWatcher = null;
+          clearTimeout(this.eventWatchTimer);
+          this.eventWatchTimer = null;
+          watcher.close();
+        }
+        console.error(`[token-usage] Token 事件监听失败: ${error?.stack || error}`);
       });
     } catch (error) {
-      console.error(`[token-usage] 无法监听 Token 事件: ${error.message}`);
+      console.error(`[token-usage] 无法监听 Token 事件: ${error?.stack || error}`);
     }
   }
 
   async #refreshOnce({ forceDiscovery }) {
+    this.#startEventWatcher();
     // Exchange-rate refresh is deliberately detached from usage parsing. A
     // cached rate is sufficient for the current view; the pricing listener
     // invalidates CNY values when a newer rate arrives.
@@ -572,6 +589,21 @@ export class TokenUsageManager {
     }
     if (this.#pruneHistoricalThreads()) this.#markCacheDirty();
     if (cachedVersion !== CACHE_VERSION) this.#markCacheDirty();
+    this.#invalidateViewModel();
+  }
+
+  #discardLoadedCache() {
+    this.eventState = { offset: 0, pending: "" };
+    this.seenEventIds.clear();
+    this.fileStates.clear();
+    this.turns.clear();
+    this.historicalSegmentsByThread.clear();
+    this.historicalCostCache.clear();
+    this.turnCostCache.clear();
+    this.activeThreadId = null;
+    this.activeThreadHint = false;
+    this.activeThreadHintAt = 0;
+    this.#markCacheDirty();
     this.#invalidateViewModel();
   }
 
@@ -653,7 +685,7 @@ export class TokenUsageManager {
       activeThreadHintAt: this.activeThreadHintAt,
       fileStates: [...this.fileStates.values()],
       historicalSegmentsByThread: [...this.historicalSegmentsByThread.values()],
-      turns: [...this.turns.values()],
+      turns: [...this.turns.values()].filter((turn) => turn.totalTokens > 0),
     };
   }
 
@@ -719,6 +751,17 @@ export class TokenUsageManager {
 
     const turnId = nonEmptyString(event.turnId);
     if (!turnId) return;
+    if (event.type === "turn-started") {
+      const turn = this.turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
+      turn.source = "event";
+      if (model) {
+        fillUnknownSegmentModels(turn, model, event.modelSource ?? "turn-started");
+        setTurnModel(turn, model, event.modelSource ?? "turn-started");
+      }
+      turn.updatedAt = updatedAt;
+      this.turns.set(turnId, turn);
+      return;
+    }
     if (event.type === "usage") {
       const last = normalizeProtocolUsage(event.tokenUsage?.last);
       if (!last) return;
@@ -764,8 +807,8 @@ export class TokenUsageManager {
     }
 
     if (event.type === "turn-completed") {
-      const turn = this.turns.get(turnId);
-      if (!turn) return;
+      const turn = this.turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
+      turn.source = "event";
       if (model && event.modelSource !== "rerouted") {
         fillUnknownSegmentModels(turn, model, event.modelSource ?? "completed");
       }
@@ -773,6 +816,7 @@ export class TokenUsageManager {
       turn.status = nonEmptyString(event.status);
       turn.completed = TERMINAL_TURN_STATUSES.has(turn.status);
       turn.updatedAt = updatedAt;
+      this.turns.set(turnId, turn);
     }
   }
 
@@ -1250,35 +1294,37 @@ export class TokenUsageManager {
   #pruneCompletedTurns() {
     if (this.turns.size <= MAX_STORED_TURNS) return;
     const removable = [...this.turns.values()]
-      .filter((turn) => turn.completed && turn.totalTokens > 0)
+      .filter((turn) => turn.completed)
       .sort((left, right) => left.updatedAt - right.updatedAt);
     const target = this.turns.size - MAX_STORED_TURNS;
     let pruned = 0;
     for (const turn of removable) {
       if (pruned >= target) break;
-      const cost = calculateTurnCost(turn, this.pricingManager);
-      let history = this.historicalSegmentsByThread.get(turn.taskKey);
-      if (!history) {
-        history = {
-          threadId: turn.taskKey,
-          segments: [],
-          pendingTurns: 0,
-          pendingTokens: 0,
-          costRevision: 0,
-          updatedAt: 0,
-        };
-        this.historicalSegmentsByThread.set(turn.taskKey, history);
+      if (turn.totalTokens > 0) {
+        const cost = calculateTurnCost(turn, this.pricingManager);
+        let history = this.historicalSegmentsByThread.get(turn.taskKey);
+        if (!history) {
+          history = {
+            threadId: turn.taskKey,
+            segments: [],
+            pendingTurns: 0,
+            pendingTokens: 0,
+            costRevision: 0,
+            updatedAt: 0,
+          };
+          this.historicalSegmentsByThread.set(turn.taskKey, history);
+        }
+        if (cost?.available) {
+          for (const segment of turn.segments) mergeUsageSegment(history.segments, segment);
+          compactUsageSegments(history.segments);
+        } else {
+          history.pendingTurns = positiveInteger(history.pendingTurns) + 1;
+          history.pendingTokens = positiveNumber(history.pendingTokens) + positiveNumber(turn.totalTokens);
+        }
+        history.costRevision = positiveInteger(history.costRevision) + 1;
+        history.updatedAt = Date.now();
+        this.historicalCostCache.delete(turn.taskKey);
       }
-      if (cost?.available) {
-        for (const segment of turn.segments) mergeUsageSegment(history.segments, segment);
-        compactUsageSegments(history.segments);
-      } else {
-        history.pendingTurns = positiveInteger(history.pendingTurns) + 1;
-        history.pendingTokens = positiveNumber(history.pendingTokens) + positiveNumber(turn.totalTokens);
-      }
-      history.costRevision = positiveInteger(history.costRevision) + 1;
-      history.updatedAt = Date.now();
-      this.historicalCostCache.delete(turn.taskKey);
       this.turns.delete(turn.turnId);
       this.turnCostCache.delete(turn.turnId);
       pruned += 1;
@@ -1551,6 +1597,7 @@ function normalizeCachedTurn(value) {
     ? value.segments.map((segment) => {
         const model = String(segment?.model ?? "");
         const modelSource = String(segment?.modelSource ?? (model ? "thread" : ""));
+        const usage = normalizeRolloutUsage(segment?.usage) ?? normalizeRolloutUsage({});
         const modelContextWindow = positiveNumber(value?.modelContextWindow);
         const contextTier = segment?.contextTier ||
           (modelContextWindow > 0 && modelContextWindow <= 272_000

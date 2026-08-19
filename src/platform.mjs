@@ -786,14 +786,14 @@ async function waitForCodexLaunchReady(port, options, { timeoutMs = 10_000 } = {
 async function readCodexLaunchReadiness(port, options = {}) {
   const debugReady = await isCodexDebugPortReady(port, { timeoutMs: 1_000 });
   const relay = options?.relay;
-  const relayPath = relay?.configPath ?? relay?.statePath;
-  const relayReady = !relay
-    ? true
-    : relay.expectAbsent
-      ? true
-      : relayPath
-        ? await isRelayConfigCurrent(relayPath, relay.generation)
-        : true;
+  let relayReady = true;
+  if (relay && !relay.expectAbsent) {
+    const configReady = !relay.configPath ||
+      await isRelayConfigCurrent(relay.configPath, relay.generation);
+    const stateReady = !relay.statePath ||
+      await isRelayStateCurrent(relay.statePath, relay.generation);
+    relayReady = configReady && stateReady;
+  }
   return {
     ready: debugReady && relayReady,
     debugReady,

@@ -527,10 +527,18 @@ function captureUsageNotification(message, state) {
     return;
   }
   if (method === "turn/started" && params.threadId && params.turn?.id) {
-    const resolved = resolveTurnModel(state, params.threadId, params.turn.id, params);
+    const turnId = String(params.turn.id);
+    const resolved = resolveTurnModel(state, params.threadId, turnId, params);
     const model = resolved.model;
     const source = resolved.explicit ? "turn-started" : resolved.source;
-    if (model) rememberTurnModel(state, params.turn.id, { model, source });
+    if (model) rememberTurnModel(state, turnId, { model, source });
+    state.emitUsageEvent({
+      type: "turn-started",
+      threadId: params.threadId,
+      turnId,
+      model,
+      modelSource: source,
+    });
     return;
   }
   if (method === "model/rerouted" && params.threadId) {

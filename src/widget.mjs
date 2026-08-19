@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 66;
+export const WIDGET_RUNTIME_VERSION = 67;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -459,7 +459,7 @@ export function installQuotaWidget(
     const incomingIds = new Set();
     for (const usage of incomingUsageItems) {
       const turnId = String(usage?.turnId ?? "");
-      if (turnId && Number(usage.totalTokens) > 0) {
+      if (turnId) {
         incomingIds.add(turnId);
         state.conversationUsageByTurn.set(turnId, usage);
       }
@@ -492,7 +492,7 @@ export function installQuotaWidget(
     for (const usage of usageItems) {
       const turnId = String(usage?.turnId ?? "");
       const turnNode = turnNodes.get(turnId);
-      if (!turnId || !turnNode || Number(usage.totalTokens) <= 0) continue;
+      if (!turnId || !turnNode) continue;
       visibleTurnIds.add(turnId);
       const host = turnNode.firstElementChild ?? turnNode;
       let line = state.conversationUsageLines.get(turnId);
@@ -525,6 +525,16 @@ export function installQuotaWidget(
       state.conversationUsageLines.set(turnId, line);
       placeConversationTokenUsageLine(line, host);
       line.__codexTokenUsage = usage;
+      const hasUsage = Number(usage.totalTokens) > 0;
+      if (!hasUsage) {
+        const summary = usage.completed
+          ? "本轮未获取到 Token 数据 · 价格无法计算"
+          : "等待 Token 数据 · 价格待计算";
+        if (line.textContent !== summary) line.textContent = summary;
+        line.removeAttribute("title");
+        if (line.getAttribute("aria-label") !== summary) line.setAttribute("aria-label", summary);
+        continue;
+      }
       const cost = usage.cost ?? {};
       const costLabel = usage.completed ? (cost.label ?? "本轮费用") : "实时估算";
       const costSummary = cost.available
