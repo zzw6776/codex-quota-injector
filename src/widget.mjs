@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 67;
+export const WIDGET_RUNTIME_VERSION = 77;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -71,7 +71,6 @@ export function installQuotaWidget(
     documentPointerHandler: null,
     pinned: false,
     dismissed: false,
-    hoverTimer: null,
     actions: [],
     page: "accounts",
     contextEditingSlug: null,
@@ -96,21 +95,23 @@ export function installQuotaWidget(
   };
 
   const styleText = `
-    :host { display: inline-flex; flex: 0 0 auto; align-items: center; }
+    :host { display: inline-flex; flex: 0 0 auto; align-items: center; align-self: center; margin-left: auto; height: var(--height-token-row, 29px); }
     * { box-sizing: border-box; }
     button, input, textarea { font: inherit; }
-    .quota-wrap { position: relative; display: inline-flex; align-items: center; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .quota-wrap::before { content: ""; position: absolute; left: 0; bottom: 100%; width: 100%; height: 13px; }
+    .quota-wrap { position: relative; display: inline-flex; align-items: center; align-self: center; height: var(--height-token-row, 29px); font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .quota-chip {
-      appearance: none; border: 0; border-radius: 999px; cursor: pointer;
-      height: 22px; min-width: 0; padding: 0 5px;
-      display: inline-flex; align-items: center; justify-content: center;
+      appearance: none; border: 0; border-radius: var(--radius-lg, 12.5px); corner-shape: var(--codex-corner-shape, superellipse(1.5)); cursor: pointer;
+      height: var(--height-token-row, 29px); min-width: 0; padding: 0; padding-inline: var(--padding-row-cell-x, var(--padding-row-x, 8px));
+      display: inline-flex; align-items: center; justify-content: center; align-self: center;
       gap: 4px; background: transparent; color: var(--token-text-secondary, #777780);
       font: 500 12px/1 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-variant-numeric: tabular-nums; white-space: nowrap;
-      transition: color 120ms ease, background 120ms ease;
     }
-    .quota-chip:hover, .quota-chip:focus-visible { color: inherit; background: color-mix(in srgb, currentColor 7%, transparent); outline: none; }
+    .quota-chip:hover, .quota-chip:focus-visible {
+      color: inherit;
+      background-color: var(--color-background-primary-ghost-hover, rgba(26, 28, 31, 0.053));
+      outline: none;
+    }
     .quota-divider { opacity: .42; font-weight: 400; }
     .quota-chip-item { display: inline-flex; align-items: baseline; }
     .is-warning { color: #d97706 !important; }
@@ -129,8 +130,7 @@ export function installQuotaWidget(
     }
     .quota-popover.context-popover { width: min(620px, calc(100vw - 24px)); }
     .quota-popover.provider-popover { width: min(520px, calc(100vw - 24px)); }
-    .quota-wrap:focus-within .quota-popover,
-    .quota-wrap.is-open .quota-popover, .quota-wrap.is-hover-grace .quota-popover {
+    .quota-wrap.is-open .quota-popover {
       opacity: 1; visibility: visible; transform: translateY(0) scale(1); pointer-events: auto;
     }
     .quota-wrap.is-dismissed .quota-popover {
@@ -321,6 +321,7 @@ export function installQuotaWidget(
     document.getElementById(ROOT_ID)?.remove();
     const root = document.createElement("span");
     root.id = ROOT_ID;
+    root.style.marginLeft = "auto";
     root.setAttribute("data-codex-quota-injector", `v${VERSION}`);
     const shadow = root.attachShadow({ mode: "open" });
     const style = document.createElement("style");
@@ -353,10 +354,31 @@ export function installQuotaWidget(
     wrap.classList.toggle("is-open", state.pinned);
     wrap.classList.toggle("is-dismissed", state.dismissed);
     const accounts = Array.isArray(state.data.accounts) ? state.data.accounts : [];
+    const currentAccount = accounts.find((a) => a.current) ?? accounts[0] ?? null;
+    const currentCredits = currentAccount?.credits ?? state.data.credits ?? null;
+    const hasPositiveBalance = Boolean(
+      currentCredits && (
+        currentCredits.unlimited ||
+        (Number(currentCredits.usdAmount) > 0) ||
+        (Number(currentCredits.creditQuantity) > 0)
+      )
+    );
+    const chipBalanceText = hasPositiveBalance
+      ? (currentCredits.unlimited
+          ? "无限"
+          : (currentCredits.formattedUsd ?? (Number.isFinite(currentCredits.creditQuantity) ? `${currentCredits.creditQuantity} 点` : "")))
+      : "";
     const windows = Array.isArray(state.data.windows) ? state.data.windows : [];
-    const chip = windows.length
-      ? windows.map((quota) => `<span class="quota-chip-item ${levelClass(quota.remainingPercent)}">${number(quota.remainingPercent)}%</span>`).join('<span class="quota-divider">·</span>')
-      : '<span class="quota-chip-item">--</span>';
+    const chipItems = [];
+    if (windows.length) {
+      chipItems.push(...windows.map((quota) => `<span class="quota-chip-item ${levelClass(quota.remainingPercent)}">${number(quota.remainingPercent)}%</span>`));
+    } else {
+      chipItems.push('<span class="quota-chip-item">--</span>');
+    }
+    if (chipBalanceText) {
+      chipItems.push(`<span class="quota-chip-item quota-chip-balance">${escapeHtml(chipBalanceText)}</span>`);
+    }
+    const chip = chipItems.join('<span class="quota-divider">·</span>');
     const accountHtml = accounts.length
       ? accounts.map(renderAccount).join("")
       : '<div class="empty">暂无账号，点击下方按钮添加</div>';
@@ -371,8 +393,7 @@ export function installQuotaWidget(
     const providerPage = state.page === "provider";
     const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
     const codexBalance = (() => {
-      const current = accounts.find((a) => a.current) ?? accounts[0];
-      const credits = current?.credits;
+      const credits = currentCredits;
       if (!credits) return "";
       if (credits.unlimited) return "无限";
       if (credits.formattedUsd) return credits.formattedUsd;
@@ -1172,33 +1193,7 @@ export function installQuotaWidget(
   }
 
   function bindEvents(wrap) {
-    const holdHover = () => {
-      if (state.hoverTimer != null) {
-        window.clearTimeout(state.hoverTimer);
-        state.hoverTimer = null;
-      }
-      wrap.classList.add("is-hover-grace");
-    };
-    const releaseHover = () => {
-      if (state.pinned || state.dismissed) return;
-      if (state.hoverTimer != null) window.clearTimeout(state.hoverTimer);
-      state.hoverTimer = window.setTimeout(() => {
-        state.hoverTimer = null;
-        wrap.classList.remove("is-hover-grace");
-      }, 220);
-    };
     const chip = wrap.querySelector(".quota-chip");
-    chip?.addEventListener("pointerenter", () => {
-      if (state.dismissed) {
-        state.dismissed = false;
-        wrap.classList.remove("is-dismissed");
-      }
-      holdHover();
-    });
-    chip?.addEventListener("pointerleave", releaseHover);
-    const popover = wrap.querySelector(".quota-popover");
-    popover?.addEventListener("pointerenter", holdHover);
-    popover?.addEventListener("pointerleave", releaseHover);
     chip?.addEventListener("click", () => {
       state.dismissed = false;
       state.pinned = !state.pinned;
@@ -1334,7 +1329,6 @@ export function installQuotaWidget(
   }
 
   function dismissPanel() {
-    clearHoverGrace();
     state.pinned = false;
     state.dismissed = true;
     state.page = "accounts";
@@ -1342,14 +1336,6 @@ export function installQuotaWidget(
     const wrap = state.shadow?.querySelector(".quota-wrap");
     wrap?.classList.remove("is-open");
     wrap?.classList.add("is-dismissed");
-  }
-
-  function clearHoverGrace() {
-    if (state.hoverTimer != null) {
-      window.clearTimeout(state.hoverTimer);
-      state.hoverTimer = null;
-    }
-    state.shadow?.querySelector(".quota-wrap")?.classList.remove("is-hover-grace");
   }
 
   function formatReset(seconds) {

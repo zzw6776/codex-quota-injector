@@ -790,9 +790,7 @@ async function readCodexLaunchReadiness(port, options = {}) {
   if (relay && !relay.expectAbsent) {
     const configReady = !relay.configPath ||
       await isRelayConfigCurrent(relay.configPath, relay.generation);
-    const stateReady = !relay.statePath ||
-      await isRelayStateCurrent(relay.statePath, relay.generation);
-    relayReady = configReady && stateReady;
+    relayReady = configReady;
   }
   return {
     ready: debugReady && relayReady,
