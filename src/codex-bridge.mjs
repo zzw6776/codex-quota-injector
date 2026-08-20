@@ -57,7 +57,7 @@ export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
       CODEX_QUOTA_RELAY_CONFIG: relayConfigPath,
       CODEX_QUOTA_UPSTREAM_CODEX_CLI: upstreamExecutable,
     },
-    relay: { statePath, generation: relayGeneration },
+    relay: { statePath, configPath: relayConfigPath, generation: relayGeneration },
   };
 }
 

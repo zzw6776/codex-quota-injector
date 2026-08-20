@@ -189,12 +189,18 @@ export async function stopCodex({ timeoutMs = 2_000 } = {}) {
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isAnyProcessAlive(processIds)) return;
+    if (!isAnyProcessAlive(processIds)) {
+      if (process.platform === "darwin") await delay(200);
+      return;
+    }
     await delay(100);
   }
 
   const remaining = processIds.filter(isProcessAlive);
-  if (remaining.length === 0) return;
+  if (remaining.length === 0) {
+    if (process.platform === "darwin") await delay(200);
+    return;
+  }
 
   if (process.platform === "win32") {
     for (const processId of remaining) {
@@ -214,7 +220,10 @@ export async function stopCodex({ timeoutMs = 2_000 } = {}) {
 
   const forceDeadline = Date.now() + (process.platform === "win32" ? 1_000 : 3_000);
   while (Date.now() < forceDeadline) {
-    if (!isAnyProcessAlive(remaining)) return;
+    if (!isAnyProcessAlive(remaining)) {
+      if (process.platform === "darwin") await delay(200);
+      return;
+    }
     await delay(100);
   }
   throw new Error("Codex 进程未能在超时内退出");
@@ -244,14 +253,29 @@ export async function launchCodex(
   ];
 
   if (process.platform === "darwin") {
-    await execFileAsync("/usr/bin/open", [
-      "-b",
-      MACOS_CODEX_BUNDLE_ID,
-      ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+    const appPath = executable.includes(".app")
+      ? executable.slice(0, executable.indexOf(".app") + 4)
+      : null;
+    const openTarget = appPath ? ["-a", appPath] : ["-b", MACOS_CODEX_BUNDLE_ID];
+    const envArgs = Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
+    const fullArgs = [
+      "-n",
+      ...openTarget,
+      ...envArgs,
       "--args",
       ...args,
-    ]);
-    return;
+    ];
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await execFileAsync("/usr/bin/open", fullArgs);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) await delay(300);
+      }
+    }
+    throw lastError;
   }
 
   if (process.platform === "win32") {
@@ -307,7 +331,17 @@ export async function isCodexLaunchReady(port, options = {}) {
 export async function activateCodex(providedExecutable = null) {
   try {
     if (process.platform === "darwin") {
-      await execFileAsync("/usr/bin/open", ["-b", MACOS_CODEX_BUNDLE_ID]);
+      const executable = providedExecutable ?? await resolveCodexExecutable().catch(() => null);
+      const appPath = executable?.includes(".app")
+        ? executable.slice(0, executable.indexOf(".app") + 4)
+        : null;
+      if (appPath) {
+        await execFileAsync("/usr/bin/open", ["-a", appPath]).catch(() =>
+          execFileAsync("/usr/bin/open", ["-b", MACOS_CODEX_BUNDLE_ID])
+        );
+      } else {
+        await execFileAsync("/usr/bin/open", ["-b", MACOS_CODEX_BUNDLE_ID]);
+      }
       return true;
     }
     if (process.platform !== "win32") return false;
@@ -345,6 +379,16 @@ if ('${escapedAppId}') {
     return false;
   } catch (error) {
     console.warn(`[launcher] Codex 窗口激活失败: ${error.message}`);
+    return false;
+  }
+}
+
+export async function isRelayConfigCurrent(path, generation) {
+  try {
+    const data = JSON.parse(await readFile(path, "utf8"));
+    if (generation != null && data?.generation !== generation) return false;
+    return true;
+  } catch {
     return false;
   }
 }
@@ -749,11 +793,12 @@ async function waitForCodexLaunchReady(port, options, { timeoutMs = 20_000 } = {
 async function readCodexLaunchReadiness(port, options = {}) {
   const debugReady = await isCodexDebugPortReady(port, { timeoutMs: 1_000 });
   const relay = options?.relay;
-  const relayReady = !relay
-    ? true
-    : relay.expectAbsent
-      ? !await isRelayStateCurrent(relay.statePath)
-      : await isRelayStateCurrent(relay.statePath, relay.generation);
+  let relayReady = true;
+  if (relay && !relay.expectAbsent) {
+    const configReady = !relay.configPath ||
+      await isRelayConfigCurrent(relay.configPath, relay.generation);
+    relayReady = configReady;
+  }
   return {
     ready: debugReady && relayReady,
     debugReady,

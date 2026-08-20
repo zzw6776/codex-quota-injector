@@ -6,6 +6,7 @@ import { DeepSeekManager } from "./deepseek-manager.mjs";
 import { isCodexRunning, restartCodex } from "./platform.mjs";
 import { TokenUsageManager } from "./token-usage.mjs";
 import packageJson from "../package.json" with { type: "json" };
+import { isSea } from "node:sea";
 import {
   widgetDrainActionsExpression,
   widgetInstallExpression,
@@ -17,6 +18,7 @@ import {
 
 const DEFAULT_PORT = 9229;
 const APP_VERSION = String(packageJson.version ?? "0.0.0");
+const APP_DISPLAY_VERSION = isSea() ? APP_VERSION : `${APP_VERSION}.dev`;
 const TARGET_POLL_MS = 1_500;
 const QUOTA_REFRESH_MS = 60_000;
 const DEEPSEEK_BALANCE_REFRESH_MS = 5 * 60_000;
@@ -271,7 +273,7 @@ export async function runInjector({
       tokenUsage: stableTokenUsage,
     };
     const staticViewModel = {
-      version: APP_VERSION,
+      version: APP_DISPLAY_VERSION,
       accounts: viewModel.accounts,
       windows: viewModel.windows,
       currentAccountId: viewModel.currentAccountId,
