@@ -22,6 +22,7 @@ async function runLauncher() {
   const { prepareCodexLaunch } = await import("./codex-bridge.mjs");
   const { CodexContextManager } = await import("./codex-context.mjs");
   const { DeepSeekManager } = await import("./deepseek-manager.mjs");
+  const { ExtraModelManager } = await import("./extra-model-manager.mjs");
   const { installFileLogger } = await import("./file-logger.mjs");
   const { runInjector } = await import("./injector.mjs");
   const {
@@ -39,13 +40,19 @@ async function runLauncher() {
   const port = Number(process.env.CODEX_QUOTA_CDP_PORT ?? 9229);
   const instanceMode = isSea() ? "formal" : "dev";
   const instanceVersion = String(packageJson.version ?? "0.0.0");
+  const explicitStart = isSea() || process.env.CODEX_QUOTA_EXPLICIT_START === "1";
   process.title = "Codex Quota Injector";
   const logPath = installFileLogger();
+  if (!explicitStart) {
+    console.warn("[launcher] 未经开发版或正式版启动入口触发，拒绝启动及接管现有实例");
+    return;
+  }
   let instanceLock = null;
   let takeoverInProgress = false;
   let launchOptions = { env: {}, relay: null };
   const contextManager = new CodexContextManager();
   const deepSeekManager = new DeepSeekManager();
+  const extraModelManager = new ExtraModelManager();
 
   const restartFromTakeover = async (request) => {
     if (takeoverInProgress) return;
@@ -60,6 +67,7 @@ async function runLauncher() {
       instanceLock = await acquireSingleInstance({
         mode: instanceMode,
         version: instanceVersion,
+        explicitStart,
         onTakeover: restartFromTakeover,
       });
     } catch (error) {
@@ -71,7 +79,8 @@ async function runLauncher() {
 
     await contextManager.initialize();
     await deepSeekManager.initialize();
-    launchOptions = await prepareCodexLaunch({ deepSeekManager, contextManager });
+    await extraModelManager.initialize();
+    launchOptions = await prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager });
     await ensureCodexDebugMode(port, launchOptions);
 
     console.log(`[launcher] 已启动，日志=${logPath}`);
@@ -79,8 +88,9 @@ async function runLauncher() {
       port,
       contextManager,
       deepSeekManager,
+      extraModelManager,
       managersInitialized: true,
-      prepareLaunch: () => prepareCodexLaunch({ deepSeekManager, contextManager }),
+      prepareLaunch: () => prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager }),
     });
   } catch (error) {
     console.error(`[launcher] ${error?.stack ?? error}`);

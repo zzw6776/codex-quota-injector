@@ -3,6 +3,7 @@ import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { CodexContextManager } from "./codex-context.mjs";
 import { prepareCodexLaunch } from "./codex-bridge.mjs";
 import { DeepSeekManager } from "./deepseek-manager.mjs";
+import { ExtraModelManager } from "./extra-model-manager.mjs";
 import { isCodexRunning, restartCodex } from "./platform.mjs";
 import { TokenUsageManager } from "./token-usage.mjs";
 import packageJson from "../package.json" with { type: "json" };
@@ -34,14 +35,16 @@ export async function runInjector({
   accountManager = new AccountManager(),
   contextManager = new CodexContextManager(),
   deepSeekManager = new DeepSeekManager(),
+  extraModelManager = new ExtraModelManager(),
   tokenUsageManager = new TokenUsageManager(),
   managersInitialized = false,
-  prepareLaunch = () => prepareCodexLaunch({ deepSeekManager, contextManager }),
+  prepareLaunch = () => prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager }),
 } = {}) {
   await accountManager.initialize();
   if (!managersInitialized) {
     await contextManager.initialize();
     await deepSeekManager.initialize();
+    await extraModelManager.initialize();
   }
   const tokenInitialization = tokenUsageManager.initialize().catch((error) => {
     console.error(`[token-usage] 初始化失败: ${error.message}`);
@@ -102,6 +105,7 @@ export async function runInjector({
     cdp?.close();
     accountManager.close();
     deepSeekManager.close();
+    extraModelManager.close();
     tokenUsageManager.close();
   };
   const stopAndExit = async () => {
@@ -270,6 +274,7 @@ export async function runInjector({
       ...accountManager.getViewModel(),
       context: contextManager.getViewModel(),
       deepSeek: deepSeekManager.getViewModel(),
+      extraModels: extraModelManager.getViewModel(),
       tokenUsage: stableTokenUsage,
     };
     const staticViewModel = {
@@ -280,6 +285,7 @@ export async function runInjector({
       operation: viewModel.operation,
       context: viewModel.context,
       deepSeek: viewModel.deepSeek,
+      extraModels: viewModel.extraModels,
     };
     const staticJson = JSON.stringify(staticViewModel);
     const nextTokenUsageSignatures = new Map();
@@ -407,6 +413,19 @@ export async function runInjector({
         case "deepseek-refresh-balance":
           await deepSeekManager.refreshBalance();
           break;
+        case "extra-platform-save":
+          await extraModelManager.savePlatform(action.platform, {
+            reservedModelIds: [
+              ...contextManager.getViewModel().models.map((model) => model.slug),
+              deepSeekManager.getViewModel().model.slug,
+            ],
+          });
+          await restartForConfigurationChange();
+          break;
+        case "extra-platform-remove":
+          await extraModelManager.removePlatform(action.platformId);
+          await restartForConfigurationChange();
+          break;
         case "switch-account":
           restartingCodex = true;
           try {
@@ -438,6 +457,9 @@ export async function runInjector({
         action?.type !== "deepseek-refresh-balance") {
         deepSeekManager.setError(error.message);
       }
+      if (String(action?.type ?? "").startsWith("extra-platform-")) {
+        extraModelManager.setError(error.message);
+      }
       console.error(`[action] ${error.message}`);
     }
   }
@@ -447,6 +469,7 @@ export async function runInjector({
     try {
       await restartCodex(port, await prepareLaunch());
       deepSeekManager.markRestarted();
+      extraModelManager.markRestarted();
       scheduleDeepSeekBalanceRefresh();
       cdp?.close();
       cdp = null;
