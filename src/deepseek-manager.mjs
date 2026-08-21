@@ -166,11 +166,20 @@ export class DeepSeekManager {
       throw new Error("未找到 Codex 官方模型目录，无法生成合并模型列表");
     }
     const models = baseCatalog.models.filter((model) => model?.slug !== deepSeekModel.slug);
-    if (this.settings.enabled && this.settings.apiKey) models.push(deepSeekModel);
+    if (this.settings.enabled && this.settings.apiKey) {
+      const priority = models.reduce(
+        (maximum, model) => Number.isFinite(Number(model?.priority))
+          ? Math.max(maximum, Number(model.priority))
+          : maximum,
+        0,
+      ) + 1;
+      models.push({ ...deepSeekModel, priority });
+    }
     const catalog = { ...baseCatalog, models };
     await writeJsonAtomic(this.runtimeCatalogPath, catalog);
     return {
       path: this.runtimeCatalogPath,
+      catalog,
       generation: createHash("sha256")
         .update(JSON.stringify(catalog))
         .update(String(this.settings.generation))

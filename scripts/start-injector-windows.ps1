@@ -81,6 +81,7 @@ try {
     Write-LauncherLog "Reusing Windows development relay"
   }
   $env:CODEX_QUOTA_RELAY_EXECUTABLE = $relayExecutable
+  $env:CODEX_QUOTA_EXPLICIT_START = "1"
 
   Remove-Item -LiteralPath $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
   $launcher = Join-Path $projectRoot "src\launcher.mjs"

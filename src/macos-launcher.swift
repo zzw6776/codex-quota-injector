@@ -21,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     let process = Process()
     process.executableURL = URL(fileURLWithPath: workerPath)
+    var environment = ProcessInfo.processInfo.environment
+    environment["CODEX_QUOTA_EXPLICIT_START"] = "1"
+    process.environment = environment
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice

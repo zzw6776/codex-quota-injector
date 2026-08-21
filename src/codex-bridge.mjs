@@ -9,7 +9,7 @@ import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
 const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
 const RELAY_CONFIG_VERSION = 1;
 
-export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
+export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager }) {
   if (process.platform !== "darwin" && process.platform !== "win32") {
     return { env: {}, relay: null };
   }
@@ -20,6 +20,7 @@ export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
   if (contextState.status === "external" &&
     basename(contextState.currentCatalogPath ?? "") !== "codex-deepseek-poc.json") {
     deepSeekManager.setError("检测到其他工具管理的模型目录，已保留其配置并停用 DeepSeek 中继");
+    extraModelManager.setError("检测到其他工具管理的模型目录，已保留其配置并停用额外模型中继");
     return { env: {}, relay: { statePath, expectAbsent: true } };
   }
   let runtime;
@@ -27,12 +28,14 @@ export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
   let relayExecutable;
   try {
     const catalog = contextManager.getEffectiveCatalog();
-    runtime = await deepSeekManager.writeRuntimeCatalog(catalog);
+    const deepSeekRuntime = await deepSeekManager.writeRuntimeCatalog(catalog);
+    runtime = await extraModelManager.writeRuntimeCatalog(deepSeekRuntime.catalog);
     upstreamExecutable = await resolveCodexCliExecutable();
     relayExecutable = await resolveRelayExecutable();
     await access(relayExecutable, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
   } catch (error) {
     deepSeekManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
+    extraModelManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
     return { env: {}, relay: { statePath, expectAbsent: true } };
   }
   const relayGeneration = `${runtime.generation}:${BRIDGE_GENERATION}`;
@@ -41,6 +44,7 @@ export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
       version: RELAY_CONFIG_VERSION,
       upstreamExecutable,
       providerSettingsPath: deepSeekManager.settingsPath,
+      extraModelSettingsPath: runtime.settingsPath,
       modelCatalogPath: runtime.path,
       relayStatePath: statePath,
       tokenUsageEventsPath: tokenUsageEventPath,
@@ -48,6 +52,7 @@ export async function prepareCodexLaunch({ deepSeekManager, contextManager }) {
     });
   } catch (error) {
     deepSeekManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
+    extraModelManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
     return { env: {}, relay: { statePath, expectAbsent: true } };
   }
   return {

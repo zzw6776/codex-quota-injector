@@ -5,6 +5,7 @@ cd "$SCRIPT_DIR" || exit 1
 
 # Finder 启动的 .command 不一定继承交互式终端中的 PATH。
 export PATH="$HOME/.volta/bin:$HOME/.local/share/mise/shims:$HOME/.asdf/shims:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export CODEX_QUOTA_EXPLICIT_START=1
 if ! command -v node >/dev/null 2>&1 && [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   export NVM_DIR="$HOME/.nvm"
   source "$NVM_DIR/nvm.sh"

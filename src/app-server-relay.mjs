@@ -7,6 +7,7 @@ import { dirname } from "node:path";
 
 import deepSeekModel from "./deepseek-model.json" with { type: "json" };
 import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
+import { startChatCompatibilityProxy } from "./chat-compat-proxy.mjs";
 
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
 const DEEPSEEK_PROVIDER = "deepseek";
@@ -15,6 +16,7 @@ const DEEPSEEK_ENV_KEY = "DEEPSEEK_API_KEY";
 const PROVIDER_CONFIG =
   `model_providers.${DEEPSEEK_PROVIDER}={name="DeepSeek",base_url="https://api.deepseek.com/",` +
   `env_key="${DEEPSEEK_ENV_KEY}",wire_api="responses"}`;
+const CUSTOM_PROVIDER_PREFIX = "custom_";
 const THREAD_METHODS = new Set(["thread/start", "thread/resume", "thread/fork"]);
 const THREAD_SETTINGS_METHOD = "thread/settings/update";
 const MODEL_LIST_METHOD = "model/list";
@@ -26,6 +28,15 @@ const OBSERVED_THREAD_METHODS = new Set([
 ]);
 const TURN_INPUT_METHODS = new Set(["turn/start", "turn/steer"]);
 const ALLOWED_DEEPSEEK_EFFORTS = new Set(["low", "high", "max"]);
+const ALLOWED_CUSTOM_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
+const CUSTOM_REASONING_DESCRIPTIONS = {
+  none: "No additional reasoning",
+  low: "Fast responses with lighter reasoning",
+  medium: "Balanced reasoning for everyday tasks",
+  high: "Deeper reasoning for complex problems",
+  xhigh: "Extra-high reasoning depth for harder problems",
+  max: "Maximum reasoning depth for the hardest problems",
+};
 const MAX_SERVER_INSPECTION_BYTES = 1024 * 1024;
 const PENDING_REQUEST_TTL_MS = 2 * 60 * 1000;
 const TURN_MODEL_TTL_MS = 15 * 60 * 1000;
@@ -56,14 +67,40 @@ export async function runAppServerRelay() {
     return null;
   });
   const deepSeekEnabled = Boolean(settings?.enabled && settings?.apiKey);
+  const extraModelSettingsPath = relayConfig?.extraModelSettingsPath ??
+    process.env.CODEX_QUOTA_EXTRA_MODEL_SETTINGS;
+  const extraModelSettings = await readJson(extraModelSettingsPath).catch((error) => {
+    console.error(`额外模型本地配置读取失败，已按未配置处理: ${error.message}`);
+    return null;
+  });
+  const customPlatforms = readCustomPlatforms(extraModelSettings);
+  const customModelProviders = new Map();
+  const customModels = new Map();
+  for (const platform of customPlatforms.values()) {
+    for (const model of platform.models) {
+      customModelProviders.set(model.id, platform.providerId);
+      customModels.set(model.id, { ...model, platformName: platform.name });
+    }
+  }
   const catalogPath = String(
     relayConfig?.modelCatalogPath ?? process.env.CODEX_QUOTA_MODEL_CATALOG ?? "",
   ).trim();
   const officialModels = await readOfficialModelSlugs(catalogPath);
   officialModels.delete(DEEPSEEK_MODEL);
+  for (const modelId of customModelProviders.keys()) officialModels.delete(modelId);
+  const chatCompatibilityProxy = await startChatCompatibilityProxy(customPlatforms);
 
   const args = [...originalArgs];
   if (deepSeekEnabled) args.splice(appServerIndex, 0, "-c", PROVIDER_CONFIG);
+  for (const platform of customPlatforms.values()) {
+    if (!platform.enabled) continue;
+    args.splice(
+      appServerIndex,
+      0,
+      "-c",
+      customProviderConfig(platform, chatCompatibilityProxy?.baseUrlFor(platform)),
+    );
+  }
   if (catalogPath) {
     args.splice(appServerIndex, 0, "-c", `model_catalog_json=${JSON.stringify(catalogPath)}`);
   }
@@ -71,6 +108,14 @@ export async function runAppServerRelay() {
   const env = { ...process.env, CODEX_CLI_PATH: upstreamExecutable };
   if (deepSeekEnabled) env[DEEPSEEK_ENV_KEY] = settings.apiKey;
   else delete env[DEEPSEEK_ENV_KEY];
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("CODEX_QUOTA_MODEL_") && key.endsWith("_API_KEY")) delete env[key];
+  }
+  for (const platform of customPlatforms.values()) {
+    const envKey = customProviderEnvKey(platform.id);
+    if (platform.enabled) env[envKey] = platform.apiKey;
+    else delete env[envKey];
+  }
   clearRelayEnvironment(env);
   delete env.CODEX_APP_SERVER_FORCE_CLI;
   delete env.CODEX_APP_SERVER_WS_URL;
@@ -89,10 +134,16 @@ export async function runAppServerRelay() {
       relayConfig?.tokenUsageEventsPath ?? process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "",
     ).trim(),
   );
-  await writeRelayState(
-    statePath,
-    relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
-  );
+  try {
+    await writeRelayState(
+      statePath,
+      relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+    );
+  } catch (error) {
+    child.kill();
+    await chatCompatibilityProxy?.close();
+    throw error;
+  }
   let relayCleanupTimer = null;
   let cleanedUp = false;
   const cleanup = async () => {
@@ -100,10 +151,16 @@ export async function runAppServerRelay() {
     cleanedUp = true;
     if (relayCleanupTimer) clearInterval(relayCleanupTimer);
     relayCleanupTimer = null;
-    await Promise.all([removeRelayState(statePath), usageEventWriter.close()]);
+    await Promise.all([
+      removeRelayState(statePath),
+      usageEventWriter.close(),
+      chatCompatibilityProxy?.close(),
+    ]);
   };
   forwardSignals(child);
-  child.once("error", (error) => fail(error));
+  child.once("error", (error) => {
+    void cleanup().finally(() => fail(error));
+  });
   child.once("exit", (code, signal) => {
     void cleanup().finally(() => exitLikeChild(code, signal));
   });
@@ -115,6 +172,9 @@ export async function runAppServerRelay() {
   const relayState = {
     deepSeekEnabled,
     officialModels,
+    customPlatforms,
+    customModelProviders,
+    customModels,
     pendingRequests,
     threadContexts,
     turnModels,
@@ -200,15 +260,22 @@ function rewriteClientLine(line, state) {
   const previousContext = params.threadId ? cloneThreadContext(threadContext) : null;
   const requestModel = readModelSetting(params);
   const requestedModel = requestModel.present ? requestModel.model : threadContext?.model ?? null;
-  let provider = providerForModel(requestedModel, state.officialModels) ??
+  let provider = providerForModel(requestedModel, state) ??
     threadContext?.provider ?? null;
 
   if (THREAD_METHODS.has(method)) {
     if (provider === DEEPSEEK_PROVIDER && !state.deepSeekEnabled) {
       return jsonRpcError(message.id, "DeepSeek 尚未启用或 API Key 为空");
     }
+    const customPlatform = customPlatformForProvider(provider, state);
+    if (isCustomProvider(provider) && !customPlatform?.enabled) {
+      return jsonRpcError(message.id, "该额外模型平台尚未启用或 API Key 为空");
+    }
     if (provider) params.modelProvider = provider;
     if (provider === DEEPSEEK_PROVIDER) params.config = deepSeekThreadConfig(params.config);
+    if (customPlatform?.enabled) {
+      params.config = customThreadConfig(params.config, state.customModels.get(requestedModel));
+    }
   }
 
   if (TURN_INPUT_METHODS.has(method)) {
@@ -231,6 +298,31 @@ function rewriteClientLine(line, state) {
       if (method === "turn/start") {
         params.summary = "none";
         params.serviceTier = null;
+      }
+    }
+    const customPlatform = customPlatformForProvider(provider, state);
+    if (isCustomProvider(provider)) {
+      if (!customPlatform?.enabled) {
+        return jsonRpcError(message.id, "该额外模型平台尚未启用或 API Key 为空");
+      }
+      const selectedModel = state.customModels.get(requestedModel ?? threadContext?.model);
+      if (containsImageInput(params.input) && !selectedModel?.supportsImage) {
+        return jsonRpcError(message.id, "该额外模型未配置图片输入能力");
+      }
+      if (method === "turn/start") {
+        if (selectedModel?.reasoningEfforts.length) {
+          if (params.effort != null && !selectedModel.reasoningEfforts.includes(params.effort)) {
+            return jsonRpcError(
+              message.id,
+              `${selectedModel.displayName} 的推理深度仅支持 ${selectedModel.reasoningEfforts.join("、")}`,
+            );
+          }
+          params.effort ??= selectedModel.defaultReasoningEffort;
+        } else {
+          delete params.effort;
+        }
+        delete params.summary;
+        delete params.serviceTier;
       }
     }
     if (method === "turn/start" && params.threadId) {
@@ -364,28 +456,81 @@ function rewriteModelListResponse(line, message, state, pending) {
     return line;
   }
 
-  const hasDeepSeek = models.some((model) =>
-    normalizedModel(model?.id) === DEEPSEEK_MODEL ||
-    normalizedModel(model?.model) === DEEPSEEK_MODEL
-  );
-  if (!state.deepSeekEnabled) {
-    reportModelListStatus(state, "disabled", "DeepSeek 未启用，不向模型列表补充选项");
-    return line;
-  }
-  if (hasDeepSeek) {
-    reportModelListStatus(state, "present", "DeepSeek 模型选项已由官方 app-server 返回");
-    return line;
-  }
   if (pending.cursor != null && String(pending.cursor).trim()) return line;
-
-  reportModelListStatus(state, "injected", "model/list 缺少 DeepSeek，已在首屏响应中补齐");
+  const customModelIds = new Set(state.customModels.keys());
+  const existingCustomModels = new Map();
+  let existingDeepSeekModel = null;
+  const baseModels = [];
+  for (const model of models) {
+    const modelId = normalizedModel(model?.id) ?? normalizedModel(model?.model);
+    if (modelId === DEEPSEEK_MODEL) existingDeepSeekModel = model;
+    else if (customModelIds.has(modelId)) existingCustomModels.set(modelId, model);
+    else baseModels.push(model);
+  }
+  let additions = 0;
+  const extensionModels = [];
+  if (state.deepSeekEnabled) {
+    const declaredDeepSeek = createDeepSeekAppServerModel();
+    extensionModels.push(existingDeepSeekModel
+      ? { ...existingDeepSeekModel, ...declaredDeepSeek }
+      : declaredDeepSeek);
+    if (!existingDeepSeekModel) additions += 1;
+  }
+  const orderedCustomModels = [];
+  for (const platform of state.customPlatforms.values()) {
+    if (!platform.enabled) continue;
+    for (const model of platform.models) {
+      const existing = existingCustomModels.get(model.id);
+      const declared = createCustomAppServerModel(platform, model);
+      orderedCustomModels.push(existing ? { ...existing, ...declared } : declared);
+      if (!existing) additions += 1;
+    }
+  }
+  const orderedModels = [...baseModels, ...extensionModels, ...orderedCustomModels];
+  const orderChanged = orderedModels.length !== models.length ||
+    orderedModels.some((model, index) => model !== models[index]);
+  if (additions === 0 && !orderChanged) {
+    reportModelListStatus(state, "present", "已启用的扩展模型均存在，且位于官方模型之后");
+    return line;
+  }
+  reportModelListStatus(
+    state,
+    additions > 0 ? "injected" : "sorted",
+    additions > 0
+      ? `model/list 缺少 ${additions} 个扩展模型，已补齐并置于官方模型之后`
+      : "已将 DeepSeek 和自定义模型移动到官方模型之后",
+  );
   return JSON.stringify({
     ...message,
     result: {
       ...message.result,
-      data: [...models, createDeepSeekAppServerModel()],
+      data: orderedModels,
     },
   });
+}
+
+function createCustomAppServerModel(platform, model) {
+  return {
+    id: model.id,
+    model: model.id,
+    upgrade: null,
+    upgradeInfo: null,
+    availabilityNux: null,
+    displayName: model.displayName,
+    description: `${platform.name} · Responses API`,
+    hidden: false,
+    supportedReasoningEfforts: model.reasoningEfforts.map((reasoningEffort) => ({
+      reasoningEffort,
+      description: CUSTOM_REASONING_DESCRIPTIONS[reasoningEffort],
+    })),
+    defaultReasoningEffort: model.defaultReasoningEffort || "low",
+    inputModalities: model.supportsImage ? ["text", "image"] : ["text"],
+    supportsPersonality: true,
+    additionalSpeedTiers: [],
+    serviceTiers: [],
+    defaultServiceTier: null,
+    isDefault: false,
+  };
 }
 
 function createDeepSeekAppServerModel() {
@@ -777,9 +922,12 @@ function extractResponseThreadId(line) {
   }
 }
 
-function providerForModel(model, officialModels) {
+function providerForModel(model, state) {
   if (model === DEEPSEEK_MODEL) return DEEPSEEK_PROVIDER;
-  if (typeof model === "string" && officialModels.has(model)) return OPENAI_PROVIDER;
+  if (typeof model === "string" && state.customModelProviders.has(model)) {
+    return state.customModelProviders.get(model);
+  }
+  if (typeof model === "string" && state.officialModels.has(model)) return OPENAI_PROVIDER;
   return null;
 }
 
@@ -789,6 +937,83 @@ function deepSeekThreadConfig(config) {
     model_reasoning_summary: "none",
     service_tier: null,
   };
+}
+
+function customThreadConfig(config, model) {
+  const next = { ...(config && typeof config === "object" ? config : {}) };
+  next.disable_response_storage = true;
+  if (model?.reasoningEfforts.length) {
+    if (!model.reasoningEfforts.includes(next.model_reasoning_effort)) {
+      next.model_reasoning_effort = model.defaultReasoningEffort;
+    }
+  } else {
+    delete next.model_reasoning_effort;
+  }
+  delete next.model_reasoning_summary;
+  delete next.service_tier;
+  return next;
+}
+
+function isCustomProvider(provider) {
+  return typeof provider === "string" && provider.startsWith(CUSTOM_PROVIDER_PREFIX);
+}
+
+function customPlatformForProvider(provider, state) {
+  return isCustomProvider(provider) ? state.customPlatforms.get(provider) ?? null : null;
+}
+
+function readCustomPlatforms(settings) {
+  const platforms = new Map();
+  for (const value of Array.isArray(settings?.platforms) ? settings.platforms : []) {
+    const id = String(value?.id ?? "").trim();
+    if (!id) continue;
+    const providerId = customProviderId(id);
+    const models = Array.isArray(value?.models)
+      ? value.models.map((model) => ({
+          id: String(model?.id ?? "").trim(),
+          displayName: String(model?.displayName ?? model?.id ?? "").trim(),
+          supportsImage: Boolean(model?.supportsImage),
+          chatCompatibility: Boolean(model?.chatCompatibility),
+          reasoningEfforts: Array.isArray(model?.reasoningEfforts)
+            ? [...new Set(model.reasoningEfforts
+                .map((effort) => String(effort ?? "").trim())
+                .filter((effort) => ALLOWED_CUSTOM_EFFORTS.has(effort)))]
+            : [],
+          defaultReasoningEffort: String(model?.defaultReasoningEffort ?? "").trim(),
+        })).filter((model) => model.id)
+      : [];
+    for (const model of models) {
+      if (!model.reasoningEfforts.includes(model.defaultReasoningEffort)) {
+        model.defaultReasoningEffort = model.reasoningEfforts[0] ?? "";
+      }
+    }
+    platforms.set(providerId, {
+      id,
+      providerId,
+      name: String(value?.name ?? providerId).trim() || providerId,
+      baseUrl: String(value?.baseUrl ?? "").trim(),
+      apiKey: String(value?.apiKey ?? "").trim(),
+      enabled: Boolean(value?.enabled && value?.apiKey && value?.baseUrl && models.length),
+      models,
+    });
+  }
+  return platforms;
+}
+
+function customProviderId(id) {
+  return `${CUSTOM_PROVIDER_PREFIX}${String(id).replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`;
+}
+
+function customProviderEnvKey(id) {
+  return `CODEX_QUOTA_MODEL_${String(id).replace(/[^a-zA-Z0-9]/g, "").toUpperCase()}_API_KEY`;
+}
+
+function customProviderConfig(platform, baseUrl = platform.baseUrl) {
+  return `model_providers.${platform.providerId}={` +
+    `name=${JSON.stringify(platform.name)},` +
+    `base_url=${JSON.stringify(baseUrl)},` +
+    `env_key=${JSON.stringify(customProviderEnvKey(platform.id))},` +
+    `wire_api="responses"}`;
 }
 
 function containsImageInput(value) {
@@ -911,6 +1136,7 @@ function clearRelayEnvironment(env) {
     "CODEX_QUOTA_ROLE",
     "CODEX_QUOTA_UPSTREAM_CODEX_CLI",
     "CODEX_QUOTA_PROVIDER_SETTINGS",
+    "CODEX_QUOTA_EXTRA_MODEL_SETTINGS",
     "CODEX_QUOTA_MODEL_CATALOG",
     "CODEX_QUOTA_RELAY_STATE",
     "CODEX_QUOTA_TOKEN_USAGE_EVENTS",

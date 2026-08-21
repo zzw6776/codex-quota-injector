@@ -20,11 +20,13 @@ export class SingleInstanceTakeoverError extends Error {
 export async function acquireSingleInstance({
   mode = "dev",
   version = "0.0.0",
+  explicitStart = false,
   onTakeover,
 } = {}) {
   const owner = {
     mode: normalizeMode(mode),
     version: normalizeVersion(version),
+    explicitStart: Boolean(explicitStart),
   };
   let takeoverStarted = false;
   const server = createServer((socket) => {
@@ -103,6 +105,7 @@ export function compareVersions(left, right) {
 }
 
 function shouldReplace(owner, requester) {
+  if (!requester.explicitStart) return false;
   if (!INSTANCE_MODES.has(owner.mode) || !INSTANCE_MODES.has(requester.mode)) return false;
   if (requester.mode === "formal" && owner.mode === "dev") return true;
   return compareVersions(requester.version, owner.version) > 0;
@@ -117,6 +120,7 @@ function parseTakeoverRequest(data) {
     return {
       mode: normalizeMode(value.mode),
       version: normalizeVersion(value.version),
+      explicitStart: value.explicitStart === true,
     };
   } catch {
     return null;
@@ -143,6 +147,7 @@ function requestTakeover(owner) {
       type: "takeover",
       mode: owner.mode,
       version: owner.version,
+      explicitStart: owner.explicitStart,
     }) + "\n"));
     socket.on("data", (data) => {
       response += data;
