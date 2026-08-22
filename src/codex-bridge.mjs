@@ -1,9 +1,15 @@
 import { isSea } from "node:sea";
 import { constants as fsConstants } from "node:fs";
 import { access, mkdir, rename, unlink, writeFile } from "node:fs/promises";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import packageJson from "../package.json" with { type: "json" };
 
-import { defaultAccountDataDir, resolveCodexCliExecutable } from "./platform.mjs";
+import {
+  codexRunsInWindowsSubsystemForLinux,
+  defaultAccountDataDir,
+  resolveCodexCliExecutable,
+} from "./platform.mjs";
+import { assertValidWslRelayExecutable } from "./relay-artifact.mjs";
 import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
 
 const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
@@ -11,8 +17,9 @@ const RELAY_CONFIG_VERSION = 1;
 
 export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager }) {
   if (process.platform !== "darwin" && process.platform !== "win32") {
-    return { env: {}, relay: null };
+    return { env: {}, relay: null, injectionMode: null };
   }
+  const defaultInjectionMode = resolveInjectionMode();
   const statePath = join(defaultAccountDataDir(), "app-server-relay-state.json");
   const tokenUsageEventPath = join(defaultAccountDataDir(), "token-usage-events.jsonl");
   const relayConfigPath = join(defaultAccountDataDir(), "app-server-relay-config.json");
@@ -21,7 +28,11 @@ export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, c
     basename(contextState.currentCatalogPath ?? "") !== "codex-deepseek-poc.json") {
     deepSeekManager.setError("检测到其他工具管理的模型目录，已保留其配置并停用 DeepSeek 中继");
     extraModelManager.setError("检测到其他工具管理的模型目录，已保留其配置并停用额外模型中继");
-    return { env: {}, relay: { statePath, expectAbsent: true } };
+    return {
+      env: {},
+      relay: { statePath, expectAbsent: true },
+      injectionMode: defaultInjectionMode,
+    };
   }
   let runtime;
   let upstreamExecutable;
@@ -36,7 +47,11 @@ export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, c
   } catch (error) {
     deepSeekManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
     extraModelManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
-    return { env: {}, relay: { statePath, expectAbsent: true } };
+    return {
+      env: {},
+      relay: { statePath, expectAbsent: true },
+      injectionMode: defaultInjectionMode,
+    };
   }
   const relayGeneration = `${runtime.generation}:${BRIDGE_GENERATION}`;
   try {
@@ -53,7 +68,11 @@ export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, c
   } catch (error) {
     deepSeekManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
     extraModelManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
-    return { env: {}, relay: { statePath, expectAbsent: true } };
+    return {
+      env: {},
+      relay: { statePath, expectAbsent: true },
+      injectionMode: defaultInjectionMode,
+    };
   }
   return {
     env: {
@@ -62,17 +81,54 @@ export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, c
       CODEX_QUOTA_RELAY_CONFIG: relayConfigPath,
       CODEX_QUOTA_UPSTREAM_CODEX_CLI: upstreamExecutable,
     },
-    relay: { statePath, configPath: relayConfigPath, generation: relayGeneration },
+    relay: {
+      statePath,
+      configPath: relayConfigPath,
+      generation: relayGeneration,
+      wslNative: isWslNativeRelay(relayExecutable),
+    },
+    injectionMode: resolveInjectionMode(relayExecutable),
   };
+}
+
+function resolveInjectionMode(relayExecutable = process.env.CODEX_QUOTA_RELAY_EXECUTABLE) {
+  if (process.platform !== "win32") return null;
+  return isWslNativeRelay(relayExecutable) ? "wsl" : "windows";
+}
+
+function isWslNativeRelay(relayExecutable) {
+  return process.platform === "win32" &&
+    /^codex-quota-relay-wsl-\d+\.\d+\.\d+$/i.test(basename(String(relayExecutable ?? "")));
 }
 
 async function resolveRelayExecutable() {
   if (process.env.CODEX_QUOTA_RELAY_EXECUTABLE) {
     return resolve(process.env.CODEX_QUOTA_RELAY_EXECUTABLE);
   }
-  if (isSea()) return process.execPath;
+  if (isSea()) {
+    if (process.platform === "win32" &&
+      await codexRunsInWindowsSubsystemForLinux()) {
+      const bundledWslRelay = resolve(
+        dirname(process.execPath),
+        "relay",
+        `codex-quota-relay-wsl-${packageJson.version}`,
+      );
+      try {
+        await assertValidWslRelayExecutable(bundledWslRelay);
+      } catch (error) {
+        throw new Error(`安装包内置 WSL relay 无效，请重新安装当前版本：${error.message}`);
+      }
+      return bundledWslRelay;
+    }
+    return process.execPath;
+  }
   if (process.platform === "win32") {
-    const developmentRelay = resolve(import.meta.dirname, "..", "build", "codex-quota-relay.exe");
+    const developmentRelay = resolve(
+      import.meta.dirname,
+      "..",
+      "build",
+      `codex-quota-relay-windows-${packageJson.version}.exe`,
+    );
     try {
       await access(developmentRelay, fsConstants.F_OK);
       return developmentRelay;
@@ -85,13 +141,10 @@ async function resolveRelayExecutable() {
 
 function relayLaunchEnvironment(relayExecutable) {
   if (process.platform !== "win32") return { CODEX_CLI_PATH: relayExecutable };
-  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-  const pathValue = [dirname(relayExecutable), process.env[pathKey]]
-    .filter(Boolean)
-    .join(delimiter);
   return {
-    CODEX_CLI_PATH: basename(relayExecutable),
-    [pathKey]: pathValue,
+    // The desktop app translates an absolute path to its WSL equivalent.
+    // A basename would require a Windows PATH entry that WSL does not inherit.
+    CODEX_CLI_PATH: relayExecutable,
   };
 }
 

@@ -28,10 +28,12 @@ const TOKEN_USAGE_FALLBACK_MS = 15_000;
 const WIDGET_HEALTH_CHECK_MS = 15_000;
 const TOKEN_USAGE_STABILITY_GRACE_MS = 5_000;
 const INJECTION_ERROR_LOG_INTERVAL_MS = 10_000;
+const DEBUG_LOGGING = process.env.CODEX_QUOTA_DEBUG === "1";
 
 export async function runInjector({
   port = DEFAULT_PORT,
   once = false,
+  injectionMode = null,
   accountManager = new AccountManager(),
   contextManager = new CodexContextManager(),
   deepSeekManager = new DeepSeekManager(),
@@ -279,6 +281,7 @@ export async function runInjector({
     };
     const staticViewModel = {
       version: APP_DISPLAY_VERSION,
+      injectionMode,
       accounts: viewModel.accounts,
       windows: viewModel.windows,
       currentAccountId: viewModel.currentAccountId,
@@ -526,9 +529,13 @@ export async function runInjector({
       scheduleDeepSeekBalanceRefresh();
     }
   }
+  let _loopCount = 0;
   while (!stopped) {
+    _loopCount++;
+    debugLog(`[DEBUG] loop#${_loopCount} cdp=${!!cdp} cdp.isConnected=${cdp?.isConnected} restartingCodex=${restartingCodex} hasSeenCodexProcess=${hasSeenCodexProcess} stopped=${stopped} deadline=${Date.now() >= startupDeadline}`);
     if (!cdp?.isConnected && !restartingCodex) {
       const codexRunning = await isCodexRunning();
+      debugLog(`[DEBUG] loop#${_loopCount} isCodexRunning=${codexRunning}`);
       if (codexRunning) {
         hasSeenCodexProcess = true;
       } else if (hasSeenCodexProcess || Date.now() >= startupDeadline) {
@@ -539,7 +546,9 @@ export async function runInjector({
     }
     try {
       syncAsyncAccountOperation();
+      debugLog(`[DEBUG] loop#${_loopCount} calling connectAndInject...`);
       const injected = await connectAndInject();
+      debugLog(`[DEBUG] loop#${_loopCount} injected=${injected}`);
       if (injected && !activeAction) {
         const actions = await cdp.evaluate(widgetDrainActionsExpression());
         if (Array.isArray(actions) && actions.length > 0) {
@@ -559,6 +568,7 @@ export async function runInjector({
       if (once) throw error;
       const message = error?.message ?? String(error);
       const now = Date.now();
+      debugLog(`[DEBUG] loop#${_loopCount} catch: ${message}`);
       if (message !== lastInjectionError || now - lastInjectionErrorAt >= INJECTION_ERROR_LOG_INTERVAL_MS) {
         console.error(`[injector] 连接或注入失败: ${message}`);
         lastInjectionError = message;
@@ -589,6 +599,10 @@ export async function runInjector({
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function debugLog(message) {
+  if (DEBUG_LOGGING) console.log(message);
 }
 
 export { DEFAULT_PORT };

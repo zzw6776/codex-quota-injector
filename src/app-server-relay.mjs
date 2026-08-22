@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 
 import deepSeekModel from "./deepseek-model.json" with { type: "json" };
 import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
@@ -43,14 +44,32 @@ const TURN_MODEL_TTL_MS = 15 * 60 * 1000;
 const THREAD_CONTEXT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RELAY_CLEANUP_INTERVAL_MS = 60 * 1000;
 const JSON_RPC_ID_RE = /^\s*\{\s*"id"\s*:\s*(?:"([^"\\]*)"|(-?\d+(?:\.\d+)?))/;
+const execFileAsync = promisify(execFile);
 
 export async function runAppServerRelay() {
-  const relayConfig = await readJson(process.env.CODEX_QUOTA_RELAY_CONFIG);
-  const upstreamExecutable = String(
-    relayConfig?.upstreamExecutable ?? process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI ?? "",
-  ).trim();
+  const wslNative = process.env.CODEX_QUOTA_WSL_NATIVE === "1";
+  const configuredRelayPath = String(process.env.CODEX_QUOTA_RELAY_CONFIG ?? "").trim();
+  const relayConfigPath = await resolveRelayPath(
+    configuredRelayPath || (wslNative ? await resolveNativeWslRelayConfigPath() : ""),
+  );
+  const relayConfig = await readJson(relayConfigPath);
+  const nativeWslUpstream = wslNative
+    ? String(process.env.CODEX_QUOTA_WSL_UPSTREAM_CODEX_CLI ?? "").trim() ||
+      await resolveNativeWslCodexCli()
+    : "";
+  const upstreamExecutable = await resolveRelayPath(
+    nativeWslUpstream || relayConfig?.upstreamExecutable ||
+      process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI || "",
+  );
   if (!upstreamExecutable || upstreamExecutable === process.execPath) {
     throw new Error("模型中继配置缺少有效的官方 Codex CLI 路径，或路径指向了中继自身");
+  }
+  if (wslNative) {
+    await appendNativeWslDiagnostic(
+      `Starting native SEA relay; executable=${process.execPath}; upstream=${upstreamExecutable}`,
+    ).catch((error) => {
+      console.error(`[codex-quota-relay] WSL 诊断日志写入失败: ${error.message}`);
+    });
   }
 
   const originalArgs = process.argv.slice(2);
@@ -60,15 +79,17 @@ export async function runAppServerRelay() {
     return;
   }
 
-  const providerSettingsPath = relayConfig?.providerSettingsPath ??
-    process.env.CODEX_QUOTA_PROVIDER_SETTINGS;
+  const providerSettingsPath = await resolveRelayPath(
+    relayConfig?.providerSettingsPath ?? process.env.CODEX_QUOTA_PROVIDER_SETTINGS,
+  );
   const settings = await readJson(providerSettingsPath).catch((error) => {
     console.error(`DeepSeek 本地配置读取失败，已按停用处理: ${error.message}`);
     return null;
   });
   const deepSeekEnabled = Boolean(settings?.enabled && settings?.apiKey);
-  const extraModelSettingsPath = relayConfig?.extraModelSettingsPath ??
-    process.env.CODEX_QUOTA_EXTRA_MODEL_SETTINGS;
+  const extraModelSettingsPath = await resolveRelayPath(
+    relayConfig?.extraModelSettingsPath ?? process.env.CODEX_QUOTA_EXTRA_MODEL_SETTINGS,
+  );
   const extraModelSettings = await readJson(extraModelSettingsPath).catch((error) => {
     console.error(`额外模型本地配置读取失败，已按未配置处理: ${error.message}`);
     return null;
@@ -82,9 +103,9 @@ export async function runAppServerRelay() {
       customModels.set(model.id, { ...model, platformName: platform.name });
     }
   }
-  const catalogPath = String(
+  const catalogPath = await resolveRelayPath(
     relayConfig?.modelCatalogPath ?? process.env.CODEX_QUOTA_MODEL_CATALOG ?? "",
-  ).trim();
+  );
   const officialModels = await readOfficialModelSlugs(catalogPath);
   officialModels.delete(DEEPSEEK_MODEL);
   for (const modelId of customModelProviders.keys()) officialModels.delete(modelId);
@@ -126,13 +147,13 @@ export async function runAppServerRelay() {
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: process.platform === "win32",
   });
-  const statePath = String(
+  const statePath = await resolveRelayPath(
     relayConfig?.relayStatePath ?? process.env.CODEX_QUOTA_RELAY_STATE ?? "",
-  ).trim();
+  );
   const usageEventWriter = createUsageEventWriter(
-    String(
+    await resolveRelayPath(
       relayConfig?.tokenUsageEventsPath ?? process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "",
-    ).trim(),
+    ),
   );
   try {
     await writeRelayState(
@@ -159,10 +180,25 @@ export async function runAppServerRelay() {
   };
   forwardSignals(child);
   child.once("error", (error) => {
-    void cleanup().finally(() => fail(error));
+    void (async () => {
+      if (wslNative) {
+        await appendNativeWslDiagnostic(`Upstream process error: ${error.message}`)
+          .catch(() => undefined);
+      }
+      await cleanup();
+      fail(error);
+    })();
   });
   child.once("exit", (code, signal) => {
-    void cleanup().finally(() => exitLikeChild(code, signal));
+    void (async () => {
+      if (wslNative) {
+        await appendNativeWslDiagnostic(
+          `Upstream process exited; code=${code ?? "null"}; signal=${signal ?? "null"}`,
+        ).catch(() => undefined);
+      }
+      await cleanup();
+      exitLikeChild(code, signal);
+    })();
   });
   process.once("exit", () => void cleanup());
 
@@ -1113,6 +1149,69 @@ async function readJson(path) {
   }
 }
 
+async function resolveRelayPath(value) {
+  const path = String(value ?? "").trim();
+  if (!path || process.env.CODEX_QUOTA_WSL_NATIVE !== "1" || !isWindowsPath(path)) {
+    return path;
+  }
+  try {
+    const { stdout } = await execFileAsync("wslpath", ["-u", path]);
+    const converted = stdout.trim();
+    if (converted) return converted;
+  } catch (error) {
+    throw new Error(`无法转换 Windows 中继路径 ${path}: ${error.message}`);
+  }
+  throw new Error(`无法转换 Windows 中继路径: ${path}`);
+}
+
+async function resolveNativeWslRelayConfigPath() {
+  const appDataRoot = await resolveWindowsDirectoryInWsl("APPDATA");
+  return join(appDataRoot, "Codex Quota Injector", "app-server-relay-config.json");
+}
+
+async function resolveNativeWslCodexCli() {
+  try {
+    const { stdout } = await execFileAsync("sh", ["-c", "command -v codex"]);
+    const executable = stdout.trim();
+    if (executable) return executable;
+  } catch {
+    // Report a stable relay-specific error below.
+  }
+  throw new Error("WSL PATH 中未找到 Codex Desktop 提供的原生 codex 可执行文件");
+}
+
+async function readWindowsEnvironmentVariable(name) {
+  try {
+    const { stdout } = await execFileAsync("cmd.exe", ["/d", "/c", `echo %${name}%`]);
+    const value = stdout.replaceAll("\r", "").trim();
+    if (value && value !== `%${name}%`) return value;
+  } catch (error) {
+    throw new Error(`无法从 WSL 读取 Windows ${name}: ${error.message}`);
+  }
+  throw new Error(`Windows ${name} 为空，无法定位模型中继配置`);
+}
+
+async function resolveWindowsDirectoryInWsl(name) {
+  const forwarded = String(process.env[name] ?? "").trim();
+  if (forwarded) return resolveRelayPath(forwarded);
+  return resolveRelayPath(await readWindowsEnvironmentVariable(name));
+}
+
+async function appendNativeWslDiagnostic(message) {
+  const localAppDataRoot = await resolveWindowsDirectoryInWsl("LOCALAPPDATA");
+  const logRoot = join(localAppDataRoot, "Codex Quota Injector", "Logs");
+  await mkdir(logRoot, { recursive: true, mode: 0o700 });
+  await appendFile(
+    join(logRoot, "wsl-relay-stderr.log"),
+    `${new Date().toISOString()} [wsl-relay] ${message}\n`,
+    "utf8",
+  );
+}
+
+function isWindowsPath(path) {
+  return /^(?:[a-z]:[\\/]|\\\\\?\\[a-z]:[\\/])/i.test(path);
+}
+
 async function writeRelayState(path, generation) {
   if (!path) return;
   const resolvedGeneration = generation ??
@@ -1141,6 +1240,8 @@ function clearRelayEnvironment(env) {
     "CODEX_QUOTA_RELAY_STATE",
     "CODEX_QUOTA_TOKEN_USAGE_EVENTS",
     "CODEX_QUOTA_BRIDGE_GENERATION",
+    "CODEX_QUOTA_WSL_NATIVE",
+    "CODEX_QUOTA_WSL_UPSTREAM_CODEX_CLI",
   ]) {
     delete env[key];
   }

@@ -393,12 +393,13 @@ export async function isRelayConfigCurrent(path, generation) {
   }
 }
 
-export async function isRelayStateCurrent(path, generation) {
+export async function isRelayStateCurrent(path, generation, { wslNative = false } = {}) {
   try {
     const state = JSON.parse(await readFile(path, "utf8"));
     if (generation != null && state?.generation !== generation) return false;
     if (!Number.isInteger(state?.pid)) return false;
     if (!Number.isFinite(Number(state?.processStartedAt))) return false;
+    if (wslNative) return isWslProcessCurrent(state);
     process.kill(state.pid, 0);
     const processStartedAt = await readProcessStartedAt(state.pid);
     if (!Number.isFinite(processStartedAt)) return false;
@@ -407,6 +408,52 @@ export async function isRelayStateCurrent(path, generation) {
   } catch {
     return false;
   }
+}
+
+export async function codexRunsInWindowsSubsystemForLinux() {
+  if (process.platform !== "win32") return false;
+  const configPath = join(homedir(), ".codex", "config.toml");
+  const contents = await readFile(configPath, "utf8").catch(() => "");
+  let inDesktopSection = false;
+  for (const line of contents.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const section = trimmed.match(/^\[([^\]]+)\]$/);
+    if (section) {
+      inDesktopSection = section[1] === "desktop";
+      continue;
+    }
+    if (!inDesktopSection) continue;
+    const setting = trimmed.match(
+      /^runCodexInWindowsSubsystemForLinux\s*=\s*(true|false)(?:\s+#.*)?$/,
+    );
+    if (setting) return setting[1] === "true";
+  }
+  return false;
+}
+
+async function isWslProcessCurrent(state) {
+  const processId = Number(state.pid);
+  if (!Number.isInteger(processId) || processId <= 0) return false;
+  const script = [
+    `process_id=${processId}`,
+    'test -r "/proc/$process_id/stat"',
+    'boot_seconds=$(awk \'/btime/ { print $2; exit }\' /proc/stat)',
+    'start_ticks=$(awk \'{ print $22; exit }\' "/proc/$process_id/stat")',
+    'clock_ticks=$(getconf CLK_TCK)',
+    'printf "%s %s %s\\n" "$boot_seconds" "$start_ticks" "$clock_ticks"',
+  ].join("; ");
+  const { stdout } = await execFileAsync("wsl.exe", ["-e", "sh", "-c", script])
+    .catch(() => ({ stdout: "" }));
+  const [bootSeconds, startTicks, clockTicks] = String(stdout)
+    .trim()
+    .split(/\s+/)
+    .map(Number);
+  if (![bootSeconds, startTicks, clockTicks].every(Number.isFinite) || clockTicks <= 0) {
+    return false;
+  }
+  const processStartedAt = (bootSeconds + startTicks / clockTicks) * 1000;
+  return Math.abs(processStartedAt - Number(state.processStartedAt)) <=
+    RELAY_PROCESS_START_TIME_TOLERANCE_MS;
 }
 
 async function readProcessStartedAt(processId) {
@@ -798,7 +845,9 @@ async function readCodexLaunchReadiness(port, options = {}) {
     const configReady = !relay.configPath ||
       await isRelayConfigCurrent(relay.configPath, relay.generation);
     const stateReady = !relay.statePath ||
-      await isRelayStateCurrent(relay.statePath, relay.generation);
+      await isRelayStateCurrent(relay.statePath, relay.generation, {
+        wslNative: relay.wslNative === true,
+      });
     relayReady = configReady && stateReady;
   }
   return {

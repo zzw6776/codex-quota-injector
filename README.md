@@ -38,7 +38,7 @@
 3. 双击桌面或开始菜单中的 `Codex Quota Injector`；
 4. 程序会直接启动 Microsoft Store 安装的 ChatGPT / Codex，并在后台注入额度面板。
 
-当前自动构建未配置 Authenticode 证书，Windows SmartScreen 可能提示未知发布者。
+Windows 安装包同时内置原生 Windows relay 和原生 WSL relay；安装后会根据 Codex 的运行模式自动选择，全程不需要联网或安装 Node.js。当前自动构建未配置 Authenticode 证书，Windows SmartScreen 可能提示未知发布者。
 
 ## 运行机制
 
@@ -77,6 +77,7 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。W
 GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 
 - 每次提交到 `master`：读取 `package.json` 版本，自动构建对应版本的 macOS Universal DMG 和 Windows x64 Setup，创建或更新 `v版本号` 正式 Release、标记为 Latest，并同时上传到 Actions Artifacts；
+- Linux job 会预构建 WSL SEA relay，并只把该中间产物交给 Windows 安装包；macOS DMG 不包含 Linux Node 或 WSL relay；
 - 推送 `v*` 标签：标签必须与 `package.json` 版本一致，构建成功后更新同版本 GitHub Release；
 - 支持在 Actions 页面手动触发。
 
@@ -96,7 +97,7 @@ npm run launch
 - macOS：`启动开发版.app`（Finder、QSpace Pro 均推荐）或 `启动开发版.command`
 - Windows：`启动开发版.cmd`
 
-脚本会先使用项目内或系统中的 Node.js 22 构建或复用当前 Windows 开发版 relay，再隐藏启动注入器。启动器按远端规则根据版本和运行模式协商是否接管已运行的注入器；旧版本协议无法识别时，会在确认旧进程属于本项目后终止旧进程并继续启动。它不会关闭官方 Codex，也不会保留 npm 或 PowerShell 前台窗口。启动日志位于 `%LOCALAPPDATA%\\Codex Quota Injector\\Logs\\launcher.log`，运行日志位于同目录的 `injector.log`。
+脚本会先使用项目内或系统中的 Node.js 22 准备 relay，再隐藏启动注入器。普通 Windows 模式会在首次启动当前项目版本时原子生成版本化的原生 Windows SEA relay；源码开发版若要重建 WSL relay，需要在 `runtime/node-v22.23.1-linux-x64/bin/node` 准备本地 Linux Node。正式 Windows 安装包已经压缩内置构建好的 WSL relay，安装和运行均不需要该开发运行时。启动器按远端规则根据版本和运行模式协商是否接管已运行的注入器；旧版本协议无法识别时，会在确认旧进程属于本项目后终止旧进程并继续启动。它不会关闭官方 Codex，也不会保留 npm 或 PowerShell 前台窗口。启动日志位于 `%LOCALAPPDATA%\\Codex Quota Injector\\Logs\\launcher.log`，运行日志位于同目录的 `injector.log`。
 
 其他命令：
 

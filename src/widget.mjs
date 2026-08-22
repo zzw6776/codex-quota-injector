@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 83;
+export const WIDGET_RUNTIME_VERSION = 87;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -62,6 +62,7 @@ export function installQuotaWidget(
     data: {
       accounts: [],
       windows: [],
+      injectionMode: null,
       currentAccountId: null,
       operation: null,
       context: { status: "unavailable", models: [], overriddenCount: 0 },
@@ -201,7 +202,7 @@ export function installQuotaWidget(
     .operation.success { color: #7ecb9b; background: rgba(52,168,92,.09); }
     .operation.error { color: #ef8e86; background: rgba(220,76,63,.09); }
     .panel-version { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.07); color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
-    .panel-version-text { margin-left: auto; white-space: nowrap; }
+    .panel-version-text { margin-left: auto; color: var(--token-text-secondary, #aaaab5); white-space: nowrap; }
     .panel-balance { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .add-panel { margin-top: 11px; padding-top: 11px; border-top: 1px solid rgba(255,255,255,.07); }
     .add-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -423,6 +424,11 @@ export function installQuotaWidget(
     const providerPage = state.page === "provider";
     const extraModelsPage = state.page === "extra-models";
     const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
+    const injectionRuntime = state.data.injectionMode === "wsl"
+      ? { label: "WSL", title: "注入运行时：WSL" }
+      : state.data.injectionMode === "windows"
+        ? { label: "Windows", title: "注入运行时：Windows" }
+        : null;
     const codexBalance = (() => {
       const credits = currentCredits;
       if (!credits) return "";
@@ -470,8 +476,12 @@ export function installQuotaWidget(
             <details><summary>API Key</summary><form class="api-key-form"><input name="name" placeholder="账号名称（可选）" ${busy ? "disabled" : ""}><input name="apiKey" type="password" autocomplete="off" placeholder="OpenAI API Key" required ${busy ? "disabled" : ""}><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>添加 API Key</button></form></details>
           </div>
         </section>`;
-    const versionFooter = appVersion
-      ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text">v${appVersion}</span></div>`
+    const footerMeta = [injectionRuntime?.label, appVersion ? `v${appVersion}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+    const footerTitle = injectionRuntime?.title ? ` title="${injectionRuntime.title}"` : "";
+    const versionFooter = footerMeta
+      ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text"${footerTitle}>${footerMeta}</span></div>`
       : "";
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>

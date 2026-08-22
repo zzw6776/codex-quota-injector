@@ -77,8 +77,55 @@ jobs:
           if-no-files-found: error
           path: release/macos/*.dmg
 
+  wsl-relay:
+    name: WSL x64 Relay
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install build dependencies
+        run: npm ci
+
+      - name: Download official Linux Node.js runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/node-runtimes
+          cd build/node-runtimes
+          base="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}"
+          archive="node-v${NODE_RUNTIME_VERSION}-linux-x64.tar.xz"
+          curl -fL --retry 3 -O "${base}/SHASUMS256.txt"
+          curl -fL --retry 3 -O "${base}/${archive}"
+          grep " ${archive}$" SHASUMS256.txt | sha256sum -c -
+          tar -xJf "${archive}"
+
+      - name: Build native WSL relay
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          node scripts/build-wsl-relay.mjs \
+            --node-binary "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-linux-x64/bin/node" \
+            --output "build/native/codex-quota-relay-wsl-${package_version}"
+
+      - name: Upload WSL relay for Windows packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl-relay-intermediate
+          retention-days: 1
+          if-no-files-found: error
+          path: build/native/codex-quota-relay-wsl-*
+
   windows:
     name: Windows x64 Setup
+    needs: wsl-relay
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -92,6 +139,12 @@ jobs:
 
       - name: Install build dependencies
         run: npm ci
+
+      - name: Download prebuilt WSL relay
+        uses: actions/download-artifact@v4
+        with:
+          name: wsl-relay-intermediate
+          path: build/native
 
       - name: Download official Node.js runtime
         shell: pwsh
@@ -162,8 +215,10 @@ jobs:
           if (-not $env:MAKENSIS_PATH -or -not (Test-Path -LiteralPath $env:MAKENSIS_PATH)) {
             throw "MAKENSIS_PATH 未设置或文件不存在"
           }
+          $packageVersion = (& node -p "require('./package.json').version").Trim()
           npm run package:windows -- `
             --input-executable "build/native/Codex Quota Injector.exe" `
+            --wsl-relay-executable "build/native/codex-quota-relay-wsl-$packageVersion" `
             --node-license "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/LICENSE" `
             --output-dir "release/windows" `
             --makensis "$env:MAKENSIS_PATH"

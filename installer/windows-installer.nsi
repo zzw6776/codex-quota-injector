@@ -7,6 +7,9 @@ RequestExecutionLevel user
 !ifndef INPUT_EXE
   !error "INPUT_EXE is required"
 !endif
+!ifndef WSL_RELAY_EXE
+  !error "WSL_RELAY_EXE is required"
+!endif
 !ifndef APP_ICON
   !error "APP_ICON is required"
 !endif
@@ -35,6 +38,10 @@ Section "Install"
   SetOutPath "$INSTDIR"
   File "/oname=Codex Quota Injector.exe" "${INPUT_EXE}"
   File "/oname=NODE_LICENSE.txt" "${NODE_LICENSE}"
+  Delete "$INSTDIR\relay\codex-quota-relay-wsl-*"
+  SetOutPath "$INSTDIR\relay"
+  File "/oname=codex-quota-relay-wsl-${VERSION}" "${WSL_RELAY_EXE}"
+  SetOutPath "$INSTDIR"
 
   WriteRegStr HKCU "Software\Codex Quota Injector" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex Quota Injector" "DisplayName" "Codex Quota Injector"
@@ -57,6 +64,8 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\Codex Quota Injector"
   Delete "$INSTDIR\Codex Quota Injector.exe"
   Delete "$INSTDIR\NODE_LICENSE.txt"
+  Delete "$INSTDIR\relay\codex-quota-relay-wsl-*"
+  RMDir "$INSTDIR\relay"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "Software\Codex Quota Injector"

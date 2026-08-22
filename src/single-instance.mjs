@@ -108,6 +108,11 @@ function shouldReplace(owner, requester) {
   if (!requester.explicitStart) return false;
   if (!INSTANCE_MODES.has(owner.mode) || !INSTANCE_MODES.has(requester.mode)) return false;
   if (requester.mode === "formal" && owner.mode === "dev") return true;
+  // A development launcher is an explicit request to run the checked-out
+  // source. It must replace an older process from the same checkout even
+  // before the package version changes.
+  if (requester.mode === "dev" && owner.mode === "dev") return true;
+  if (requester.mode === "dev" && owner.mode === "formal") return false;
   return compareVersions(requester.version, owner.version) > 0;
 }
 

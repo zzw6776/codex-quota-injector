@@ -5,8 +5,7 @@ import { isSea } from "node:sea";
 
 if (
   process.env.CODEX_QUOTA_ROLE === "app-server-relay" ||
-  (String(process.env.CODEX_QUOTA_RELAY_CONFIG ?? "").trim() &&
-    String(process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI ?? "").trim())
+  String(process.env.CODEX_QUOTA_RELAY_CONFIG ?? "").trim()
 ) {
   void import("./app-server-relay.mjs")
     .then(({ runAppServerRelay }) => runAppServerRelay())
@@ -86,6 +85,7 @@ async function runLauncher() {
     console.log(`[launcher] 已启动，日志=${logPath}`);
     await runInjector({
       port,
+      injectionMode: launchOptions.injectionMode,
       contextManager,
       deepSeekManager,
       extraModelManager,
