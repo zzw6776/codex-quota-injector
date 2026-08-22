@@ -9,7 +9,6 @@ import {
   defaultAccountDataDir,
   resolveCodexCliExecutable,
 } from "./platform.mjs";
-import { assertValidWslRelayExecutable } from "./relay-artifact.mjs";
 import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
 
 const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
@@ -113,11 +112,7 @@ async function resolveRelayExecutable() {
         "relay",
         `codex-quota-relay-wsl-${packageJson.version}`,
       );
-      try {
-        await assertValidWslRelayExecutable(bundledWslRelay);
-      } catch (error) {
-        throw new Error(`安装包内置 WSL relay 无效，请重新安装当前版本：${error.message}`);
-      }
+      // ELF 与 SEA fuse 已在构建及打包阶段校验；运行时只检查安装文件是否存在。
       return bundledWslRelay;
     }
     return process.execPath;
