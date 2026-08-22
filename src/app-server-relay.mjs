@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import deepSeekModel from "./deepseek-model.json" with { type: "json" };
-import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
+import { RELAY_PROTOCOL_VERSION, RELAY_STATE_VERSION } from "./relay-contract.mjs";
 import { startChatCompatibilityProxy } from "./chat-compat-proxy.mjs";
 
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
@@ -1221,12 +1221,41 @@ async function writeRelayState(path, generation) {
     0,
     Math.floor(Date.now() - process.uptime() * 1000),
   );
+  const wslProcessIdentity = process.env.CODEX_QUOTA_WSL_NATIVE === "1"
+    ? await readCurrentLinuxProcessIdentity()
+    : null;
   await writeFile(path, `${JSON.stringify({
+    version: RELAY_STATE_VERSION,
     pid: process.pid,
     generation: resolvedGeneration,
     processStartedAt,
+    ...(wslProcessIdentity ?? {}),
     startedAt: Date.now(),
   })}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+async function readCurrentLinuxProcessIdentity() {
+  const [bootIdText, statText] = await Promise.all([
+    readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+    readFile(`/proc/${process.pid}/stat`, "utf8"),
+  ]);
+  const bootId = String(bootIdText).trim();
+  const processStartTicks = parseLinuxProcessStartTicks(statText);
+  if (!bootId || !Number.isSafeInteger(processStartTicks) || processStartTicks < 0) {
+    throw new Error("无法读取 WSL 中继的稳定进程身份");
+  }
+  return { bootId, processStartTicks };
+}
+
+function parseLinuxProcessStartTicks(statText) {
+  const text = String(statText ?? "").trim();
+  const commandEnd = text.lastIndexOf(")");
+  if (commandEnd < 0) return null;
+  // `/proc/<pid>/stat` 在 comm 字段后从第 3 字段 state 继续；starttime
+  // 是第 22 字段，因此对应剩余字段中的索引 19。
+  const fields = text.slice(commandEnd + 1).trim().split(/\s+/);
+  const startTicks = Number(fields[19]);
+  return Number.isSafeInteger(startTicks) && startTicks >= 0 ? startTicks : null;
 }
 
 function clearRelayEnvironment(env) {

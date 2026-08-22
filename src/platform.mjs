@@ -18,6 +18,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { RELAY_STATE_VERSION } from "./relay-contract.mjs";
+
 const execFileAsync = promisify(execFile);
 const MACOS_EXECUTABLES = [
   "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
@@ -312,7 +314,7 @@ export async function restartCodex(port, options = {}) {
     return;
   }
 
-  console.warn("[launcher] Codex 首次启动未就绪，正在重新启动重试");
+  console.warn(`[launcher] ${formatCodexReadinessError(port, readiness)}，正在重新启动重试`);
   await stopCodex();
   await launchCodex(port, { ...options, executable });
   readiness = await waitForCodexLaunchReady(port, options);
@@ -326,6 +328,10 @@ export async function restartCodex(port, options = {}) {
 
 export async function isCodexLaunchReady(port, options = {}) {
   return (await readCodexLaunchReadiness(port, options)).ready;
+}
+
+export async function getCodexLaunchReadiness(port, options = {}) {
+  return readCodexLaunchReadiness(port, options);
 }
 
 export async function activateCodex(providedExecutable = null) {
@@ -394,19 +400,37 @@ export async function isRelayConfigCurrent(path, generation) {
 }
 
 export async function isRelayStateCurrent(path, generation, { wslNative = false } = {}) {
+  return (await readRelayStateReadiness(path, generation, { wslNative })).ready;
+}
+
+async function readRelayStateReadiness(path, generation, { wslNative = false } = {}) {
+  let state;
   try {
-    const state = JSON.parse(await readFile(path, "utf8"));
-    if (generation != null && state?.generation !== generation) return false;
-    if (!Number.isInteger(state?.pid)) return false;
-    if (!Number.isFinite(Number(state?.processStartedAt))) return false;
-    if (wslNative) return isWslProcessCurrent(state);
+    state = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    return { ready: false, reason: `状态文件不可读：${error.code ?? error.message}` };
+  }
+  if (generation != null && state?.generation !== generation) {
+    return { ready: false, reason: "generation 不匹配" };
+  }
+  if (!Number.isInteger(state?.pid) || state.pid <= 0) {
+    return { ready: false, reason: "PID 无效" };
+  }
+  if (wslNative) return readWslProcessReadiness(state);
+  if (!Number.isFinite(Number(state?.processStartedAt))) {
+    return { ready: false, reason: "进程启动时间无效" };
+  }
+  try {
     process.kill(state.pid, 0);
     const processStartedAt = await readProcessStartedAt(state.pid);
-    if (!Number.isFinite(processStartedAt)) return false;
-    return Math.abs(processStartedAt - Number(state.processStartedAt)) <=
+    if (!Number.isFinite(processStartedAt)) {
+      return { ready: false, reason: "无法读取进程启动时间" };
+    }
+    const ready = Math.abs(processStartedAt - Number(state.processStartedAt)) <=
       RELAY_PROCESS_START_TIME_TOLERANCE_MS;
-  } catch {
-    return false;
+    return { ready, reason: ready ? null : "进程启动时间不匹配" };
+  } catch (error) {
+    return { ready: false, reason: `进程不存在或不可访问：${error.code ?? error.message}` };
   }
 }
 
@@ -431,29 +455,69 @@ export async function codexRunsInWindowsSubsystemForLinux() {
   return false;
 }
 
-async function isWslProcessCurrent(state) {
+async function readWslProcessReadiness(state) {
   const processId = Number(state.pid);
-  if (!Number.isInteger(processId) || processId <= 0) return false;
   const script = [
+    "set -eu",
     `process_id=${processId}`,
     'test -r "/proc/$process_id/stat"',
-    'boot_seconds=$(awk \'/btime/ { print $2; exit }\' /proc/stat)',
-    'start_ticks=$(awk \'{ print $22; exit }\' "/proc/$process_id/stat")',
-    'clock_ticks=$(getconf CLK_TCK)',
-    'printf "%s %s %s\\n" "$boot_seconds" "$start_ticks" "$clock_ticks"',
+    'boot_id=$(cat /proc/sys/kernel/random/boot_id)',
+    'stat_line=$(cat "/proc/$process_id/stat")',
+    'stat_fields=${stat_line##*) }',
+    'set -- $stat_fields',
+    'shift 19',
+    'start_ticks=$1',
+    'printf "%s %s\\n" "$boot_id" "$start_ticks"',
   ].join("; ");
-  const { stdout } = await execFileAsync("wsl.exe", ["-e", "sh", "-c", script])
-    .catch(() => ({ stdout: "" }));
-  const [bootSeconds, startTicks, clockTicks] = String(stdout)
-    .trim()
-    .split(/\s+/)
-    .map(Number);
-  if (![bootSeconds, startTicks, clockTicks].every(Number.isFinite) || clockTicks <= 0) {
-    return false;
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync("wsl.exe", ["-e", "sh", "-c", script]));
+  } catch (error) {
+    return { ready: false, reason: `WSL 进程查询失败：${error.code ?? error.message}` };
   }
-  const processStartedAt = (bootSeconds + startTicks / clockTicks) * 1000;
-  return Math.abs(processStartedAt - Number(state.processStartedAt)) <=
+  const [bootId, startTicksText] = String(stdout).trim().split(/\s+/);
+  const processStartTicks = Number(startTicksText);
+  if (!bootId || !Number.isSafeInteger(processStartTicks) || processStartTicks < 0) {
+    return { ready: false, reason: "WSL 进程身份输出无效" };
+  }
+  if (Number(state.version) >= RELAY_STATE_VERSION) {
+    if (!state.bootId || !Number.isSafeInteger(Number(state.processStartTicks))) {
+      return { ready: false, reason: "WSL 稳定进程身份缺失" };
+    }
+    if (state.bootId !== bootId) {
+      return { ready: false, reason: "WSL boot_id 不匹配" };
+    }
+    if (Number(state.processStartTicks) !== processStartTicks) {
+      return { ready: false, reason: "WSL 进程启动 ticks 不匹配" };
+    }
+    return { ready: true, reason: null };
+  }
+  if (!Number.isFinite(Number(state.processStartedAt))) {
+    return { ready: false, reason: "旧版 WSL 进程启动时间无效" };
+  }
+  const legacyScript = [
+    "set -eu",
+    "boot_seconds=$(awk '/btime/ { print $2; exit }' /proc/stat)",
+    "clock_ticks=$(getconf CLK_TCK)",
+    'printf "%s %s\\n" "$boot_seconds" "$clock_ticks"',
+  ].join("; ");
+  let legacyStdout;
+  try {
+    ({ stdout: legacyStdout } = await execFileAsync(
+      "wsl.exe",
+      ["-e", "sh", "-c", legacyScript],
+    ));
+  } catch (error) {
+    return { ready: false, reason: `旧版 WSL 时间查询失败：${error.code ?? error.message}` };
+  }
+  const [bootSeconds, clockTicks] = String(legacyStdout).trim().split(/\s+/).map(Number);
+  if (![bootSeconds, clockTicks].every(Number.isFinite) || clockTicks <= 0) {
+    return { ready: false, reason: "旧版 WSL 时间输出无效" };
+  }
+  const processStartedAt = (bootSeconds + processStartTicks / clockTicks) * 1000;
+  const ready = Math.abs(processStartedAt - Number(state.processStartedAt)) <=
     RELAY_PROCESS_START_TIME_TOLERANCE_MS;
+  return { ready, reason: ready ? null : "旧版 WSL 进程启动时间不匹配" };
 }
 
 async function readProcessStartedAt(processId) {
@@ -840,27 +904,45 @@ async function waitForCodexLaunchReady(port, options, { timeoutMs = 20_000 } = {
 async function readCodexLaunchReadiness(port, options = {}) {
   const debugReady = await isCodexDebugPortReady(port, { timeoutMs: 1_000 });
   const relay = options?.relay;
+  const relayRequired = Boolean(relay && !relay.expectAbsent);
+  let relayConfigReady = true;
+  let relayStateReady = true;
+  let relayStateReason = null;
   let relayReady = true;
-  if (relay && !relay.expectAbsent) {
-    const configReady = !relay.configPath ||
+  if (relayRequired) {
+    relayConfigReady = !relay.configPath ||
       await isRelayConfigCurrent(relay.configPath, relay.generation);
-    const stateReady = !relay.statePath ||
-      await isRelayStateCurrent(relay.statePath, relay.generation, {
+    const relayStateReadiness = !relay.statePath
+      ? { ready: true, reason: null }
+      : await readRelayStateReadiness(relay.statePath, relay.generation, {
         wslNative: relay.wslNative === true,
       });
-    relayReady = configReady && stateReady;
+    relayStateReady = relayStateReadiness.ready;
+    relayStateReason = relayStateReadiness.reason;
+    relayReady = relayConfigReady && relayStateReady;
   }
   return {
     ready: debugReady && relayReady,
     debugReady,
     relayReady,
+    relayRequired,
+    relayConfigReady,
+    relayStateReady,
+    relayStateReason,
   };
 }
 
 function formatCodexReadinessError(port, readiness) {
   const debugStatus = readiness.debugReady ? "正常" : "不可用";
-  const relayStatus = readiness.relayReady ? "正常" : "未就绪";
-  return `Codex 启动后未就绪：调试端口 ${port}=${debugStatus}，模型中继=${relayStatus}`;
+  if (!readiness.relayRequired) {
+    return `Codex 启动后未就绪：调试端口 ${port}=${debugStatus}，模型中继=不要求`;
+  }
+  const relayConfigStatus = readiness.relayConfigReady ? "正常" : "未就绪";
+  const relayStateStatus = readiness.relayStateReady
+    ? "正常"
+    : `未就绪（${readiness.relayStateReason ?? "未知原因"}）`;
+  return `Codex 启动后未就绪：调试端口 ${port}=${debugStatus}，` +
+    `模型中继配置=${relayConfigStatus}，模型中继进程=${relayStateStatus}`;
 }
 
 function delay(ms) {

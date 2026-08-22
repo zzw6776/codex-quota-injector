@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 87;
+export const WIDGET_RUNTIME_VERSION = 91;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -545,7 +545,18 @@ export function installQuotaWidget(
         retained.map((usage) => [String(usage.turnId), usage]),
       );
     }
-    const usageItems = [...state.conversationUsageByTurn.values()];
+    const usageGroups = new Map();
+    for (const usage of [...state.conversationUsageByTurn.values()]
+      .sort((left, right) => Number(left?.updatedAt) - Number(right?.updatedAt))) {
+      const hostTurnId = String(usage?.isSubagentSummary ? usage.parentTurnId : usage?.turnId ?? "");
+      const group = usageGroups.get(hostTurnId) ?? [];
+      group.push(usage);
+      usageGroups.set(hostTurnId, group);
+    }
+    const usageItems = [...usageGroups.values()].flatMap((group) => group.sort((left, right) =>
+      Number(Boolean(left?.completed)) - Number(Boolean(right?.completed)) ||
+      Number(Boolean(left?.isSubagentSummary)) - Number(Boolean(right?.isSubagentSummary)) ||
+      Number(left?.updatedAt) - Number(right?.updatedAt)));
     bindConversationObserver();
     if (state.conversationDomDirty) {
       state.conversationTurnNodes = new Map([...document.querySelectorAll("[data-content-search-turn-key]")]
@@ -557,12 +568,16 @@ export function installQuotaWidget(
 
     for (const usage of usageItems) {
       const turnId = String(usage?.turnId ?? "");
-      const turnNode = turnNodes.get(turnId);
+      const hostTurnId = String(usage?.isSubagentSummary ? usage.parentTurnId : turnId);
+      const turnNode = turnNodes.get(hostTurnId);
       if (!turnId || !turnNode) continue;
       visibleTurnIds.add(turnId);
       const host = turnNode.firstElementChild ?? turnNode;
       let line = state.conversationUsageLines.get(turnId);
-      if (!line?.isConnected) line = turnNode.querySelector("[data-codex-token-usage]");
+      if (!line?.isConnected) {
+        line = [...turnNode.querySelectorAll("[data-codex-token-usage]")]
+          .find((candidate) => candidate.getAttribute("data-codex-token-usage") === turnId);
+      }
       if (!line) {
         line = document.createElement("div");
         line.setAttribute("data-codex-token-usage", turnId);
@@ -591,11 +606,14 @@ export function installQuotaWidget(
       state.conversationUsageLines.set(turnId, line);
       placeConversationTokenUsageLine(line, host);
       line.__codexTokenUsage = usage;
+      line.style.marginLeft = "0";
+      const subagentLabel = conversationSubagentLabel(usage);
       const hasUsage = Number(usage.totalTokens) > 0;
       if (!hasUsage) {
-        const summary = usage.completed
+        const statusText = usage.completed
           ? "本轮未获取到 Token 数据 · 价格无法计算"
           : "等待 Token 数据 · 价格待计算";
+        const summary = subagentLabel ? `${subagentLabel} · ${statusText}` : statusText;
         if (line.textContent !== summary) line.textContent = summary;
         line.removeAttribute("title");
         if (line.getAttribute("aria-label") !== summary) line.setAttribute("aria-label", summary);
@@ -609,8 +627,10 @@ export function installQuotaWidget(
       const generationRate = Number(usage.totalGenerationRate) > 0
         ? `速率 ${formatGenerationRate(usage.totalGenerationRate)}`
         : null;
+      const tokenLabel = `${usage.completed ? "本轮" : "实时"} Token`;
       const summary = [
-        `${usage.completed ? "本轮" : "实时"} Token ${formatTokenCount(usage.totalTokens)}`,
+        ...(subagentLabel ? [subagentLabel] : []),
+        `${tokenLabel} ${formatTokenCount(usage.totalTokens)}`,
         `输入 ${formatTokenCount(usage.inputTokens)}`,
         `缓存输入 ${formatTokenCount(usage.cachedInputTokens)}`,
         `输出 ${formatTokenCount(usage.outputTokens)}`,
@@ -651,16 +671,19 @@ export function installQuotaWidget(
       ? "0 10px 28px rgba(0,0,0,.18)"
       : "0 10px 28px rgba(0,0,0,.38)";
     const cost = usage.cost ?? {};
+    const subagentLabel = conversationSubagentLabel(usage);
     tooltip.replaceChildren();
 
     const header = document.createElement("div");
     header.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:8px;font-weight:650";
     const title = document.createElement("span");
-    title.textContent = cost.normalizedModel || cost.requestedModel || usage.model || "Token 费用明细";
+    const modelLabel = cost.normalizedModel || cost.requestedModel || usage.model || "Token 费用明细";
+    title.textContent = subagentLabel ? `${subagentLabel} · ${modelLabel}` : modelLabel;
     const total = document.createElement("strong");
     total.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
+    const totalLabel = usage.completed ? (cost.label ?? "本轮费用") : "实时估算";
     total.textContent = cost.available
-      ? `${usage.completed ? (cost.label ?? "本轮费用") : "实时估算"} ${formatCny(cost.totalCny)}`
+      ? `${totalLabel} ${formatCny(cost.totalCny)}`
       : "费用暂不可算";
     header.append(title, total);
     tooltip.append(header);
@@ -773,6 +796,13 @@ export function installQuotaWidget(
       pricing.textContent = cost.reason || "当前模型没有可用价格";
     }
     footer.append(pricing);
+    if (usage.isSubagent) {
+      const scope = document.createElement("span");
+      scope.textContent = usage.isSubagentSummary
+        ? "该行仅汇总此子智能体，未并入主智能体本轮数据"
+        : "该行是子智能体本轮数据；父任务页面另有独立汇总行";
+      footer.append(scope);
+    }
     if (cost.exchangeRate) {
       const exchange = document.createElement("span");
       exchange.textContent = `汇率 1 USD = ${formatExchangeRate(cost.exchangeRate.rate)} CNY · ${cost.exchangeRate.date} · ${cost.exchangeRate.source}${cost.exchangeRate.fallback ? "（内置备用值）" : ""}`;
@@ -891,6 +921,16 @@ export function installQuotaWidget(
       costCny: 0,
       available: true,
     });
+  }
+
+  function conversationSubagentLabel(usage) {
+    if (!usage?.isSubagent) return "";
+    const nickname = String(usage.agentNickname ?? "").trim();
+    const path = String(usage.agentPath ?? "").trim();
+    const pathName = path.split("/").filter(Boolean).at(-1) ?? "";
+    const identity = nickname || pathName;
+    const depth = Math.max(1, Number(usage.agentDepth) || 1);
+    return `${depth > 1 ? `子智能体 L${depth}` : "子智能体"}${identity ? ` ${identity}` : ""}`;
   }
 
   function getConversationTooltipTiers(cost, usage) {
@@ -1726,7 +1766,11 @@ export function installQuotaWidget(
       scheduleConversationTokenUsageRender();
     }
   });
-  state.mountObserver = new MutationObserver(() => {
+  state.mountObserver = new MutationObserver((mutations) => {
+    if (mutationTouchesConversation(mutations)) {
+      state.conversationDomDirty = true;
+      scheduleConversationTokenUsageRender();
+    }
     if (state.mountCheckFrame != null) return;
     state.mountCheckFrame = window.requestAnimationFrame(() => {
       state.mountCheckFrame = null;

@@ -26,7 +26,7 @@ async function runLauncher() {
   const { runInjector } = await import("./injector.mjs");
   const {
     activateCodex,
-    isCodexLaunchReady,
+    getCodexLaunchReadiness,
     isCodexRunning,
     restartCodex,
   } = await import("./platform.mjs");
@@ -74,7 +74,12 @@ async function runLauncher() {
       console.warn(`[launcher] ${error.message}`);
       return;
     }
-    if (!instanceLock) return;
+    if (!instanceLock) {
+      console.log(
+        `[launcher] 已有注入器保留运行，当前 ${instanceMode} v${instanceVersion} 未接管`,
+      );
+      return;
+    }
 
     await contextManager.initialize();
     await deepSeekManager.initialize();
@@ -101,8 +106,31 @@ async function runLauncher() {
 
   async function ensureCodexDebugMode(cdpPort, options) {
     const isRunning = await isCodexRunning();
-    const ready = isRunning && await isCodexLaunchReady(cdpPort, options);
-    if (ready) {
+    const readiness = isRunning
+      ? await getCodexLaunchReadiness(cdpPort, options)
+      : {
+        ready: false,
+        debugReady: false,
+        relayRequired: Boolean(options?.relay && !options.relay.expectAbsent),
+        relayConfigReady: false,
+        relayStateReady: false,
+        relayStateReason: "Codex 未运行",
+      };
+    const relayConfigStatus = readiness.relayRequired
+      ? readiness.relayConfigReady ? "正常" : "未就绪"
+      : "不要求";
+    const relayStateStatus = readiness.relayRequired
+      ? readiness.relayStateReady
+        ? "正常"
+        : `未就绪（${readiness.relayStateReason ?? "未知原因"}）`
+      : "不要求";
+    console.log(
+      `[launcher] Codex 启动条件：进程=${isRunning ? "运行中" : "未运行"}，` +
+      `调试端口 ${cdpPort}=${readiness.debugReady ? "正常" : "不可用"}，` +
+      `模型中继配置=${relayConfigStatus}，模型中继进程=${relayStateStatus}，` +
+      `决策=${readiness.ready ? "复用并激活" : "重启"}`,
+    );
+    if (readiness.ready) {
       await activateCodex();
       console.log(`[launcher] Codex 已处于调试及模型中继模式（端口 ${cdpPort}）`);
       return;

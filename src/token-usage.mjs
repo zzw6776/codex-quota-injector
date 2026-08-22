@@ -20,7 +20,7 @@ import {
   TokenPricingManager,
 } from "./token-pricing.mjs";
 
-const CACHE_VERSION = 7;
+const CACHE_VERSION = 9;
 const DISCOVERY_INTERVAL_MS = 5_000;
 const MAX_VIEW_TURNS = 120;
 const MAX_STORED_TURNS = 2_000;
@@ -35,6 +35,7 @@ const CACHE_PERSIST_DELAY_MS = 10_000;
 const UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS = 10_000;
 const UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY = 4;
 const ACTIVE_THREAD_HINT_TTL_MS = 5 * 60 * 1000;
+const MAX_ROLLOUT_METADATA_BYTES = 4 * 1024 * 1024;
 const TOKEN_FIELDS = [
   "input_tokens",
   "cached_input_tokens",
@@ -278,6 +279,8 @@ export class TokenUsageManager {
     this.activeThreadHint = false;
     this.activeThreadHintAt = 0;
     this.rolloutPathsByThread = new Map();
+    this.rolloutMetadataByPath = new Map();
+    this.rolloutMetadataByThread = new Map();
     this.rolloutReconcileRequested = false;
     this.rolloutReconcilePromise = null;
     this.rolloutReadPromises = new Map();
@@ -302,6 +305,7 @@ export class TokenUsageManager {
     this.eventWatchTimer = null;
     this.unknownRolloutCheckTimer = null;
     this.lastUnknownRolloutCheckAt = 0;
+    this.loggedSubagentModelTransitions = new Set();
     this.changeListeners = new Set();
     this.closed = false;
     this.removePricingListener = this.pricingManager.onChange?.(() => {
@@ -401,13 +405,14 @@ export class TokenUsageManager {
         pendingTurns: historyPendingTurns,
       });
     }
-    const mappedTurns = [...this.turns.values()]
+    const mappedTurns = buildDisplayTurns([...this.turns.values()])
       // `activeThreadId` identifies the rollout file currently being tailed;
       // it is not a single-session view of the app. Multiple threads can be
       // running at the same time, so every live turn, including a turn still
       // waiting for its first usage event, must remain
       // available to the widget regardless of which thread was started last.
-      .filter((turn) => turn.totalTokens > 0 || (turn.source === "event" && turn.updatedAt > 0))
+      .filter((turn) => turn.totalTokens > 0 ||
+        (["event", "subagent"].includes(turn.source) && turn.updatedAt > 0))
       .sort((left, right) => left.updatedAt - right.updatedAt)
       .map((turn) => {
         const hasUsage = turn.totalTokens > 0;
@@ -440,6 +445,49 @@ export class TokenUsageManager {
           },
         };
       });
+    const subagentRootByThread = new Map();
+    for (const metadata of this.rolloutMetadataByThread.values()) {
+      if (metadata.isSubagent && metadata.threadId && metadata.rootThreadId) {
+        subagentRootByThread.set(metadata.threadId, metadata.rootThreadId);
+      }
+    }
+    for (const turn of this.turns.values()) {
+      if (turn.isSubagent && turn.threadId && turn.rootThreadId) {
+        subagentRootByThread.set(turn.threadId, turn.rootThreadId);
+      }
+    }
+    const subagentCumulativeByRoot = new Map();
+    for (const [threadId, rootThreadId] of subagentRootByThread) {
+      const subagentCost = cumulativeCosts.get(threadId);
+      if (!subagentCost) continue;
+      const rootCost = subagentCumulativeByRoot.get(rootThreadId) ?? {
+        totalCny: 0,
+        pendingTurns: 0,
+      };
+      rootCost.totalCny += positiveNumber(subagentCost.totalCny);
+      rootCost.pendingTurns += positiveInteger(subagentCost.pendingTurns);
+      subagentCumulativeByRoot.set(rootThreadId, rootCost);
+    }
+    for (const turn of mappedTurns) {
+      let cumulativeCost = null;
+      if (turn.isSubagentSummary) {
+        cumulativeCost = cumulativeCosts.get(turn.threadId) ?? null;
+      } else if (!turn.isSubagent) {
+        const subagentCost = subagentCumulativeByRoot.get(turn.rootThreadId || turn.threadId);
+        if (subagentCost) {
+          cumulativeCost = {
+            totalCny: positiveNumber(turn.cost.cumulativeCny) +
+              positiveNumber(subagentCost.totalCny),
+            pendingTurns: positiveInteger(turn.cost.cumulativePendingTurns) +
+              positiveInteger(subagentCost.pendingTurns),
+          };
+        }
+      }
+      if (!cumulativeCost) continue;
+      turn.cost.cumulativeAvailable = positiveInteger(cumulativeCost.pendingTurns) === 0;
+      turn.cost.cumulativeCny = positiveNumber(cumulativeCost.totalCny);
+      turn.cost.cumulativePendingTurns = positiveInteger(cumulativeCost.pendingTurns);
+    }
     // Keep simultaneous in-progress turns, but cap both live and completed
     // views so a missed completion event cannot grow the UI forever.
     const liveTurns = mappedTurns
@@ -474,6 +522,9 @@ export class TokenUsageManager {
     this.#closeRolloutWorker();
     this.rolloutReconcileRequested = false;
     this.rolloutReadPromises.clear();
+    this.rolloutMetadataByPath.clear();
+    this.rolloutMetadataByThread.clear();
+    this.loggedSubagentModelTransitions.clear();
     this.historicalCostCache.clear();
     // Keep cache state alive until an in-flight asynchronous persistence has
     // finished; clearing these maps here could make that write serialize an
@@ -547,6 +598,10 @@ export class TokenUsageManager {
       ? this.fileStates.get(this.activeThreadId)
       : null;
     if (activeState) await this.#readAppendedRollout(activeState);
+    if (this.#applySubagentMetadataToTurns()) {
+      this.#markCacheDirty();
+      this.#invalidateViewModel();
+    }
     this.#pruneCompletedTurns();
     this.#queueCachePersist();
     this.error = null;
@@ -754,6 +809,7 @@ export class TokenUsageManager {
     if (event.type === "turn-started") {
       const turn = this.turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
       turn.source = "event";
+      if (!turn.startedAt) turn.startedAt = updatedAt;
       if (model) {
         fillUnknownSegmentModels(turn, model, event.modelSource ?? "turn-started");
         setTurnModel(turn, model, event.modelSource ?? "turn-started");
@@ -771,6 +827,7 @@ export class TokenUsageManager {
       // may have been loaded first. Preserve its counters and append only a
       // genuinely newer event delta instead of replacing the whole turn.
       turn.source = "event";
+      if (!turn.startedAt) turn.startedAt = updatedAt;
       const modelSource = event.modelSource ?? "thread";
       const incomingTotal = positiveNumber(event.tokenUsage?.total?.totalTokens);
       const previousTotal = positiveNumber(turn.cumulativeTotalTokens);
@@ -809,6 +866,7 @@ export class TokenUsageManager {
     if (event.type === "turn-completed") {
       const turn = this.turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
       turn.source = "event";
+      if (!turn.startedAt) turn.startedAt = updatedAt;
       if (model && event.modelSource !== "rerouted") {
         fillUnknownSegmentModels(turn, model, event.modelSource ?? "completed");
       }
@@ -823,13 +881,31 @@ export class TokenUsageManager {
   async #refreshRolloutCatalog() {
     const paths = await collectRolloutFiles(join(this.codexHome, "sessions"), 4);
     this.rolloutPathsByThread.clear();
+    const discoveredPaths = new Set(paths);
+    for (const path of this.rolloutMetadataByPath.keys()) {
+      if (!discoveredPaths.has(path)) this.rolloutMetadataByPath.delete(path);
+    }
+    const metadataEntries = await Promise.all(paths.map(async (path) => {
+      let metadata = this.rolloutMetadataByPath.get(path);
+      if (!metadata) {
+        metadata = await readRolloutSessionMetadata(path);
+        if (metadata) this.rolloutMetadataByPath.set(path, metadata);
+      }
+      return { path, metadata };
+    }));
+    this.rolloutMetadataByThread.clear();
     const discoveredThreadIds = new Set();
-    for (const path of paths) {
-      const threadId = threadIdFromRolloutPath(path);
+    for (const { path, metadata } of metadataEntries) {
+      const threadId = metadata?.threadId ?? threadIdFromRolloutPath(path);
       if (threadId) {
         discoveredThreadIds.add(threadId);
         this.rolloutPathsByThread.set(threadId, path);
+        if (metadata) this.rolloutMetadataByThread.set(threadId, metadata);
       }
+    }
+    if (this.#applySubagentMetadataToTurns()) {
+      this.#markCacheDirty();
+      this.#invalidateViewModel();
     }
     for (const [threadId] of this.fileStates) {
       if (!discoveredThreadIds.has(threadId)) {
@@ -868,6 +944,85 @@ export class TokenUsageManager {
   async #ensureActiveRollout() {
     const threadId = this.activeThreadId;
     return this.#ensureRolloutState(threadId);
+  }
+
+  #applySubagentMetadataToTurns() {
+    let changed = false;
+    const metadataItems = [...this.rolloutMetadataByThread.values()]
+      .filter((metadata) => metadata.isSubagent)
+      .sort((left, right) => left.agentDepth - right.agentDepth);
+    for (const metadata of metadataItems) {
+      const agentTurns = [...this.turns.values()]
+        .filter((turn) => turn.threadId === metadata.threadId)
+        .sort((left, right) =>
+          positiveNumber(left.startedAt) - positiveNumber(right.startedAt) ||
+          positiveNumber(left.updatedAt) - positiveNumber(right.updatedAt));
+      if (agentTurns.length === 0) continue;
+      for (let index = 1; index < agentTurns.length; index += 1) {
+        const previousTurn = agentTurns[index - 1];
+        const turn = agentTurns[index];
+        const previousModel = nonEmptyString(previousTurn.model);
+        const model = nonEmptyString(turn.model);
+        if (!previousModel || !model || previousModel === model) continue;
+        const transitionKey = `${metadata.threadId}\u0000${previousTurn.turnId}\u0000${turn.turnId}`;
+        if (this.loggedSubagentModelTransitions.has(transitionKey)) continue;
+        this.loggedSubagentModelTransitions.add(transitionKey);
+        console.warn(
+          `[token-usage] 子智能体模型发生变化：thread=${metadata.threadId}，` +
+          `previousTurn=${previousTurn.turnId}，previousModel=${previousModel}，` +
+          `turn=${turn.turnId}，model=${model}`,
+        );
+      }
+      for (const turn of agentTurns) {
+        const previousParentTurnId = nonEmptyString(turn.parentTurnId);
+        const parentTurnId = this.#resolveSubagentParentTurnId(metadata, turn);
+        const nextValues = {
+          taskKey: metadata.threadId,
+          isSubagent: true,
+          rootThreadId: metadata.rootThreadId,
+          parentThreadId: metadata.parentThreadId,
+          parentTurnId: parentTurnId ?? "",
+          agentPath: metadata.agentPath,
+          agentNickname: metadata.agentNickname,
+          agentDepth: metadata.agentDepth,
+        };
+        for (const [key, value] of Object.entries(nextValues)) {
+          if (turn[key] === value) continue;
+          turn[key] = value;
+          changed = true;
+        }
+        if (parentTurnId && previousParentTurnId !== parentTurnId) {
+          console.log(
+            `[token-usage] 子智能体 turn 归属${previousParentTurnId ? "已修正" : "已确认"}：` +
+            `thread=${metadata.threadId}，turn=${turn.turnId}，` +
+            `parentTurn=${parentTurnId}，model=${nonEmptyString(turn.model) ?? "unknown"}` +
+            `${previousParentTurnId ? `，previousParentTurn=${previousParentTurnId}` : ""}`,
+          );
+        }
+      }
+    }
+    return changed;
+  }
+
+  #resolveSubagentParentTurnId(metadata, agentTurn) {
+    const startedAt = positiveNumber(agentTurn.startedAt) || positiveNumber(agentTurn.updatedAt);
+    const parentMetadata = this.rolloutMetadataByThread.get(metadata.parentThreadId);
+    if (parentMetadata?.isSubagent) {
+      const parentAgentTurns = [...this.turns.values()]
+        .filter((turn) => turn.threadId === parentMetadata.threadId)
+        .sort((left, right) =>
+          (positiveNumber(right.startedAt) || positiveNumber(right.updatedAt)) -
+          (positiveNumber(left.startedAt) || positiveNumber(left.updatedAt)));
+      const parentAgentTurn = findTurnAtTimestamp(parentAgentTurns, startedAt);
+      const inheritedParentTurnId = nonEmptyString(parentAgentTurn?.parentTurnId);
+      if (inheritedParentTurnId) return inheritedParentTurnId;
+    }
+    const rootTurns = [...this.turns.values()]
+      .filter((turn) => turn.threadId === metadata.rootThreadId && !turn.isSubagent)
+      .sort((left, right) =>
+        (positiveNumber(right.startedAt) || positiveNumber(right.updatedAt)) -
+        (positiveNumber(left.startedAt) || positiveNumber(left.updatedAt)));
+    return findTurnAtTimestamp(rootTurns, startedAt)?.turnId ?? null;
   }
 
   async #ensureRolloutState(threadId) {
@@ -1074,6 +1229,7 @@ export class TokenUsageManager {
       const existing = this.turns.get(state.currentTurnId);
       const turn = existing ?? emptyTurn(state.currentTurnId, state.threadId, "rollout", state.path);
       const model = nonEmptyString(record.payload.model);
+      if (!turn.startedAt) turn.startedAt = parseTimestamp(record.timestamp);
       if (model) state.threadModel = model;
       setTurnModel(turn, model, "turn-context");
       fillUnknownSegmentModels(turn, model, "turn-context");
@@ -1111,6 +1267,7 @@ export class TokenUsageManager {
         "rollout",
         state.path,
       );
+      if (!turn.startedAt) turn.startedAt = parseTimestamp(record.timestamp);
       const model = nonEmptyString(record.payload.model) ?? state.threadModel;
       setTurnModel(turn, model, "thread-settings");
       fillUnknownSegmentModels(turn, model, "thread-settings");
@@ -1428,6 +1585,85 @@ export class TokenUsageManager {
   }
 }
 
+function buildDisplayTurns(turns) {
+  const subagentGroups = new Map();
+  for (const turn of turns) {
+    if (!turn.isSubagent) continue;
+    const key = `${turn.threadId}\u0000${turn.parentTurnId || ""}`;
+    const group = subagentGroups.get(key) ?? [];
+    group.push(turn);
+    subagentGroups.set(key, group);
+  }
+  return [
+    ...turns,
+    ...[...subagentGroups.values()].map(summarizeSubagentTurns),
+  ];
+}
+
+function findTurnAtTimestamp(turns, timestamp) {
+  const enclosing = turns.find((turn) => {
+    const turnStartedAt = positiveNumber(turn.startedAt) || positiveNumber(turn.updatedAt);
+    return turnStartedAt <= timestamp &&
+      (!turn.completed || positiveNumber(turn.updatedAt) >= timestamp);
+  });
+  return enclosing ??
+    turns.find((turn) =>
+      (positiveNumber(turn.startedAt) || positiveNumber(turn.updatedAt)) <= timestamp) ??
+    turns[0] ?? null;
+}
+
+function summarizeSubagentTurns(turns) {
+  const ordered = [...turns].sort((left, right) =>
+    positiveNumber(left.startedAt) - positiveNumber(right.startedAt) ||
+    positiveNumber(left.updatedAt) - positiveNumber(right.updatedAt));
+  const first = ordered[0];
+  const summary = emptyTurn(
+    `subagent:${first.threadId}:${first.parentTurnId || "unassigned"}`,
+    first.threadId,
+    "subagent",
+  );
+  summary.taskKey = summary.turnId;
+  summary.isSubagent = true;
+  summary.isSubagentSummary = true;
+  summary.parentThreadId = first.parentThreadId;
+  summary.parentTurnId = first.parentTurnId;
+  summary.agentPath = first.agentPath;
+  summary.agentNickname = first.agentNickname;
+  summary.agentDepth = first.agentDepth;
+  summary.startedAt = ordered
+    .map((turn) => positiveNumber(turn.startedAt) || positiveNumber(turn.updatedAt))
+    .filter(Boolean)
+    .sort((left, right) => left - right)[0] ?? 0;
+  summary.updatedAt = Math.max(...ordered.map((turn) => positiveNumber(turn.updatedAt)), 0);
+  summary.completed = ordered.every((turn) => turn.completed);
+  summary.status = summary.completed
+    ? ordered.some((turn) => turn.status === "failed")
+      ? "failed"
+      : ordered.some((turn) => turn.status === "interrupted")
+        ? "interrupted"
+        : "completed"
+    : null;
+  for (const turn of ordered) {
+    for (const field of TOKEN_FIELDS) {
+      const publicField = toCamelCase(field);
+      summary[publicField] += positiveNumber(turn[publicField]);
+    }
+    for (const segment of turn.segments) mergeUsageSegment(summary.segments, segment);
+    summary.costRevision += positiveInteger(turn.costRevision);
+    summary.modelContextWindow = Math.max(
+      summary.modelContextWindow,
+      positiveNumber(turn.modelContextWindow),
+    );
+  }
+  summary.cumulativeTotalTokens = summary.totalTokens;
+  const models = [...new Set(ordered.map((turn) => nonEmptyString(turn.model)).filter(Boolean))];
+  summary.model = models.length === 1 ? models[0] : models.length > 1 ? "multiple" : "";
+  summary.modelSource = "subagent";
+  const activeTurn = [...ordered].reverse().find((turn) => !turn.completed) ?? ordered.at(-1);
+  summary.totalGenerationRate = positiveNumber(activeTurn?.totalGenerationRate) || null;
+  return summary;
+}
+
 function emptyTurn(turnId, threadId, source, rolloutPath = "") {
   return {
     turnId,
@@ -1435,6 +1671,14 @@ function emptyTurn(turnId, threadId, source, rolloutPath = "") {
     taskKey: threadId,
     source,
     rolloutPath,
+    isSubagent: false,
+    isSubagentSummary: false,
+    rootThreadId: threadId,
+    parentThreadId: "",
+    parentTurnId: "",
+    agentPath: "",
+    agentNickname: "",
+    agentDepth: 0,
     completed: false,
     status: null,
     inputTokens: 0,
@@ -1451,6 +1695,7 @@ function emptyTurn(turnId, threadId, source, rolloutPath = "") {
     totalGenerationRate: null,
     costRevision: 0,
     segments: [],
+    startedAt: 0,
     updatedAt: 0,
   };
 }
@@ -1590,6 +1835,16 @@ function normalizeCachedTurn(value) {
   turn.generationStartAt = positiveNumber(value.generationStartAt);
   turn.totalGenerationRate = positiveNumber(value.totalGenerationRate) || null;
   turn.costRevision = positiveInteger(value.costRevision);
+  turn.isSubagent = Boolean(value.isSubagent);
+  turn.isSubagentSummary = false;
+  turn.rootThreadId = String(value.rootThreadId ?? threadId);
+  turn.parentThreadId = String(value.parentThreadId ?? "");
+  turn.parentTurnId = String(value.parentTurnId ?? "");
+  turn.agentPath = String(value.agentPath ?? "");
+  turn.agentNickname = String(value.agentNickname ?? "");
+  turn.agentDepth = positiveInteger(value.agentDepth);
+  turn.taskKey = nonEmptyString(value.taskKey) ?? threadId;
+  turn.startedAt = positiveNumber(value.startedAt);
   turn.cumulativeTotalTokens = positiveNumber(value.cumulativeTotalTokens);
   turn.modelContextWindow = positiveNumber(value.modelContextWindow);
   turn.updatedAt = positiveNumber(value.updatedAt);
@@ -1748,6 +2003,64 @@ async function collectRolloutFiles(root, depth) {
     }
   }));
   return paths;
+}
+
+async function readRolloutSessionMetadata(path) {
+  let info;
+  try {
+    info = await stat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  const length = Math.min(info.size, MAX_ROLLOUT_METADATA_BYTES);
+  if (length <= 0) return null;
+  const handle = await open(path, "r");
+  let content = "";
+  try {
+    let offset = 0;
+    while (offset < length) {
+      const chunkLength = Math.min(READ_CHUNK_BYTES, length - offset);
+      const buffer = Buffer.allocUnsafe(chunkLength);
+      const result = await handle.read(buffer, 0, chunkLength, offset);
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+      content += buffer.subarray(0, result.bytesRead).toString("utf8");
+      const newline = content.indexOf("\n");
+      if (newline >= 0) {
+        content = content.slice(0, newline).replace(/\r$/, "");
+        break;
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+  if (!content) return null;
+  let record;
+  try {
+    record = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (record?.type !== "session_meta" || !record.payload) return null;
+  const payload = record.payload;
+  const threadId = nonEmptyString(payload.id) ?? threadIdFromRolloutPath(path);
+  if (!threadId) return null;
+  const spawn = payload.source?.subagent?.thread_spawn;
+  const isSubagent = payload.thread_source === "subagent" && Boolean(spawn);
+  const parentThreadId = isSubagent ? nonEmptyString(spawn.parent_thread_id) : null;
+  const rootThreadId = isSubagent
+    ? nonEmptyString(payload.session_id) ?? parentThreadId ?? threadId
+    : threadId;
+  return {
+    threadId,
+    rootThreadId,
+    isSubagent,
+    parentThreadId: parentThreadId ?? "",
+    agentPath: isSubagent ? String(spawn.agent_path ?? "") : "",
+    agentNickname: isSubagent ? String(spawn.agent_nickname ?? "") : "",
+    agentDepth: isSubagent ? Math.max(1, positiveInteger(spawn.depth)) : 0,
+  };
 }
 
 async function findLatestRolloutPath(paths) {
