@@ -24,12 +24,12 @@
 
 ### macOS
 
-1. 从 GitHub Actions Artifacts 或 GitHub Releases 下载 `macos-universal.dmg`；
+1. 从 GitHub Actions Artifacts 或 GitHub Releases 下载对应架构的安装包：Apple Silicon 选择 `macos-arm64.dmg`，Intel Mac 选择 `macos-x64.dmg`；
 2. 将 `Codex Quota Injector.app` 拖入“应用程序”；
 3. 双击 `Codex Quota Injector`，它会直接启动官方 Codex；
 4. 额度入口显示在 Codex 左下角账号区域。
 
-安装包同时覆盖 Apple Silicon 和 Intel Mac。当前自动构建使用 ad-hoc 签名，没有 Apple Developer ID 公证；首次打开若被 Gatekeeper 拦截，可在“系统设置 → 隐私与安全性”中允许打开。
+macOS 安装包按架构独立构建，不再合并为 Universal DMG。当前自动构建使用 ad-hoc 签名，没有 Apple Developer ID 公证；首次打开若被 Gatekeeper 拦截，可在“系统设置 → 隐私与安全性”中允许打开。
 
 ### Windows
 
@@ -76,7 +76,7 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。W
 
 GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 
-- 每次提交到 `master`：读取 `package.json` 版本，自动构建对应版本的 macOS Universal DMG 和 Windows x64 Setup，创建或更新 `v版本号` 正式 Release、标记为 Latest，并同时上传到 Actions Artifacts；
+- 每次提交到 `master`：读取 `package.json` 版本，分别构建对应版本的 macOS arm64 DMG、macOS x64 DMG 和 Windows x64 Setup，创建或更新 `v版本号` 正式 Release、标记为 Latest，并同时上传到 Actions Artifacts；
 - Linux job 会预构建 WSL SEA relay，并只把该中间产物交给 Windows 安装包；macOS DMG 不包含 Linux Node 或 WSL relay；
 - 推送 `v*` 标签：标签必须与 `package.json` 版本一致，构建成功后更新同版本 GitHub Release；
 - 支持在 Actions 页面手动触发。

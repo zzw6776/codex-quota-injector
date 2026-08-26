@@ -13,43 +13,30 @@ const executable = resolve(contents, "MacOS", "Codex Quota Injector");
 const resources = resolve(contents, "Resources");
 const worker = resolve(resources, "Codex Quota Injector Worker");
 const launcherSource = resolve(root, "src", "macos-launcher.swift");
-const launcherArm64 = resolve(root, "build", "macos-launcher-arm64");
-const launcherX64 = resolve(root, "build", "macos-launcher-x64");
+const launcher = resolve(root, "build", `macos-launcher-${options.architecture}`);
+const swiftArchitecture = options.architecture === "x64" ? "x86_64" : "arm64";
+const inputExecutable = resolve(options.inputExecutable);
 const dmgPath = resolve(
   releaseDir,
-  `Codex-Quota-Injector-${packageJson.version}-macos-universal.dmg`,
+  `Codex-Quota-Injector-${packageJson.version}-macos-${options.architecture}.dmg`,
 );
 
 await rm(releaseDir, { recursive: true, force: true });
 await mkdir(resolve(contents, "MacOS"), { recursive: true });
 await mkdir(resources, { recursive: true });
 
-execFileSync("/usr/bin/lipo", [
-  "-create",
-  resolve(options.arm64Executable),
-  resolve(options.x64Executable),
-  "-output",
-  worker,
+assertArchitecture(inputExecutable, swiftArchitecture);
+await cp(inputExecutable, worker);
+execFileSync("/usr/bin/xcrun", [
+  "swiftc",
+  "-target",
+  `${swiftArchitecture}-apple-macos12.0`,
+  "-O",
+  launcherSource,
+  "-o",
+  launcher,
 ], { stdio: "inherit" });
-
-for (const [architecture, output] of [["arm64", launcherArm64], ["x86_64", launcherX64]]) {
-  execFileSync("/usr/bin/xcrun", [
-    "swiftc",
-    "-target",
-    `${architecture}-apple-macos12.0`,
-    "-O",
-    launcherSource,
-    "-o",
-    output,
-  ], { stdio: "inherit" });
-}
-execFileSync("/usr/bin/lipo", [
-  "-create",
-  launcherArm64,
-  launcherX64,
-  "-output",
-  executable,
-], { stdio: "inherit" });
+await cp(launcher, executable);
 
 await cp(
   resolve(root, "assets", "AppIcon.icns"),
@@ -80,15 +67,27 @@ function parseOptions(args) {
   const values = {};
   for (let index = 0; index < args.length; index += 1) {
     const key = args[index];
-    if (key === "--arm64-executable") values.arm64Executable = args[++index];
-    if (key === "--x64-executable") values.x64Executable = args[++index];
+    if (key === "--architecture") values.architecture = args[++index];
+    if (key === "--input-executable") values.inputExecutable = args[++index];
     if (key === "--node-license") values.nodeLicense = args[++index];
     if (key === "--output-dir") values.outputDir = args[++index];
   }
-  if (!values.arm64Executable || !values.x64Executable || !values.nodeLicense || !values.outputDir) {
+  if (!values.inputExecutable || !values.nodeLicense || !values.outputDir ||
+    !["arm64", "x64"].includes(values.architecture)) {
     throw new Error("macOS 打包参数不完整");
   }
   return values;
+}
+
+function assertArchitecture(path, expectedArchitecture) {
+  const architectures = execFileSync("/usr/bin/lipo", ["-archs", path], {
+    encoding: "utf8",
+  }).trim().split(/\s+/);
+  if (architectures.length !== 1 || architectures[0] !== expectedArchitecture) {
+    throw new Error(
+      `macOS ${options.architecture} Worker 架构不匹配：${architectures.join(" ") || "未知"}`,
+    );
+  }
 }
 
 function infoPlist(version) {

@@ -18,8 +18,14 @@ env:
 
 jobs:
   macos:
-    name: macOS Universal DMG
+    name: macOS ${{ matrix.architecture }} DMG
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture:
+          - arm64
+          - x64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,41 +47,36 @@ jobs:
           cd build/node-runtimes
           base="https://nodejs.org/dist/v${NODE_RUNTIME_VERSION}"
           curl -fL --retry 3 -O "${base}/SHASUMS256.txt"
-          for arch in arm64 x64; do
-            archive="node-v${NODE_RUNTIME_VERSION}-darwin-${arch}.tar.gz"
-            curl -fL --retry 3 -O "${base}/${archive}"
-            grep " ${archive}$" SHASUMS256.txt | shasum -a 256 -c -
-            tar -xzf "${archive}"
-          done
+          archive="node-v${NODE_RUNTIME_VERSION}-darwin-${{ matrix.architecture }}.tar.gz"
+          curl -fL --retry 3 -O "${base}/${archive}"
+          grep " ${archive}$" SHASUMS256.txt | shasum -a 256 -c -
+          tar -xzf "${archive}"
 
-      - name: Build native injector slices
+      - name: Build native injector
         shell: bash
         run: |
           set -euo pipefail
           npm run build:sea -- \
-            --node-binary "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-arm64/bin/node" \
-            --output "build/native/Codex Quota Injector-arm64"
-          npm run build:sea -- \
-            --node-binary "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-x64/bin/node" \
-            --output "build/native/Codex Quota Injector-x64"
+            --node-binary "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-${{ matrix.architecture }}/bin/node" \
+            --output "build/native/Codex Quota Injector-${{ matrix.architecture }}"
 
-      - name: Package universal DMG
+      - name: Package architecture DMG
         shell: bash
         run: |
           set -euo pipefail
           npm run package:macos -- \
-            --arm64-executable "build/native/Codex Quota Injector-arm64" \
-            --x64-executable "build/native/Codex Quota Injector-x64" \
-            --node-license "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-arm64/LICENSE" \
-            --output-dir "release/macos"
+            --architecture "${{ matrix.architecture }}" \
+            --input-executable "build/native/Codex Quota Injector-${{ matrix.architecture }}" \
+            --node-license "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-${{ matrix.architecture }}/LICENSE" \
+            --output-dir "release/macos-${{ matrix.architecture }}"
 
       - name: Upload macOS package
         uses: actions/upload-artifact@v4
         with:
-          name: codex-quota-injector-macos
+          name: codex-quota-injector-macos-${{ matrix.architecture }}
           retention-days: 30
           if-no-files-found: error
-          path: release/macos/*.dmg
+          path: release/macos-${{ matrix.architecture }}/*.dmg
 
   wsl-relay:
     name: WSL x64 Relay
