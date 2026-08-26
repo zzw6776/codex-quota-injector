@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 91;
+export const WIDGET_RUNTIME_VERSION = 92;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -1334,7 +1334,7 @@ export function installQuotaWidget(
   function renderAccount(account) {
     const windows = Array.isArray(account.windows) ? account.windows : [];
     const quotaHtml = windows.length
-      ? `<div class="window-list">${windows.map((quota, idx) => renderWindow(quota, idx === 0 ? account : null)).join("")}</div>`
+      ? `<div class="window-list">${windows.map((quota, idx) => renderWindow(quota, idx === windows.length - 1 ? account : null)).join("")}</div>`
       : account.credits?.formattedUsd
         ? `<div class="window-list"><div class="window-row"><div class="window-subline"><span class="window-credit">点数：${escapeHtml(account.credits.formattedUsd)}</span></div></div></div>`
         : '<div class="expiry">暂无额度数据</div>';
