@@ -112,19 +112,22 @@ export async function runAppServerRelay() {
   const chatCompatibilityProxy = await startChatCompatibilityProxy(customPlatforms);
 
   const args = [...originalArgs];
-  if (deepSeekEnabled) args.splice(appServerIndex, 0, "-c", PROVIDER_CONFIG);
+  const appServerConfigArgs = [];
+  if (deepSeekEnabled) appServerConfigArgs.push("-c", PROVIDER_CONFIG);
   for (const platform of customPlatforms.values()) {
     if (!platform.enabled) continue;
-    args.splice(
-      appServerIndex,
-      0,
+    appServerConfigArgs.push(
       "-c",
       customProviderConfig(platform, chatCompatibilityProxy?.baseUrlFor(platform)),
     );
   }
   if (catalogPath) {
-    args.splice(appServerIndex, 0, "-c", `model_catalog_json=${JSON.stringify(catalogPath)}`);
+    appServerConfigArgs.push("-c", `model_catalog_json=${JSON.stringify(catalogPath)}`);
   }
+  // Codex 0.150 separates root-level and app-server-level -c values when both
+  // sides of the subcommand contain overrides. Keep all relay overrides in the
+  // app-server argument scope so later desktop-provided -c values do not hide them.
+  args.splice(appServerIndex + 1, 0, ...appServerConfigArgs);
 
   const env = { ...process.env, CODEX_CLI_PATH: upstreamExecutable };
   if (deepSeekEnabled) env[DEEPSEEK_ENV_KEY] = settings.apiKey;
