@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 102;
+export const WIDGET_RUNTIME_VERSION = 103;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -1849,7 +1849,7 @@ export function installQuotaWidget(
     const normalized = raw.toLowerCase().replaceAll(/[_\s-]/g, "");
     const names = {
       chatgptplusplan: "Plus", plus: "Plus",
-      chatgptproplan: "Pro", pro: "Pro",
+      chatgptpro: "Pro", chatgptproplan: "Pro", pro: "Pro",
       chatgptteamplan: "Team", team: "Team",
       business: "Business", enterprise: "Enterprise",
       free: "Free", apikey: "API Key", oauth: "OAuth",
