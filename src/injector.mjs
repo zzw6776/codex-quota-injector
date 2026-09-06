@@ -1,4 +1,5 @@
 import { AccountManager } from "./account-manager.mjs";
+import { AccountWakeupManager } from "./account-wakeup.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { CodexContextManager } from "./codex-context.mjs";
 import { prepareCodexLaunch, refreshCodexModelCatalog } from "./codex-bridge.mjs";
@@ -93,6 +94,12 @@ export async function runInjector({
   let lastInjectionError = null;
   let lastInjectionErrorAt = 0;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
+  const wakeupManager = new AccountWakeupManager(accountManager, () => {
+    markWidgetDataDirty();
+    void requestWidgetUpdate().catch((error) => {
+      console.error(`[wakeup] 面板刷新失败：${error.message}`);
+    });
+  });
 
   function markWidgetDataDirty() {
     widgetDataDirty = true;
@@ -108,6 +115,7 @@ export async function runInjector({
 
   const stop = () => {
     stopped = true;
+    wakeupManager.close();
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
     clearTimeout(modelCatalogRefreshTimer);
@@ -295,7 +303,10 @@ export async function runInjector({
     const staticViewModel = {
       version: APP_DISPLAY_VERSION,
       injectionMode,
-      accounts: viewModel.accounts,
+      accounts: viewModel.accounts.map((account) => ({
+        ...account,
+        wakeup: wakeupManager.getViewModel(account.id),
+      })),
       windows: viewModel.windows,
       currentAccountId: viewModel.currentAccountId,
       operation: viewModel.operation,
@@ -378,6 +389,12 @@ export async function runInjector({
     markWidgetDataDirty();
     try {
       switch (action?.type) {
+        case "wakeup-save":
+          await wakeupManager.save(action.accountId, { enabled: action.enabled, times: action.times });
+          break;
+        case "wakeup-now":
+          wakeupManager.trigger(action.accountId);
+          break;
         case "oauth-add":
           accountManager.beginOAuthLogin();
           break;
@@ -625,6 +642,7 @@ export async function runInjector({
   if (once) {
     await runQuotaRefresh();
   } else {
+    await wakeupManager.start();
     accountManager.startOfficialCredentialWatch(() => {
       void runQuotaRefresh({ repeatIfRunning: true });
       scheduleModelCatalogRefresh(0);

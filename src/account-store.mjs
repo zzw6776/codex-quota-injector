@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 
 import { defaultAccountDataDir } from "./platform.mjs";
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 const ENCRYPTION_ALGORITHM = "AES-256-GCM";
 
 export class AccountStore {
@@ -223,6 +223,7 @@ export class AccountStore {
   }
 
   async #writeIndex() {
+    this.index.version = STORE_VERSION;
     this.index.accounts = [...this.accounts.values()].map((account) => ({
       id: account.id,
       email: account.email,
@@ -337,9 +338,32 @@ function normalizeAccount(raw) {
     quotaUpdatedAt: Number(raw.quotaUpdatedAt ?? raw.usage_updated_at) || null,
     quotaError,
     authStatus: authStatus === "needsReauth" ? "needsReauth" : "active",
+    wakeup: normalizeWakeup(raw.wakeup),
     tokenGeneration: Number(raw.tokenGeneration ?? raw.token_generation) || 0,
     createdAt: Number(raw.createdAt ?? raw.created_at) || Math.floor(Date.now() / 1000),
     lastUsed: Number(raw.lastUsed ?? raw.last_used) || Math.floor(Date.now() / 1000),
+  };
+}
+
+export function normalizeWakeupTimes(values) {
+  if (!Array.isArray(values)) throw new Error("唤醒时间必须是时间列表");
+  const times = values.map((value) => String(value).trim());
+  if (times.some((value) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(value))) {
+    throw new Error("请使用 24 小时时间，格式为 HH:mm，例如 08:00");
+  }
+  return [...new Set(times)].sort();
+}
+
+function normalizeWakeup(value) {
+  let times = [];
+  try { times = normalizeWakeupTimes(value?.times ?? []); } catch { /* Disable invalid schedules. */ }
+  return {
+    enabled: value?.enabled === true && times.length > 0,
+    times,
+    updatedAt: Number(value?.updatedAt) || 0,
+    scheduledDate: typeof value?.scheduledDate === "string" ? value.scheduledDate : null,
+    scheduledTimes: Array.isArray(value?.scheduledTimes) ? value.scheduledTimes : [],
+    lastRun: value?.lastRun && typeof value.lastRun === "object" ? value.lastRun : null,
   };
 }
 

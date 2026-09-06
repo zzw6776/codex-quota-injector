@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 93;
+export const WIDGET_RUNTIME_VERSION = 94;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -82,6 +82,8 @@ export function installQuotaWidget(
     dismissed: false,
     actions: [],
     page: "accounts",
+    wakeupAccountId: null,
+    wakeupDraft: null,
     contextEditingSlug: null,
     deepSeekKeyDraft: null,
     deepSeekEnabledDraft: null,
@@ -261,6 +263,14 @@ export function installQuotaWidget(
     .provider-toggle input { width: auto; margin: 0; }
     .provider-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
     .provider-warning { color: #e5b86a; font-size: 10px; line-height: 15px; }
+    .wakeup-entry { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
+    .wakeup-entry span { color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .wakeup-times { display: grid; gap: 7px; }
+    .wakeup-time-row { display: flex; align-items: center; gap: 8px; }
+    .wakeup-time-row label { flex: 0 0 auto; font-size: 11px; }
+    .wakeup-time-row input { min-width: 0; }
+    .wakeup-time-row button { flex: 0 0 auto; }
+    .wakeup-result { line-height: 1.6; }
     .extra-platform-list { display: grid; gap: 8px; }
     .extra-platform-card { padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
     .extra-platform-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -381,6 +391,8 @@ export function installQuotaWidget(
     const previousPopover = wrap.querySelector(".quota-popover");
     const previousScrollTop = previousPopover?.scrollTop ?? 0;
     const previousScrollLeft = previousPopover?.scrollLeft ?? 0;
+    const wakeupFocus = state.shadow.activeElement?.closest?.(".wakeup-form")
+      ? state.shadow.activeElement.id : null;
     wrap.classList.toggle("is-light", isLightTheme());
     wrap.classList.toggle("is-open", state.pinned);
     wrap.classList.toggle("is-dismissed", state.dismissed);
@@ -423,6 +435,7 @@ export function installQuotaWidget(
     const contextPage = state.page === "context";
     const providerPage = state.page === "provider";
     const extraModelsPage = state.page === "extra-models";
+    const wakeupPage = state.page === "wakeup";
     const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
     const injectionRuntime = state.data.injectionMode === "wsl"
       ? { label: "WSL", title: "注入运行时：WSL" }
@@ -459,6 +472,8 @@ export function installQuotaWidget(
         : "quota-popover";
     const popoverContent = contextPage
       ? renderContextPage(busy)
+      : wakeupPage
+        ? renderWakeupPage(busy)
       : providerPage
         ? renderProviderPage()
         : extraModelsPage
@@ -485,7 +500,7 @@ export function installQuotaWidget(
       : "";
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : providerPage ? "DeepSeek 设置" : extraModelsPage ? "额外模型管理" : "Codex 账号与额度"}">${popoverContent}${versionFooter}</section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : providerPage ? "DeepSeek 设置" : extraModelsPage ? "额外模型管理" : "Codex 账号与额度"}">${popoverContent}${versionFooter}</section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       nextPopover.showPopover();
@@ -494,6 +509,7 @@ export function installQuotaWidget(
     }
     positionPopover(wrap);
     bindEvents(wrap);
+    if (wakeupFocus) state.shadow.getElementById(wakeupFocus)?.focus({ preventScroll: true });
     scheduleConversationTokenUsageRender();
   }
 
@@ -1336,6 +1352,53 @@ export function installQuotaWidget(
         window.matchMedia?.("(prefers-color-scheme: light)").matches);
   }
 
+  function renderWakeupPage(busy) {
+    const account = state.data.accounts?.find((item) => item.id === state.wakeupAccountId);
+    const header = '<header class="panel-head"><div class="panel-title">定时唤醒</div><button class="btn wakeup-back" type="button">返回账号</button></header>';
+    if (!account) return `${header}<div class="empty">账号已移除</div>`;
+    const wakeup = account.wakeup ?? {};
+    const draft = state.wakeupDraft ?? { enabled: Boolean(wakeup.enabled), times: [...(wakeup.times ?? [])] };
+    const lastRun = wakeup.lastRun;
+    const statusNames = { running: "执行中", success: "请求完成", error: "未完成" };
+    const result = lastRun
+      ? `<div class="operation wakeup-result ${escapeHtml(lastRun.status)}">
+          <div>${lastRun.source === "scheduled" ? "定时" : "手动"}唤醒 · ${escapeHtml(statusNames[lastRun.status] ?? "未知")} · ${escapeHtml(formatUpdatedAt(lastRun.startedAt))}</div>
+          ${lastRun.scheduledTime ? `<div>计划时刻：${escapeHtml(lastRun.scheduledTime)}</div>` : ""}
+          <div>${escapeHtml(lastRun.message)}</div>
+          ${lastRun.model ? `<div>模型：${escapeHtml(lastRun.model)}</div>` : ""}
+          ${lastRun.reply ? `<div>回复：${escapeHtml(lastRun.reply)}</div>` : ""}
+        </div>` : '<div class="context-note">尚未执行唤醒</div>';
+    const message = wakeup.message
+      ? `<div class="operation ${escapeHtml(wakeup.message.status)}">${escapeHtml(wakeup.message.text)}</div>` : "";
+    const timeRows = draft.times.map((time, index) => `<div class="wakeup-time-row">
+      <label for="wakeup-time-${index}">时刻 ${index + 1}</label>
+      <input id="wakeup-time-${index}" name="time" type="time" step="60" value="${escapeHtml(time)}" required ${busy ? "disabled" : ""}>
+      <button class="btn wakeup-time-remove" type="button" data-time-index="${index}" ${busy ? "disabled" : ""}>移除</button>
+    </div>`).join("");
+    return `${header}
+      <div class="provider-summary">
+        <div class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</div>
+        <div class="provider-note">每天按电脑本地时区执行，可添加多个时刻。需要保持 Codex 和注入器运行；关闭或长时间休眠后不补发错过的时刻。</div>
+        <div class="provider-note">下次计划：${wakeup.nextAt ? escapeHtml(formatUpdatedAt(wakeup.nextAt)) : "未开启"}</div>
+      </div>
+      <form class="provider-form wakeup-form">
+        <label class="provider-toggle"><input id="wakeup-enabled" name="enabled" type="checkbox" ${draft.enabled ? "checked" : ""} ${busy ? "disabled" : ""}>开启每日定时唤醒</label>
+        <div class="wakeup-times">${timeRows || '<div class="context-note">尚未添加时间</div>'}</div>
+        <div class="provider-actions"><button class="btn wakeup-time-add" type="button" ${busy ? "disabled" : ""}>添加时间</button><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>保存设置</button></div>
+      </form>
+      ${message}
+      <div class="wakeup-entry"><span>立即发送一次简短消息，验证账号是否可唤醒</span><button class="btn primary wakeup-now" type="button" data-account-id="${escapeHtml(account.id)}" ${busy || wakeup.busy || account.authStatus === "needsReauth" ? "disabled" : ""}>${wakeup.busy ? "唤醒中…" : "立即唤醒"}</button></div>
+      <div class="provider-note">手动唤醒无需开启定时，会产生少量模型用量。多个账号依次执行；同一账号仍在唤醒时跳过重叠时刻。请求完成后请查看额度重置时间，确认计时是否开始。</div>
+      ${result}`;
+  }
+
+  function readWakeupForm(form) {
+    return {
+      enabled: Boolean(form?.querySelector('[name="enabled"]')?.checked),
+      times: [...(form?.querySelectorAll('[name="time"]') ?? [])].map((input) => input.value),
+    };
+  }
+
   function renderAccount(account) {
     const windows = Array.isArray(account.windows) ? account.windows : [];
     const quotaHtml = windows.length
@@ -1358,6 +1421,7 @@ export function installQuotaWidget(
       <div class="expiry account-meta"><span>订阅：${escapeHtml(expiry)}</span><span>最后刷新：${escapeHtml(updatedAt)}</span></div>
       ${quotaHtml}
       ${account.quotaError ? `<div class="quota-error">刷新异常：${escapeHtml(account.quotaError)}</div>` : ""}
+      ${account.authMode === "oauth" ? `<div class="wakeup-entry"><span>${account.wakeup?.busy ? "正在唤醒…" : account.wakeup?.enabled ? `每日唤醒 · ${account.wakeup.times.length} 个时刻` : "定时唤醒未开启"}</span><button class="btn wakeup-open" type="button" data-account-id="${escapeHtml(account.id)}">唤醒设置</button></div>` : ""}
     </article>`;
   }
 
@@ -1381,6 +1445,48 @@ export function installQuotaWidget(
   }
 
   function bindEvents(wrap) {
+    wrap.querySelectorAll(".wakeup-open").forEach((button) => button.addEventListener("click", () => {
+      const account = state.data.accounts?.find((item) => item.id === button.dataset.accountId);
+      if (!account) return;
+      state.wakeupAccountId = account.id;
+      state.wakeupDraft = { enabled: Boolean(account.wakeup?.enabled), times: [...(account.wakeup?.times ?? [])] };
+      state.page = "wakeup";
+      state.pinned = true;
+      state.dismissed = false;
+      render();
+    }));
+    wrap.querySelector(".wakeup-back")?.addEventListener("click", () => {
+      state.page = "accounts";
+      state.wakeupDraft = null;
+      state.wakeupAccountId = null;
+      render();
+    });
+    const wakeupForm = wrap.querySelector(".wakeup-form");
+    const keepWakeupDraft = () => { state.wakeupDraft = readWakeupForm(wakeupForm); };
+    wakeupForm?.addEventListener("input", keepWakeupDraft);
+    wakeupForm?.addEventListener("change", keepWakeupDraft);
+    wrap.querySelector(".wakeup-time-add")?.addEventListener("click", () => {
+      keepWakeupDraft();
+      state.wakeupDraft.times.push("");
+      render();
+      state.shadow.getElementById(`wakeup-time-${state.wakeupDraft.times.length - 1}`)?.focus();
+    });
+    wrap.querySelectorAll(".wakeup-time-remove").forEach((button) => button.addEventListener("click", () => {
+      keepWakeupDraft();
+      state.wakeupDraft.times.splice(Number(button.dataset.timeIndex), 1);
+      render();
+    }));
+    wakeupForm?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      keepWakeupDraft();
+      state.wakeupDraft.times = [...new Set(state.wakeupDraft.times)].sort();
+      enqueue({ type: "wakeup-save", accountId: state.wakeupAccountId, ...state.wakeupDraft });
+      render();
+    });
+    wrap.querySelector(".wakeup-now")?.addEventListener("click", (event) => {
+      event.currentTarget.disabled = true;
+      enqueue({ type: "wakeup-now", accountId: event.currentTarget.dataset.accountId });
+    });
     const chip = wrap.querySelector(".quota-chip");
     chip?.addEventListener("click", () => {
       state.dismissed = false;
@@ -1598,6 +1704,8 @@ export function installQuotaWidget(
     state.pinned = false;
     state.dismissed = true;
     state.page = "accounts";
+    state.wakeupAccountId = null;
+    state.wakeupDraft = null;
     state.contextEditingSlug = null;
     state.extraPlatformDraft = null;
     const wrap = state.shadow?.querySelector(".quota-wrap");

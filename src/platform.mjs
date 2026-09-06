@@ -138,6 +138,8 @@ export async function listCodexProcessIds() {
     const expected = powershellQuote(executable.toLowerCase());
     const cacheRoot = powershellQuote(`${windowsCodexAppCacheRoot().toLowerCase()}\\`);
     const upstreamRoot = powershellQuote(`${windowsCodexUpstreamRoot().toLowerCase()}\\`);
+    // The isolated wakeup client's log_dir argument contains codex-quota-wakeup-.
+    // It must not keep the injector alive after the desktop app exits.
     const script = `
 $expected='${expected}';
 $cacheRoot='${cacheRoot}';
@@ -150,6 +152,7 @@ Get-CimInstance Win32_Process |
         $_.ExecutablePath.ToLowerInvariant().StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) -and
       ($_.CommandLine -notmatch '--type=|crashpad_handler')) -or
     ($_.Name -eq 'codex-upstream.exe' -and
+      ($_.CommandLine -notmatch 'codex-quota-wakeup-') -and
       $_.ExecutablePath -and
       $_.ExecutablePath.ToLowerInvariant().StartsWith($upstreamRoot, [StringComparison]::OrdinalIgnoreCase))
   } |

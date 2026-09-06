@@ -150,6 +150,50 @@ export class AccountManager {
     );
   }
 
+  async withWakeupAccount(accountId, callback) {
+    await this.syncCurrentAccountFromOfficialCredentials();
+    return this.#withAccountLock(accountId, async () => {
+      let previousAccessToken = null;
+      const getCredentials = async ({ forceRefresh = false } = {}) => {
+        await this.syncCurrentAccountFromOfficialCredentials();
+        let account = this.store.get(accountId);
+        if (!account || account.authMode !== "oauth") throw new Error("仅支持已保存的 OAuth 账号");
+        if (account.authStatus === "needsReauth") throw new Error("登录凭据已失效，请重新授权");
+        try {
+          if (account.id === this.store.index.currentAccountId) {
+            const expiration = jwtExpiration(account.tokens.accessToken);
+            if ((forceRefresh && account.tokens.accessToken === previousAccessToken) ||
+              (expiration != null && expiration <= Math.floor(Date.now() / 1000))) {
+              throw new Error("当前账号凭据由 Codex 管理，请在客户端完成续期后重试");
+            }
+          } else {
+            account = forceRefresh
+              ? await this.#refreshStoredTokens(account)
+              : await this.#ensureFreshTokens(account, { refreshIfExpirationUnknown: true });
+          }
+        } catch (error) {
+          if (isPermanentRefreshError(error)) {
+            await this.store.update(accountId, {
+              authStatus: "needsReauth",
+              quotaError: "登录凭据已失效，请重新授权",
+            });
+          }
+          throw error;
+        }
+        if (!account.tokens.accessToken || !account.accountId) {
+          throw new Error("账号缺少 Access Token 或 Account ID，请重新导入或授权");
+        }
+        previousAccessToken = account.tokens.accessToken;
+        return {
+          accessToken: account.tokens.accessToken,
+          chatgptAccountId: account.accountId,
+          chatgptPlanType: account.planType,
+        };
+      };
+      return callback(getCredentials);
+    });
+  }
+
   async #withAccountLock(accountId, callback) {
     const previous = this.refreshLocks.get(accountId) ?? Promise.resolve();
     const task = previous
