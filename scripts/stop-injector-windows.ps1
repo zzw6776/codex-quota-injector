@@ -6,9 +6,22 @@ function Get-InjectorListenerProcessIds {
       -LocalPort 49229 `
       -State Listen `
       -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty OwningProcess |
-      ForEach-Object { [int]$_ } |
-      Where-Object { $_ -gt 0 })
+      Select-Object -ExpandProperty OwningProcess -Unique |
+      Where-Object { $_ -gt 0 } |
+      ForEach-Object {
+        $ownerProcessId = [int]$_
+        $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerProcessId"
+        if ($owner) {
+          $isInjector = $owner.Name -eq "Codex Quota Injector.exe" -or (
+            $owner.Name -eq "node.exe" -and
+            $owner.CommandLine -match '(?:^|[\s"\\/])src[\\/]launcher\.mjs(?:["\s]|$)'
+          )
+          if (-not $isInjector) {
+            throw "Port 49229 is owned by a non-injector process ($ownerProcessId, $($owner.Name)); refusing to terminate it"
+          }
+          $ownerProcessId
+        }
+      })
 }
 
 function Stop-InjectorProcess([int]$processId) {

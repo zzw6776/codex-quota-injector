@@ -1,10 +1,10 @@
 import { AccountManager } from "./account-manager.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { CodexContextManager } from "./codex-context.mjs";
-import { prepareCodexLaunch } from "./codex-bridge.mjs";
+import { prepareCodexLaunch, refreshCodexModelCatalog } from "./codex-bridge.mjs";
 import { DeepSeekManager } from "./deepseek-manager.mjs";
 import { ExtraModelManager } from "./extra-model-manager.mjs";
-import { isCodexRunning, restartCodex } from "./platform.mjs";
+import { isCodexRunning, isRelayStateCurrent, restartCodex } from "./platform.mjs";
 import { TokenUsageManager } from "./token-usage.mjs";
 import packageJson from "../package.json" with { type: "json" };
 import { isSea } from "node:sea";
@@ -22,6 +22,8 @@ const APP_VERSION = String(packageJson.version ?? "0.0.0");
 const APP_DISPLAY_VERSION = isSea() ? APP_VERSION : `${APP_VERSION}.dev`;
 const TARGET_POLL_MS = 1_500;
 const QUOTA_REFRESH_MS = 60_000;
+const MODEL_CATALOG_REFRESH_MS = 4 * 60_000 + 30_000;
+const MODEL_CATALOG_BUSY_RETRY_MS = 30_000;
 const DEEPSEEK_BALANCE_REFRESH_MS = 5 * 60_000;
 const STARTUP_GRACE_MS = 30_000;
 const TOKEN_USAGE_FALLBACK_MS = 15_000;
@@ -40,9 +42,16 @@ export async function runInjector({
   extraModelManager = new ExtraModelManager(),
   tokenUsageManager = new TokenUsageManager(),
   managersInitialized = false,
-  prepareLaunch = () => prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager }),
+  accountManagerInitialized = false,
+  prepareLaunch = () => prepareCodexLaunch({
+    accountManager,
+    deepSeekManager,
+    extraModelManager,
+    contextManager,
+  }),
+  refreshModelCatalog = () => refreshCodexModelCatalog({ accountManager, contextManager }),
 } = {}) {
-  await accountManager.initialize();
+  if (!accountManagerInitialized) await accountManager.initialize();
   if (!managersInitialized) {
     await contextManager.initialize();
     await deepSeekManager.initialize();
@@ -77,6 +86,8 @@ export async function runInjector({
   let quotaRefreshPromise = null;
   let quotaRefreshRequested = false;
   let deepSeekBalanceTimer = null;
+  let modelCatalogRefreshTimer = null;
+  let modelCatalogRefreshPromise = null;
   let tokenUsageFallbackTimer = null;
   let lastWidgetHealthCheckAt = 0;
   let lastInjectionError = null;
@@ -99,8 +110,10 @@ export async function runInjector({
     stopped = true;
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
+    clearTimeout(modelCatalogRefreshTimer);
     clearTimeout(tokenUsageFallbackTimer);
     quotaRefreshTimer = null;
+    modelCatalogRefreshTimer = null;
     tokenUsageFallbackTimer = null;
     removeTokenUsageListener();
     removeTokenUsageListener = () => {};
@@ -390,7 +403,7 @@ export async function runInjector({
           await accountManager.removeAccount(action.accountId);
           break;
         case "context-refresh":
-          await contextManager.refresh();
+          await runModelCatalogRefresh({ manual: true });
           break;
         case "context-save":
           await contextManager.setOverride(
@@ -398,20 +411,23 @@ export async function runInjector({
             action.contextWindow,
             action.maxContextWindow,
           );
+          await restartForConfigurationChange({ context: true });
           break;
         case "context-reset":
           await contextManager.resetOverride(action.slug);
+          await restartForConfigurationChange({ context: true });
           break;
         case "context-reset-all":
           await contextManager.resetAll();
+          await restartForConfigurationChange({ context: true });
           break;
         case "deepseek-save":
           await deepSeekManager.save({ apiKey: action.apiKey, enabled: action.enabled });
-          await restartForConfigurationChange();
+          await restartForConfigurationChange({ modelProviders: true });
           break;
         case "deepseek-remove":
           await deepSeekManager.remove();
-          await restartForConfigurationChange();
+          await restartForConfigurationChange({ modelProviders: true });
           break;
         case "deepseek-refresh-balance":
           await deepSeekManager.refreshBalance();
@@ -423,27 +439,26 @@ export async function runInjector({
               deepSeekManager.getViewModel().model.slug,
             ],
           });
-          await restartForConfigurationChange();
+          await restartForConfigurationChange({ modelProviders: true });
           break;
         case "extra-platform-remove":
           await extraModelManager.removePlatform(action.platformId);
-          await restartForConfigurationChange();
+          await restartForConfigurationChange({ modelProviders: true });
           break;
         case "switch-account":
           restartingCodex = true;
           try {
             await accountManager.switchAccount(action.accountId);
-            await restartCodex(port, await prepareLaunch());
-            cdp?.close();
-            cdp = null;
-            targetId = null;
-            widgetInstalled = false;
-            lastStaticJson = null;
-            lastWidgetHealthCheckAt = 0;
-            markWidgetDataDirty();
-            lastTokenUsageSignatures = new Map();
-            lastTokenUsageStatus = null;
-            lastTokenUsageError = null;
+            const options = await prepareLaunch();
+            await restartCodex(port, options);
+            if (options.officialCatalogChanged) {
+              if (options.officialCatalogSource === "bundled") {
+                contextManager.markBundledCatalogCurrent({ restarted: true });
+              } else {
+                contextManager.markOfficialCatalogRestarted();
+              }
+            }
+            resetAfterCodexRestart();
             scheduleQuotaRefresh(0);
           } finally {
             restartingCodex = false;
@@ -467,26 +482,125 @@ export async function runInjector({
     }
   }
 
-  async function restartForConfigurationChange() {
+  async function restartForConfigurationChange({ context = false, modelProviders = false } = {}) {
     restartingCodex = true;
     try {
-      await restartCodex(port, await prepareLaunch());
-      deepSeekManager.markRestarted();
-      extraModelManager.markRestarted();
+      const options = await prepareLaunch();
+      if (options.preparationError) {
+        throw new Error(`模型中继准备失败，配置尚未生效：${options.preparationError}`);
+      }
+      await restartCodex(port, options);
+      if (context) contextManager.markRestarted();
+      if (modelProviders) {
+        deepSeekManager.markRestarted();
+        extraModelManager.markRestarted();
+      }
       scheduleDeepSeekBalanceRefresh();
-      cdp?.close();
-      cdp = null;
-      targetId = null;
-      widgetInstalled = false;
-      lastStaticJson = null;
-      lastWidgetHealthCheckAt = 0;
-      markWidgetDataDirty();
-      lastTokenUsageSignatures = new Map();
-      lastTokenUsageStatus = null;
-      lastTokenUsageError = null;
+      resetAfterCodexRestart();
     } finally {
       restartingCodex = false;
     }
+  }
+
+  function resetAfterCodexRestart() {
+    cdp?.close();
+    cdp = null;
+    targetId = null;
+    widgetInstalled = false;
+    lastStaticJson = null;
+    lastWidgetHealthCheckAt = 0;
+    lastTokenUsageSignatures = new Map();
+    lastTokenUsageStatus = null;
+    lastTokenUsageError = null;
+    markWidgetDataDirty();
+  }
+
+  function scheduleModelCatalogRefresh(delayMs = MODEL_CATALOG_REFRESH_MS) {
+    clearTimeout(modelCatalogRefreshTimer);
+    if (stopped || once) return;
+    modelCatalogRefreshTimer = setTimeout(() => {
+      modelCatalogRefreshTimer = null;
+      void runModelCatalogRefresh();
+    }, delayMs);
+  }
+
+  async function runModelCatalogRefresh({ manual = false } = {}) {
+    if (modelCatalogRefreshPromise) return modelCatalogRefreshPromise;
+    if (!manual && (activeAction || restartingCodex)) {
+      scheduleModelCatalogRefresh(MODEL_CATALOG_BUSY_RETRY_MS);
+      return undefined;
+    }
+
+    const task = (async () => {
+      try {
+        if (!manual) {
+          if (!await isCodexRunning()) return;
+          // Scheduled refreshes only update the cache. Rebuilding relay files or
+          // restarting here can interrupt an unrelated in-flight user task.
+          const refresh = await refreshModelCatalog();
+          if (!stopped && refresh.officialCatalogChanged) {
+            contextManager.markOfficialCatalogAvailable();
+          }
+          return;
+        }
+        restartingCodex = true;
+        const options = await prepareLaunch();
+        if (stopped) return;
+        if (options.preparationError) throw new Error(options.preparationError);
+        const relay = options?.relay;
+        const relayRequired = Boolean(relay && !relay.expectAbsent);
+        const relayCurrent = !relayRequired || await isRelayStateCurrent(
+          relay.statePath,
+          relay.generation,
+          { wslNative: relay.wslNative === true },
+        );
+        const catalogReloadRequired = options.officialCatalogChanged;
+        if (relayRequired && (catalogReloadRequired || !relayCurrent)) {
+          if (!await isCodexRunning()) return;
+          console.log(
+            catalogReloadRequired
+              ? "[models] 检测到官方模型目录更新，正在重启 Codex 以加载最新模型"
+              : "[models] 模型中继目录版本已变化，正在重启 Codex 重新加载",
+          );
+          await restartCodex(port, options);
+          if (catalogReloadRequired) {
+            if (options.officialCatalogSource === "bundled") {
+              contextManager.markBundledCatalogCurrent({ restarted: true });
+            } else {
+              contextManager.markOfficialCatalogRestarted();
+            }
+          } else if (options.officialCatalogSource === "bundled") {
+            contextManager.markBundledCatalogCurrent({ restarted: true });
+          } else {
+            contextManager.markOfficialCatalogRestarted();
+          }
+          scheduleDeepSeekBalanceRefresh();
+          resetAfterCodexRestart();
+        } else if (options.officialCatalogError) {
+          contextManager.setError(`官方模型目录刷新失败：${options.officialCatalogError}`);
+        } else if (options.officialCatalogChecked) {
+          contextManager.markOfficialCatalogCurrent();
+        } else if (options.officialCatalogSource === "bundled") {
+          contextManager.markBundledCatalogCurrent();
+        } else {
+          await contextManager.refresh({ sync: false });
+        }
+      } catch (error) {
+        if (manual) contextManager.setError(`官方模型目录刷新失败：${error.message}`);
+        console.error(`[models] 官方模型目录刷新失败: ${error.message}`);
+      } finally {
+        if (manual) restartingCodex = false;
+        markWidgetDataDirty();
+        void requestWidgetUpdate().catch((error) => {
+          console.error(`[models] Widget 刷新失败: ${error.message}`);
+        });
+      }
+    })().finally(() => {
+      if (modelCatalogRefreshPromise === task) modelCatalogRefreshPromise = null;
+      scheduleModelCatalogRefresh();
+    });
+    modelCatalogRefreshPromise = task;
+    return task;
   }
 
   function scheduleDeepSeekBalanceRefresh() {
@@ -513,8 +627,10 @@ export async function runInjector({
   } else {
     accountManager.startOfficialCredentialWatch(() => {
       void runQuotaRefresh({ repeatIfRunning: true });
+      scheduleModelCatalogRefresh(0);
     });
     void runQuotaRefresh();
+    scheduleModelCatalogRefresh();
     const deepSeek = deepSeekManager.getViewModel();
     if (deepSeek.enabled && deepSeek.configured) {
       void deepSeekManager.refreshBalance()
@@ -549,10 +665,11 @@ export async function runInjector({
       debugLog(`[DEBUG] loop#${_loopCount} calling connectAndInject...`);
       const injected = await connectAndInject();
       debugLog(`[DEBUG] loop#${_loopCount} injected=${injected}`);
-      if (injected && !activeAction) {
+      if (injected && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
         const actions = await cdp.evaluate(widgetDrainActionsExpression());
         if (Array.isArray(actions) && actions.length > 0) {
           activeAction = (async () => {
+            await modelCatalogRefreshPromise;
             for (const action of actions) await startAction(action);
           })().finally(() => {
             activeAction = null;

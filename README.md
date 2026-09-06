@@ -47,7 +47,7 @@ Windows 安装包同时内置原生 Windows relay 和原生 WSL relay；安装�
 1. macOS 原生启动器接收首次启动和重复双击事件，并唤起后台注入器；
 2. 后台注入器获取本机单实例锁；重复启动时由旧实例交接并只重启注入器；如果旧版本返回无法识别的接管协议，确认端口占用者属于本项目后终止旧实例再接管，无法确认时退出；
 3. 查找官方 Codex 安装位置；
-4. Codex 已开放本地 CDP 调试端口时直接复用当前进程；仅在未开放调试端口时重启并以调试模式拉起；
+4. Codex 的本地 CDP 调试端口与所需模型中继均就绪时复用当前进程；缺少调试端口或中继配置、协议尚未生效时重启并重新加载；
 5. 只在 `127.0.0.1:9229` 开启 Chromium 调试端口；
 6. 连接 Codex 页面并注入额度组件；
 7. 监听 Codex `auth.json` 变化，将当前账号轮换后的最新 Token 同步回独立账户库；
@@ -55,6 +55,8 @@ Windows 安装包同时内置原生 Windows relay 和原生 WSL relay；安装�
 9. 在 Codex 退出前最后同步一次当前账号凭证，再结束后台注入工作进程；macOS 原生入口会在工作进程结束后同步退出。
 
 macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。Windows 支持 Microsoft Store 的 `OpenAI.ChatGPT`、`OpenAI.Codex`、`ChatGPT.exe` 和 `Codex.exe`。
+
+定时刷新官方模型目录只更新缓存，不重启 Codex。手动刷新在需要重新加载模型中继时会重启；修改模型注入配置、上下文覆盖或切换账号也会重启。
 
 ## 数据目录
 
@@ -97,7 +99,7 @@ npm run launch
 - macOS：`启动开发版.app`（Finder、QSpace Pro 均推荐）或 `启动开发版.command`
 - Windows：`启动开发版.cmd`
 
-脚本会先使用项目内或系统中的 Node.js 22 准备 relay，再隐藏启动注入器。普通 Windows 模式会在首次启动当前项目版本时原子生成版本化的原生 Windows SEA relay；源码开发版若要重建 WSL relay，需要在 `runtime/node-v22.23.1-linux-x64/bin/node` 准备本地 Linux Node。正式 Windows 安装包已经压缩内置构建好的 WSL relay，安装和运行均不需要该开发运行时。启动器按远端规则根据版本和运行模式协商是否接管已运行的注入器；旧版本协议无法识别时，会在确认旧进程属于本项目后终止旧进程并继续启动。它不会关闭官方 Codex，也不会保留 npm 或 PowerShell 前台窗口。启动日志位于 `%LOCALAPPDATA%\\Codex Quota Injector\\Logs\\launcher.log`，运行日志位于同目录的 `injector.log`。
+Windows 开发入口会先使用项目内或系统中的 Node.js 22 准备 relay，再隐藏启动注入器。普通 Windows 模式会在首次启动当前项目版本时原子生成版本化的原生 Windows SEA relay；源码开发版若要重建 WSL relay，需要在 `runtime/node-v22.23.1-linux-x64/bin/node` 准备本地 Linux Node。正式 Windows 安装包已经压缩内置构建好的 WSL relay，安装和运行均不需要该开发运行时。启动器根据版本和运行模式协商是否接管已运行的注入器；旧版本协议无法识别时，会在确认旧进程属于本项目后终止旧进程并继续启动。CDP 和模型中继均就绪时保留官方 Codex，否则需要重启以加载配置；Windows 开发入口不会保留 npm 或 PowerShell 前台窗口。启动日志位于 `%LOCALAPPDATA%\Codex Quota Injector\Logs\launcher.log`，运行日志位于同目录的 `injector.log`。
 
 其他命令：
 
@@ -110,6 +112,7 @@ npm run preview
 
 ## 限制
 
+- Token 费用按官方 Standard API 单价估算，并非 ChatGPT 订阅扣费或第三方账单。OpenAI 价格已按 [2026-09-06 官方定价页面](https://developers.openai.com/api/docs/pricing) 更新，覆盖 GPT-6 Astra、GPT-5.6 Sol/Terra/Luna/Cyber、GPT-5.3 Codex 和 Chat Latest 等文本模型；Sol 使用当前公布的优惠价（至少持续至 2026-11-21）。Fast、Batch、Flex、地域附加费和工具调用费用不计入该估算；
 - 必须通过 `Codex Quota Injector` 启动官方 Codex；普通方式启动的客户端没有 CDP 端口，无法注入；
 - 账号切换会重启官方 Codex，当前任务由客户端自身恢复；
 - API Key 账号可以保存和切换，但 ChatGPT 订阅额度接口不适用于 API Key；

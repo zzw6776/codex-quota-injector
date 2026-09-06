@@ -30,6 +30,7 @@ export class ExtraModelManager {
     this.message = null;
     this.messageState = null;
     this.pendingRestart = false;
+    this.catalogConflicts = [];
   }
 
   async initialize() {
@@ -53,6 +54,7 @@ export class ExtraModelManager {
       message: this.message,
       messageState: this.messageState,
       pendingRestart: this.pendingRestart,
+      catalogConflicts: this.catalogConflicts.map((item) => ({ ...item })),
     };
   }
 
@@ -106,28 +108,37 @@ export class ExtraModelManager {
       0,
     ) + 1;
     const customModels = [];
+    const catalogConflicts = [];
+    const runtimePlatforms = [];
     for (const platform of this.settings.platforms) {
-      if (!platform.enabled || !platform.apiKey) continue;
+      const runtimeModels = [];
       for (const model of platform.models) {
         if (baseModelIds.has(model.id)) {
-          throw new Error(`额外模型 ID 与现有模型冲突：${model.id}`);
+          catalogConflicts.push({ modelId: model.id, platformName: platform.name });
+          continue;
         }
-        customModels.push(createCatalogModel(platform, model, nextPriority));
-        nextPriority += 1;
-        baseModelIds.add(model.id);
+        runtimeModels.push(cloneModel(model));
+        if (platform.enabled && platform.apiKey) {
+          customModels.push(createCatalogModel(platform, model, nextPriority));
+          nextPriority += 1;
+          baseModelIds.add(model.id);
+        }
       }
+      runtimePlatforms.push({ ...clonePlatform(platform), models: runtimeModels });
     }
+    this.catalogConflicts = catalogConflicts;
     const catalog = { ...baseCatalog, models: [...baseCatalog.models, ...customModels] };
     await writeJsonAtomic(this.runtimeCatalogPath, catalog);
     await writeJsonAtomic(this.runtimeSettingsPath, {
       version: STORE_VERSION,
       generation: this.settings.generation,
-      platforms: this.settings.platforms,
+      platforms: runtimePlatforms,
     });
     return {
       path: this.runtimeCatalogPath,
       settingsPath: this.runtimeSettingsPath,
       catalog,
+      catalogConflicts,
       generation: createHash("sha256")
         .update(JSON.stringify(catalog))
         .update(String(this.settings.generation))

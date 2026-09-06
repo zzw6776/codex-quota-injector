@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 92;
+export const WIDGET_RUNTIME_VERSION = 93;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -1145,14 +1145,14 @@ export function installQuotaWidget(
     const status = String(context.status ?? "unavailable");
     const statusText = {
       "system-default": "使用系统默认值",
-      applied: "已写入配置，重启后生效",
+      applied: "注入模式已加载覆盖值",
       pending: "覆盖值待加载",
-      external: "检测到其他模型目录",
+      external: "原有模型目录已保留",
       unavailable: "无法读取系统模型目录",
     }[status] ?? "状态未知";
     const contextNote = status === "external"
-      ? "Codex 当前指向其他模型目录。本工具不会自动合并或接管，请先恢复 Codex 官方模型目录。"
-      : `默认值来自 Codex 当前模型目录。只有主动保存的模型才会生成覆盖值；修改后需要重启 Codex 才能加载。${orphanedCount ? `有 ${orphanedCount} 条覆盖记录对应的模型已不存在，可用“恢复全部默认”清理。` : ""}`;
+      ? `Codex 原有模型目录配置保持不变。注入器运行时会使用当前账号可用的官方目录并合并本工具配置的自定义模型；退出注入器后再次启动 Codex，则恢复使用原有目录。覆盖值仅对注入器启动的 Codex 生效。${orphanedCount ? `有 ${orphanedCount} 条覆盖记录对应的模型已不存在，可用“恢复全部默认”清理。` : ""}`
+      : `默认值来自当前账号可用的 Codex 模型目录（OAuth 在线刷新；API Key 使用当前官方 CLI 内置目录；网络不可用时保留上次可用目录）。覆盖值仅对注入器启动的 Codex 生效，保存后会自动重启加载；退出注入器后再次启动 Codex 将恢复官方原生刷新。${orphanedCount ? `有 ${orphanedCount} 条覆盖记录对应的模型已不存在，可用“恢复全部默认”清理。` : ""}`;
     const statusMessage = context.message
       ? `<div class="operation ${context.messageState === "error" ? "error" : "success"}">${escapeHtml(context.message)}</div>`
       : "";
@@ -1203,8 +1203,12 @@ export function installQuotaWidget(
     const platforms = Array.isArray(data.platforms) ? data.platforms : [];
     const supported = data.supported !== false;
     const pendingRestart = Boolean(data.pendingRestart);
+    const catalogConflicts = Array.isArray(data.catalogConflicts) ? data.catalogConflicts : [];
     const statusMessage = data.message
       ? `<div class="operation ${data.messageState === "error" ? "error" : "success"}">${escapeHtml(data.message)}</div>`
+      : "";
+    const catalogConflictMessage = catalogConflicts.length
+      ? `<div class="quota-error">以下自定义模型 ID 已被新官方目录占用，本次注入优先使用官方模型，其他自定义模型不受影响：${catalogConflicts.map((item) => escapeHtml(item.modelId)).join("、")}</div>`
       : "";
     const content = state.extraPlatformDraft
       ? renderExtraPlatformForm(state.extraPlatformDraft, supported && !pendingRestart)
@@ -1220,6 +1224,7 @@ export function installQuotaWidget(
       <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn extra-models-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">额外模型管理</div><div class="panel-subtitle">Responses API · 平台与模型分层管理</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
       <section class="provider-summary"><div class="provider-status"><span class="${platforms.some((platform) => platform.enabled) ? "enabled" : "disabled"}">${platforms.some((platform) => platform.enabled) ? "已配置启用平台" : "暂无启用平台"}</span><span class="badge">${platforms.length} 个平台</span></div><div class="provider-note">默认使用原生 Responses，并关闭服务端响应存储以兼容无状态平台；仅为有工具调用续传兼容问题的模型勾选 Chat 兼容。每个模型可声明支持的推理强度，留空则由平台决定。只统计 Token，不计算费用。保存、停用或删除平台后会重启 Codex。</div></section>
       ${content}
+      ${catalogConflictMessage}
       ${supported ? "" : '<div class="quota-error">额外模型共存当前仅支持 macOS 和 Windows。</div>'}
       ${statusMessage}`;
   }

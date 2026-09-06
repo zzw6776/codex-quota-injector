@@ -10,37 +10,105 @@ import {
   resolveCodexCliExecutable,
 } from "./platform.mjs";
 import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
+import { fetchOfficialModelCatalog } from "./official-model-catalog.mjs";
 
 const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
 const RELAY_CONFIG_VERSION = 1;
 
-export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager }) {
+export async function refreshCodexModelCatalog({
+  contextManager,
+  accountManager = null,
+  executable = null,
+}) {
+  try {
+    const upstreamExecutable = executable ?? await resolveCodexCliExecutable();
+    const account = await accountManager?.getCurrentModelCatalogAccount();
+    contextManager.selectModelCatalogAccount(account);
+    await contextManager.refresh({ sync: false });
+    const refresh = await fetchOfficialModelCatalog({ executable: upstreamExecutable, account });
+    const changed = refresh.catalog
+      ? (await contextManager.useOfficialCatalog(refresh.catalog, {
+          source: refresh.source === "bundled" ? "official-bundled" : "official-online",
+          persist: refresh.source === "online",
+        })).changed
+      : false;
+    return {
+      officialCatalogChanged: changed,
+      officialCatalogChecked: refresh.source === "online",
+      officialCatalogSource: refresh.source,
+      officialCatalogError: null,
+    };
+  } catch (error) {
+    console.warn(`[models] 官方模型目录刷新失败，继续使用上次可用目录：${error.message}`);
+    // Preserve an API-key account's last usable bundled catalog when fetching
+    // fails, rather than replacing it with another account's OAuth cache.
+    await contextManager.refresh({ sync: false });
+    return {
+      officialCatalogChanged: false,
+      officialCatalogChecked: false,
+      officialCatalogSource: null,
+      officialCatalogError: error.message,
+    };
+  }
+}
+
+export async function prepareCodexLaunch({
+  deepSeekManager,
+  extraModelManager,
+  contextManager,
+  accountManager = null,
+}) {
   if (process.platform !== "darwin" && process.platform !== "win32") {
-    return { env: {}, relay: null, injectionMode: null };
+    return {
+      env: {},
+      relay: null,
+      injectionMode: null,
+      officialCatalogChanged: false,
+      staticModelCatalog: false,
+    };
   }
   const defaultInjectionMode = resolveInjectionMode();
   const statePath = join(defaultAccountDataDir(), "app-server-relay-state.json");
   const tokenUsageEventPath = join(defaultAccountDataDir(), "token-usage-events.jsonl");
   const relayConfigPath = join(defaultAccountDataDir(), "app-server-relay-config.json");
-  const contextState = contextManager.getViewModel();
-  if (contextState.status === "external" &&
-    basename(contextState.currentCatalogPath ?? "") !== "codex-deepseek-poc.json") {
-    deepSeekManager.setError("检测到其他工具管理的模型目录，已保留其配置并停用 DeepSeek 中继");
-    extraModelManager.setError("检测到其他工具管理的模型目录，已保留其配置并停用额外模型中继");
-    return {
-      env: {},
-      relay: { statePath, expectAbsent: true },
-      injectionMode: defaultInjectionMode,
-    };
-  }
   let runtime;
   let upstreamExecutable;
   let relayExecutable;
+  let staticModelCatalog = false;
+  let officialCatalog;
   try {
+    upstreamExecutable = await resolveCodexCliExecutable();
+    officialCatalog = await refreshCodexModelCatalog({
+      contextManager,
+      accountManager,
+      executable: upstreamExecutable,
+    });
+    const contextState = contextManager.getViewModel();
+    staticModelCatalog = requiresStaticModelCatalog({
+      contextState,
+      deepSeek: deepSeekManager.getViewModel(),
+      extraModels: extraModelManager.getViewModel(),
+    });
+    if (contextState.status === "external" && staticModelCatalog) {
+      const message = "检测到用户管理的模型目录，已保留其配置并停用本工具模型中继";
+      deepSeekManager.setError(message);
+      extraModelManager.setError(message);
+      return {
+        env: {},
+        relay: {
+          statePath,
+          expectAbsent: true,
+          wslNative: defaultInjectionMode === "wsl",
+        },
+        injectionMode: defaultInjectionMode,
+        preparationError: message,
+        ...officialCatalog,
+        staticModelCatalog: false,
+      };
+    }
     const catalog = contextManager.getEffectiveCatalog();
     const deepSeekRuntime = await deepSeekManager.writeRuntimeCatalog(catalog);
     runtime = await extraModelManager.writeRuntimeCatalog(deepSeekRuntime.catalog);
-    upstreamExecutable = await resolveCodexCliExecutable();
     relayExecutable = await resolveRelayExecutable();
     await access(relayExecutable, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
   } catch (error) {
@@ -48,18 +116,28 @@ export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, c
     extraModelManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
     return {
       env: {},
-      relay: { statePath, expectAbsent: true },
+      relay: {
+        statePath,
+        expectAbsent: true,
+        wslNative: defaultInjectionMode === "wsl",
+      },
       injectionMode: defaultInjectionMode,
+      preparationError: error.message,
+      officialCatalogChanged: false,
+      staticModelCatalog: false,
     };
   }
-  const relayGeneration = `${runtime.generation}:${BRIDGE_GENERATION}`;
+  const catalogGeneration = staticModelCatalog
+    ? runtime.generation
+    : `official-online:${deepSeekManager.settings.generation}:${extraModelManager.settings.generation}`;
+  const relayGeneration = `${catalogGeneration}:${BRIDGE_GENERATION}`;
   try {
     await writeRelayConfig(relayConfigPath, {
       version: RELAY_CONFIG_VERSION,
       upstreamExecutable,
       providerSettingsPath: deepSeekManager.settingsPath,
       extraModelSettingsPath: runtime.settingsPath,
-      modelCatalogPath: runtime.path,
+      modelCatalogPath: staticModelCatalog ? runtime.path : null,
       relayStatePath: statePath,
       tokenUsageEventsPath: tokenUsageEventPath,
       generation: relayGeneration,
@@ -69,8 +147,15 @@ export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, c
     extraModelManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
     return {
       env: {},
-      relay: { statePath, expectAbsent: true },
+      relay: {
+        statePath,
+        expectAbsent: true,
+        wslNative: defaultInjectionMode === "wsl",
+      },
       injectionMode: defaultInjectionMode,
+      preparationError: error.message,
+      officialCatalogChanged: false,
+      staticModelCatalog: false,
     };
   }
   return {
@@ -87,7 +172,20 @@ export async function prepareCodexLaunch({ deepSeekManager, extraModelManager, c
       wslNative: isWslNativeRelay(relayExecutable),
     },
     injectionMode: resolveInjectionMode(relayExecutable),
+    ...officialCatalog,
+    staticModelCatalog,
   };
+}
+
+function requiresStaticModelCatalog({ contextState, deepSeek, extraModels }) {
+  // An external root-level model_catalog_json remains the user's responsibility:
+  // the upstream process already receives it from config.toml. Only inject our
+  // composed static catalog when one of this tool's model features actually needs it.
+  return Number(contextState?.overriddenCount) > 0 ||
+    Boolean(deepSeek?.enabled && deepSeek?.configured) ||
+    extraModels?.platforms?.some((platform) =>
+      platform?.enabled && platform?.apiKey && platform?.models?.length > 0
+    ) === true;
 }
 
 function resolveInjectionMode(relayExecutable = process.env.CODEX_QUOTA_RELAY_EXECUTABLE) {

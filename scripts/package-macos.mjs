@@ -21,11 +21,13 @@ const dmgPath = resolve(
   `Codex-Quota-Injector-${packageJson.version}-macos-${options.architecture}.dmg`,
 );
 
-await rm(releaseDir, { recursive: true, force: true });
+assertArchitecture(inputExecutable, swiftArchitecture);
+// The output directory may contain other builds or personal files. Replace only
+// this package's app bundle; hdiutil -ov replaces the versioned DMG below.
+await rm(appPath, { recursive: true, force: true });
 await mkdir(resolve(contents, "MacOS"), { recursive: true });
 await mkdir(resources, { recursive: true });
 
-assertArchitecture(inputExecutable, swiftArchitecture);
 await cp(inputExecutable, worker);
 execFileSync("/usr/bin/xcrun", [
   "swiftc",

@@ -18,6 +18,7 @@ if (
 }
 
 async function runLauncher() {
+  const { AccountManager } = await import("./account-manager.mjs");
   const { prepareCodexLaunch } = await import("./codex-bridge.mjs");
   const { CodexContextManager } = await import("./codex-context.mjs");
   const { DeepSeekManager } = await import("./deepseek-manager.mjs");
@@ -39,7 +40,8 @@ async function runLauncher() {
   const port = Number(process.env.CODEX_QUOTA_CDP_PORT ?? 9229);
   const instanceMode = isSea() ? "formal" : "dev";
   const instanceVersion = String(packageJson.version ?? "0.0.0");
-  const explicitStart = isSea() || process.env.CODEX_QUOTA_EXPLICIT_START === "1";
+  const explicitStart = isSea() || process.env.CODEX_QUOTA_EXPLICIT_START === "1" ||
+    process.argv.includes("--explicit-start");
   process.title = "Codex Quota Injector";
   const logPath = installFileLogger();
   if (!explicitStart) {
@@ -49,6 +51,7 @@ async function runLauncher() {
   let instanceLock = null;
   let takeoverInProgress = false;
   let launchOptions = { env: {}, relay: null };
+  const accountManager = new AccountManager();
   const contextManager = new CodexContextManager();
   const deepSeekManager = new DeepSeekManager();
   const extraModelManager = new ExtraModelManager();
@@ -81,21 +84,34 @@ async function runLauncher() {
       return;
     }
 
+    await accountManager.initialize();
     await contextManager.initialize();
     await deepSeekManager.initialize();
     await extraModelManager.initialize();
-    launchOptions = await prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager });
+    launchOptions = await prepareCodexLaunch({
+      accountManager,
+      deepSeekManager,
+      extraModelManager,
+      contextManager,
+    });
     await ensureCodexDebugMode(port, launchOptions);
 
     console.log(`[launcher] 已启动，日志=${logPath}`);
     await runInjector({
       port,
       injectionMode: launchOptions.injectionMode,
+      accountManager,
       contextManager,
       deepSeekManager,
       extraModelManager,
       managersInitialized: true,
-      prepareLaunch: () => prepareCodexLaunch({ deepSeekManager, extraModelManager, contextManager }),
+      accountManagerInitialized: true,
+      prepareLaunch: () => prepareCodexLaunch({
+        accountManager,
+        deepSeekManager,
+        extraModelManager,
+        contextManager,
+      }),
     });
   } catch (error) {
     console.error(`[launcher] ${error?.stack ?? error}`);
@@ -112,18 +128,21 @@ async function runLauncher() {
         ready: false,
         debugReady: false,
         relayRequired: Boolean(options?.relay && !options.relay.expectAbsent),
+        relayExpectedAbsent: Boolean(options?.relay?.expectAbsent),
         relayConfigReady: false,
         relayStateReady: false,
         relayStateReason: "Codex 未运行",
       };
     const relayConfigStatus = readiness.relayRequired
       ? readiness.relayConfigReady ? "正常" : "未就绪"
-      : "不要求";
+      : readiness.relayExpectedAbsent ? "不使用" : "不要求";
     const relayStateStatus = readiness.relayRequired
       ? readiness.relayStateReady
         ? "正常"
         : `未就绪（${readiness.relayStateReason ?? "未知原因"}）`
-      : "不要求";
+      : readiness.relayExpectedAbsent
+        ? readiness.relayStateReady ? "未运行" : "仍在运行"
+        : "不要求";
     console.log(
       `[launcher] Codex 启动条件：进程=${isRunning ? "运行中" : "未运行"}，` +
       `调试端口 ${cdpPort}=${readiness.debugReady ? "正常" : "不可用"}，` +

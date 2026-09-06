@@ -115,6 +115,7 @@ function prepareChatRequest(request, history) {
   // Responses and Chat use opposite defaults for streaming. Preserve the caller's
   // explicit choice instead of changing a non-streaming request into SSE.
   const chat = { model, messages, stream: Boolean(request.stream) };
+  if (chat.stream) chat.stream_options = { include_usage: true };
   const maxTokens = request.max_output_tokens ?? request.max_tokens ?? request.max_completion_tokens;
   if (Number.isFinite(Number(maxTokens)) && Number(maxTokens) > 0) {
     chat.max_tokens = Number(maxTokens);
@@ -291,12 +292,17 @@ function forwardChatRequest(requestHeaders, response, targetUrl, prepared, histo
     void forwardChatJson(upstreamResponse, response, prepared.source, history);
   });
   upstream.once("error", (error) => writeError(response, 502, `Chat 上游请求失败：${error.message}`));
+  forwardClientCancellation(response, upstream);
   upstream.end(body);
 }
 
 async function forwardUpstreamError(upstream, response) {
-  const body = await readBodyText(upstream);
-  writeError(response, upstream.statusCode ?? 502, `Chat 上游返回错误：${extractErrorMessage(body)}`);
+  try {
+    const body = await readBodyText(upstream);
+    writeError(response, upstream.statusCode ?? 502, `Chat 上游返回错误：${extractErrorMessage(body)}`);
+  } catch (error) {
+    writeError(response, 502, `Chat 上游错误响应中断：${error.message}`);
+  }
 }
 
 async function forwardChatJson(upstream, response, source, history) {
@@ -314,8 +320,9 @@ async function forwardChatJson(upstream, response, source, history) {
 function pipeChatStream(upstream, response, source, history) {
   let pending = "";
   const state = new ChatResponseState(source, (completed) => history.remember(completed));
+  upstream.setEncoding("utf8");
   upstream.on("data", (chunk) => {
-    pending += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    pending += chunk;
     const blocks = pending.split(/\r?\n\r?\n/);
     pending = blocks.pop() ?? "";
     for (const block of blocks) {
@@ -345,6 +352,7 @@ function pipeChatStream(upstream, response, source, history) {
     response.end();
   });
   upstream.once("error", (error) => {
+    if (response.destroyed) return;
     state.fail(response, `Chat 流中断：${error.message}`);
     response.end();
   });
@@ -704,9 +712,11 @@ function forwardPassthrough(request, response, targetUrl) {
     headers: normalizedHeaders(request.headers, false),
   }, (upstreamResponse) => {
     response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+    upstreamResponse.once("error", () => response.destroy());
     upstreamResponse.pipe(response);
   });
   upstream.once("error", (error) => writeError(response, 502, `上游请求失败：${error.message}`));
+  forwardClientCancellation(response, upstream);
   request.pipe(upstream);
 }
 
@@ -718,10 +728,18 @@ function forwardJson(requestHeaders, response, targetUrl, value) {
   const transport = targetUrl.protocol === "https:" ? requestHttps : requestHttp;
   const upstream = transport(targetUrl, { method: "POST", headers }, (upstreamResponse) => {
     response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+    upstreamResponse.once("error", () => response.destroy());
     upstreamResponse.pipe(response);
   });
   upstream.once("error", (error) => writeError(response, 502, `上游请求失败：${error.message}`));
+  forwardClientCancellation(response, upstream);
   upstream.end(body);
+}
+
+function forwardClientCancellation(response, upstream) {
+  response.once("close", () => {
+    if (!response.writableFinished) upstream.destroy();
+  });
 }
 
 async function readBodyText(stream) {
@@ -745,7 +763,7 @@ function writeSse(response, event, data) {
 }
 
 function writeError(response, statusCode, message) {
-  if (response.headersSent || response.writableEnded) {
+  if (response.destroyed || response.headersSent || response.writableEnded) {
     response.destroy();
     return;
   }

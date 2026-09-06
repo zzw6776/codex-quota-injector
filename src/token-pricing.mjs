@@ -31,10 +31,17 @@ const DEEPSEEK_PRICES = Object.freeze({
   "deepseek-v4-pro": priceTier(3, 0.025, 3, 6),
 });
 
+// Standard API USD per 1M tokens, checked 2026-09-06:
+// https://developers.openai.com/api/docs/pricing
+// Sol promotional rates are published through at least 2026-11-21.
 const OPENAI_PRICES = Object.freeze({
+  "gpt-6-astra": modelPrice(
+    priceTier(10, 1, 12.5, 50),
+    priceTier(20, 2, 25, 75),
+  ),
   "gpt-5.6-sol": modelPrice(
-    priceTier(5, 0.5, 6.25, 30),
-    priceTier(10, 1, 12.5, 45),
+    priceTier(4, 0.4, 5, 20),
+    priceTier(8, 0.8, 10, 30),
   ),
   "gpt-5.6-terra": modelPrice(
     priceTier(2, 0.2, 2.5, 12),
@@ -44,6 +51,9 @@ const OPENAI_PRICES = Object.freeze({
     priceTier(0.2, 0.02, 0.25, 1.2),
     priceTier(0.4, 0.04, 0.5, 1.8),
   ),
+  "gpt-5.6-cyber": modelPrice(priceTier(12.5, 1.25, 15.625, 75)),
+  "gpt-5.3-codex": modelPrice(priceTier(1.75, 0.175, null, 14)),
+  "chat-latest": modelPrice(priceTier(5, 0.5, null, 30)),
   "gpt-5.5": modelPrice(
     priceTier(5, 0.5, null, 30),
     priceTier(10, 1, null, 45),
@@ -58,6 +68,8 @@ const OPENAI_PRICES = Object.freeze({
 const MODEL_ALIASES = Object.freeze({
   "gpt-5.6": "gpt-5.6-sol",
   "gpt-5.6-sol-wm": "gpt-5.6-sol",
+  "gpt-daybreak-blue-latest": "gpt-5.6-sol",
+  "gpt-daybreak-red-latest": "gpt-5.6-cyber",
 });
 
 export class TokenPricingManager {
@@ -132,12 +144,9 @@ export class TokenPricingManager {
       return unavailableCost(requestedModel, "当前模型没有对应的官方价格配置");
     }
     const explicitTier = options?.contextTier;
-    const longContext = explicitTier === "long" ||
-      (explicitTier !== "short" && positiveNumber(usage?.input_tokens) > LONG_CONTEXT_THRESHOLD);
+    const longContext = Boolean(modelPricing.long) && (explicitTier === "long" ||
+      (explicitTier !== "short" && positiveNumber(usage?.input_tokens) > LONG_CONTEXT_THRESHOLD));
     const rates = longContext ? modelPricing.long : modelPricing.short;
-    if (!rates) {
-      return unavailableCost(requestedModel, "当前模型没有长上下文价格");
-    }
     return calculateWithTier({
       requestedModel,
       normalizedModel,
@@ -375,8 +384,9 @@ export function resolveContextTier(model, inputTokens) {
   const normalizedModel = MODEL_ALIASES[requestedModel] ?? requestedModel;
   if (DEEPSEEK_PRICES[normalizedModel]) return "standard";
   const modelPricing = OPENAI_PRICES[normalizedModel];
-  if (!modelPricing) return "standard";
-  return modelPricing.long && positiveNumber(inputTokens) > LONG_CONTEXT_THRESHOLD
+  // Keep request-size buckets even before the model is known. Once its name
+  // is recovered, merged short requests must not become one long request.
+  return (!modelPricing || modelPricing.long) && positiveNumber(inputTokens) > LONG_CONTEXT_THRESHOLD
     ? "long"
     : "short";
 }

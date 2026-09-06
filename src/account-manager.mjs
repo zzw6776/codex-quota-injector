@@ -32,6 +32,7 @@ export class AccountManager {
     this.oauthPromise = null;
     this.oauthAbortController = null;
     this.refreshLocks = new Map();
+    this.subscriptionRefreshAttempts = new Map();
     this.officialSyncPromise = null;
     this.officialCredentialWatcher = null;
     this.officialSyncTimer = null;
@@ -107,6 +108,14 @@ export class AccountManager {
       credits: current?.credits ?? null,
       operation: this.operation,
     };
+  }
+
+  async getCurrentModelCatalogAccount() {
+    await this.syncCurrentAccountFromOfficialCredentials();
+    const accountId = this.store.index.currentAccountId;
+    const account = accountId ? this.store.get(accountId) : null;
+    if (account?.authMode === "apiKey" && account.openaiApiKey) return account;
+    return account?.authMode === "oauth" && account.tokens?.accessToken ? account : null;
   }
 
   async refreshAll({ forceSubscription = false } = {}) {
@@ -186,7 +195,7 @@ export class AccountManager {
       const imported = [];
       for (const candidate of candidates) {
         const tokens = candidate.refreshToken && !candidate.accessToken
-          ? await refreshTokens(candidate.refreshToken, candidate.idToken)
+          ? { ...candidate, ...await refreshTokens(candidate.refreshToken, candidate.idToken) }
           : candidate;
         imported.push(await this.#upsertOAuthTokens(tokens));
       }
@@ -228,9 +237,10 @@ export class AccountManager {
       }
       const candidates = parseTokenInput(JSON.stringify(raw));
       if (candidates.length === 0) throw new Error("本机 auth.json 中没有可导入凭据");
-      const tokens = candidates[0].refreshToken && !candidates[0].accessToken
-        ? await refreshTokens(candidates[0].refreshToken, candidates[0].idToken)
-        : candidates[0];
+      const candidate = candidates[0];
+      const tokens = candidate.refreshToken && !candidate.accessToken
+        ? { ...candidate, ...await refreshTokens(candidate.refreshToken, candidate.idToken) }
+        : candidate;
       const account = await this.#upsertOAuthTokens(tokens);
       await this.refreshAccount(account.id, { forceSubscription: true });
       return "已导入本机账号";
@@ -290,6 +300,7 @@ export class AccountManager {
         throw new Error("当前账号不能移除，请先切换到其他账号");
       }
       await this.#withAccountLock(accountId, () => this.store.remove(accountId));
+      this.subscriptionRefreshAttempts.delete(accountId);
       return `已移除 ${account.email}`;
     });
   }
@@ -346,10 +357,15 @@ export class AccountManager {
       };
       if (quota.planType) updates.planType = quota.planType;
 
+      const subscriptionAttemptedAt = Math.max(
+        account.subscriptionUpdatedAt ? account.subscriptionUpdatedAt * 1000 : 0,
+        this.subscriptionRefreshAttempts.get(account.id) ?? 0,
+      );
       const subscriptionStale =
-        !account.subscriptionUpdatedAt ||
-        Date.now() - account.subscriptionUpdatedAt * 1000 > SUBSCRIPTION_REFRESH_MS;
-      if (forceSubscription || !account.subscriptionActiveUntil || subscriptionStale) {
+        !subscriptionAttemptedAt || Date.now() - subscriptionAttemptedAt > SUBSCRIPTION_REFRESH_MS;
+      if (forceSubscription || subscriptionStale) {
+        const attemptedAt = Date.now();
+        this.subscriptionRefreshAttempts.set(account.id, attemptedAt);
         try {
           const subscription = await fetchSubscription(account);
           if (subscription.accountId) updates.accountId = subscription.accountId;
@@ -357,9 +373,8 @@ export class AccountManager {
           if (subscription.subscriptionActiveUntil) {
             updates.subscriptionActiveUntil = subscription.subscriptionActiveUntil;
           }
-          updates.subscriptionUpdatedAt = Math.floor(Date.now() / 1000);
+          updates.subscriptionUpdatedAt = Math.floor(attemptedAt / 1000);
         } catch (error) {
-          updates.quotaError = `订阅刷新失败：${error.message}`;
           console.error(`[subscription] ${account.email}: ${error.message}`);
         }
       }
@@ -437,7 +452,7 @@ export class AccountManager {
         if (candidates.length === 0) return;
         const candidate = candidates[0];
         const tokens = candidate.refreshToken && !candidate.accessToken
-          ? await refreshTokens(candidate.refreshToken, candidate.idToken)
+          ? { ...candidate, ...await refreshTokens(candidate.refreshToken, candidate.idToken) }
           : candidate;
         account = await this.#upsertOAuthTokens(tokens);
       }
@@ -474,17 +489,27 @@ export class AccountManager {
     } else {
       const candidate = parseTokenInput(JSON.stringify(credentials))[0];
       if (candidate?.accessToken) {
+        if (!account && candidate.accountId) {
+          const current = this.store.get(this.store.index.currentAccountId);
+          // Follow an explicit workspace selection without duplicating the current
+          // session's refresh token under a second stored account.
+          if (current?.authMode === "oauth" && sameTokens(current.tokens, candidate)) {
+            account = current;
+          }
+        }
         const nextTokens = {
           idToken: candidate.idToken || account?.tokens.idToken || "",
           accessToken: candidate.accessToken,
           refreshToken: candidate.refreshToken ?? account?.tokens.refreshToken ?? null,
+          accountId: candidate.accountId,
         };
         if (
           !account ||
           !sameTokens(account.tokens, nextTokens) ||
+          (candidate.accountId && candidate.accountId !== account.accountId) ||
           account.authStatus === "needsReauth"
         ) {
-          account = await this.#upsertOAuthTokens(nextTokens);
+          account = await this.#upsertOAuthTokens(nextTokens, account);
           credentialsChanged = true;
         }
       }
@@ -503,7 +528,7 @@ export class AccountManager {
     return { changed: credentialsChanged || currentChanged, account };
   }
 
-  async #upsertOAuthTokens(tokens) {
+  async #upsertOAuthTokens(tokens, existingAccount = null) {
     if (!tokens.accessToken) throw new Error("OAuth 凭据缺少 access_token");
     const idClaims = decodeJwt(tokens.idToken) ?? {};
     const accessClaims = decodeJwt(tokens.accessToken) ?? {};
@@ -512,9 +537,10 @@ export class AccountManager {
     const profile = accessClaims["https://api.openai.com/profile"] ?? {};
     const email = idClaims.email ?? profile.email ?? auth.email;
     if (!email) throw new Error("无法从凭据中识别账号邮箱");
-    const accountId = auth.chatgpt_account_id ?? null;
+    // auth.json can explicitly select a workspace different from the JWT default.
+    const accountId = tokens.accountId ?? auth.chatgpt_account_id ?? null;
     const organizationId = auth.chatgpt_organization_id ?? auth.organization_id ?? null;
-    const existing = this.store.list().find((account) =>
+    const existing = existingAccount ?? this.store.list().find((account) =>
       (accountId && account.accountId === accountId) ||
       (!accountId && account.email.toLowerCase() === String(email).toLowerCase()),
     );
@@ -872,17 +898,21 @@ function parseAccountCheck(payload, preferredAccountId) {
     : source && typeof source === "object"
       ? Object.entries(source).map(([key, value]) => ({ ...value, __key: key }))
       : [];
-  const selected = records.find((record) => {
+  const selected = preferredAccountId ? records.find((record) => {
     const node = record.account ?? record;
-    return [node.account_id, node.id, node.chatgpt_account_id, node.workspace_id]
+    return [node.account_id, node.id, node.chatgpt_account_id, node.workspace_id, record.__key]
       .filter(Boolean)
       .includes(preferredAccountId);
-  }) ?? records[0] ?? {};
+  }) : records[0];
+  if (!selected) {
+    return { accountId: null, planType: null, subscriptionActiveUntil: null };
+  }
   const account = selected.account ?? selected;
   const entitlement = selected.entitlement ?? {};
   return {
     accountId:
-      account.account_id ?? account.id ?? account.chatgpt_account_id ?? account.workspace_id ?? null,
+      preferredAccountId ?? account.account_id ?? account.id ??
+      account.chatgpt_account_id ?? account.workspace_id ?? selected.__key ?? null,
     planType: entitlement.subscription_plan ?? account.plan_type ?? account.planType ?? null,
     subscriptionActiveUntil: entitlement.expires_at ?? account.expires_at ?? null,
   };
@@ -925,8 +955,10 @@ function parseCredentialInput(rawInput) {
     const accessToken = tokens?.access_token ?? tokens?.accessToken ?? personal ?? "";
     const idToken = tokens?.id_token ?? tokens?.idToken ?? "";
     const refreshToken = tokens?.refresh_token ?? tokens?.refreshToken ?? null;
+    const accountId = tokens?.account_id ?? tokens?.accountId ??
+      item?.account_id ?? item?.accountId ?? null;
     if (accessToken || refreshToken) {
-      parsed.tokens.push({ idToken, accessToken, refreshToken });
+      parsed.tokens.push({ idToken, accessToken, refreshToken, accountId });
     }
   }
   return parsed;
@@ -965,8 +997,8 @@ function matchOfficialAccount(credentials, accounts) {
   if (!accountId && !email && !accessToken) return undefined;
 
   if (accountId) {
-    const byAccountId = accounts.find((account) => account.accountId === accountId);
-    if (byAccountId) return byAccountId;
+    // The same email may belong to several workspaces; never borrow its other credentials.
+    return accounts.find((account) => account.accountId === accountId) ?? null;
   }
   if (email) {
     const normalizedEmail = String(email).trim().toLowerCase();

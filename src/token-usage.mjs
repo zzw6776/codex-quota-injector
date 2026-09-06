@@ -20,7 +20,9 @@ import {
   TokenPricingManager,
 } from "./token-pricing.mjs";
 
-const CACHE_VERSION = 9;
+// Rebuild segments: previously unknown Astra requests shared a single standard
+// bucket, so their short/long context boundaries cannot be recovered from totals.
+const CACHE_VERSION = 10;
 const DISCOVERY_INTERVAL_MS = 5_000;
 const MAX_VIEW_TURNS = 120;
 const MAX_STORED_TURNS = 2_000;
@@ -28,7 +30,7 @@ const MAX_TRACKED_ROLLOUT_STATES = 256;
 const MAX_HISTORICAL_THREADS = 2_048;
 const MAX_HISTORICAL_SEGMENTS = 128;
 const READ_CHUNK_BYTES = 1024 * 1024;
-const COST_CACHE_VERSION = 2;
+const COST_CACHE_VERSION = 3;
 const ROLLOUT_PARSER_VERSION = 3;
 const MAX_SEEN_EVENT_IDS = 50_000;
 const CACHE_PERSIST_DELAY_MS = 10_000;
@@ -1303,10 +1305,9 @@ export class TokenUsageManager {
       if (!last) return;
       const existing = this.turns.get(state.currentTurnId);
       if (existing?.source === "event") {
-        existing.cumulativeTotalTokens = Math.max(
-          positiveNumber(existing.cumulativeTotalTokens),
-          positiveNumber(record.payload.info?.total_token_usage?.total_tokens),
-        );
+        // Relay events are buffered and can arrive after this rollout record.
+        // Do not advance their deduplication watermark without adding usage:
+        // the matching relay event would otherwise be discarded as a duplicate.
         const modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
         if (modelContextWindow > 0) existing.modelContextWindow = modelContextWindow;
         this.#markCacheDirty();

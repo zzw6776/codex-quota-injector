@@ -541,12 +541,14 @@ Get-CimInstance Win32_Process -Filter "ProcessId = $processId" |
   if (process.platform === "darwin") {
     const { stdout } = await execFileAsync(
       "/bin/ps",
-      ["-p", String(processId), "-o", "etimes="],
+      ["-p", String(processId), "-o", "etime="],
     ).catch(() => ({ stdout: "" }));
-    const elapsedSeconds = Number(firstNonEmptyLine(stdout));
-    return Number.isFinite(elapsedSeconds)
-      ? Date.now() - elapsedSeconds * 1000
-      : null;
+    // macOS ps exposes elapsed time as [[days-]hours:]minutes:seconds.
+    const elapsed = firstNonEmptyLine(stdout)?.match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+    if (!elapsed) return null;
+    const elapsedSeconds = Number(elapsed[1] ?? 0) * 86_400 +
+      Number(elapsed[2] ?? 0) * 3_600 + Number(elapsed[3]) * 60 + Number(elapsed[4]);
+    return Date.now() - elapsedSeconds * 1000;
   }
   return null;
 }
@@ -905,6 +907,7 @@ async function readCodexLaunchReadiness(port, options = {}) {
   const debugReady = await isCodexDebugPortReady(port, { timeoutMs: 1_000 });
   const relay = options?.relay;
   const relayRequired = Boolean(relay && !relay.expectAbsent);
+  const relayExpectedAbsent = Boolean(relay?.expectAbsent);
   let relayConfigReady = true;
   let relayStateReady = true;
   let relayStateReason = null;
@@ -920,12 +923,24 @@ async function readCodexLaunchReadiness(port, options = {}) {
     relayStateReady = relayStateReadiness.ready;
     relayStateReason = relayStateReadiness.reason;
     relayReady = relayConfigReady && relayStateReady;
+  } else if (relayExpectedAbsent && relay.statePath) {
+    const relayStateReadiness = await readRelayStateReadiness(
+      relay.statePath,
+      null,
+      { wslNative: relay.wslNative === true },
+    );
+    relayStateReady = !relayStateReadiness.ready;
+    relayStateReason = relayStateReadiness.ready
+      ? "仍检测到运行中的模型中继"
+      : null;
+    relayReady = relayStateReady;
   }
   return {
     ready: debugReady && relayReady,
     debugReady,
     relayReady,
     relayRequired,
+    relayExpectedAbsent,
     relayConfigReady,
     relayStateReady,
     relayStateReason,
@@ -934,6 +949,9 @@ async function readCodexLaunchReadiness(port, options = {}) {
 
 function formatCodexReadinessError(port, readiness) {
   const debugStatus = readiness.debugReady ? "正常" : "不可用";
+  if (readiness.relayExpectedAbsent && !readiness.relayReady) {
+    return `Codex 启动后未就绪：调试端口 ${port}=${debugStatus}，模型中继仍在运行`;
+  }
   if (!readiness.relayRequired) {
     return `Codex 启动后未就绪：调试端口 ${port}=${debugStatus}，模型中继=不要求`;
   }
