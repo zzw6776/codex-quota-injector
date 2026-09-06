@@ -72,6 +72,11 @@ const MODEL_ALIASES = Object.freeze({
   "gpt-daybreak-red-latest": "gpt-5.6-cyber",
 });
 
+export function getOpenAIShortContextRates(model) {
+  const requestedModel = String(model ?? "").trim();
+  return OPENAI_PRICES[MODEL_ALIASES[requestedModel] ?? requestedModel]?.short ?? null;
+}
+
 export class TokenPricingManager {
   constructor({
     dataDir = defaultAccountDataDir(),

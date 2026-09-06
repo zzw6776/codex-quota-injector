@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 94;
+export const WIDGET_RUNTIME_VERSION = 102;
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -19,6 +19,7 @@ export function installQuotaWidget(
   const VERSION = runtimeVersion;
   const MAX_CONVERSATION_USAGE_CACHE = 240;
   const CONVERSATION_TOOLTIP_DELAY_MS = 500;
+  const ACCOUNT_TOOLTIP_DELAY_MS = 300;
   const CUSTOM_REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"];
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   try {
@@ -82,8 +83,8 @@ export function installQuotaWidget(
     dismissed: false,
     actions: [],
     page: "accounts",
-    wakeupAccountId: null,
-    wakeupDraft: null,
+    wakeupDrafts: new Map(),
+    accountTooltipTimer: null,
     contextEditingSlug: null,
     deepSeekKeyDraft: null,
     deepSeekEnabledDraft: null,
@@ -142,6 +143,7 @@ export function installQuotaWidget(
     }
     .quota-popover.context-popover { width: min(620px, calc(100vw - 24px)); }
     .quota-popover.provider-popover { width: min(520px, calc(100vw - 24px)); }
+    .quota-popover.wakeup-popover { width: min(520px, calc(100vw - 24px)); }
     .quota-popover.extra-models-popover { width: min(660px, calc(100vw - 24px)); }
     .quota-wrap.is-open .quota-popover {
       opacity: 1; visibility: visible; transform: translateY(0) scale(1); pointer-events: auto;
@@ -166,10 +168,12 @@ export function installQuotaWidget(
     .provider-icon-btn:hover, .provider-icon-btn:focus-visible {
       color: inherit; background: rgba(255,255,255,.07); outline: none;
     }
-    .accounts-head { align-items: baseline; }
+    .accounts-head, .accounts-head .panel-title-wrap { align-items: center; }
     .accounts-head .icon-btn {
-      display: inline-block; height: auto; padding: 5px 0; line-height: 1; transform: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      flex: 0 0 26px; width: 26px; height: 26px; padding: 0; line-height: 1;
     }
+    .accounts-head .icon-btn svg { display: block; width: 12px; height: 12px; flex: 0 0 auto; }
     .account-list { display: grid; gap: 8px; }
     .account-card { padding: 11px 12px; border: 1px solid rgba(255,255,255,.07); border-radius: 12px; background: rgba(255,255,255,.025); }
     .account-card.current { border-color: rgba(217,184,255,.33); background: rgba(217,184,255,.055); }
@@ -196,6 +200,12 @@ export function installQuotaWidget(
     .account-switch { padding: 2px 7px; border-radius: 999px; line-height: 16px; white-space: nowrap; }
     .account-remove { padding: 2px 7px; border-radius: 999px; line-height: 16px; white-space: nowrap; color: #ef8e86; border-color: rgba(220,76,63,.2); background: rgba(220,76,63,.06); }
     .account-remove:hover { background: rgba(220,76,63,.12); }
+    .account-head .badges > .badge, .account-head .badges > .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 22px; padding-top: 0; padding-bottom: 0;
+      font-size: 10.5px; font-weight: 500; line-height: 16px;
+    }
+    .account-tooltip { position: fixed; inset: auto; margin: 0; width: max-content; max-width: min(320px, calc(100vw - 24px)); padding: 7px 10px; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; color: #f4f4f7; background: #24242d; box-shadow: 0 6px 20px rgba(0,0,0,.25); font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; }
     .empty { padding: 18px 8px; text-align: center; color: var(--token-text-secondary, #aaaab5); font-size: 12px; }
     .operation { margin-top: 9px; padding: 8px 10px; border-radius: 9px; overflow-wrap: anywhere; background: rgba(255,255,255,.045); color: var(--token-text-secondary, #b5b5bf); font-size: 11px; }
     .operation.has-action { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -263,14 +273,15 @@ export function installQuotaWidget(
     .provider-toggle input { width: auto; margin: 0; }
     .provider-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
     .provider-warning { color: #e5b86a; font-size: 10px; line-height: 15px; }
-    .wakeup-entry { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
-    .wakeup-entry span { color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
     .wakeup-times { display: grid; gap: 7px; }
     .wakeup-time-row { display: flex; align-items: center; gap: 8px; }
     .wakeup-time-row label { flex: 0 0 auto; font-size: 11px; }
     .wakeup-time-row input { min-width: 0; }
     .wakeup-time-row button { flex: 0 0 auto; }
     .wakeup-result { line-height: 1.6; }
+    .btn.wakeup-status:not(.primary) { color: var(--token-text-secondary, #aaaab5); }
+    .wakeup-status:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; border-radius: 2px; }
+    .wakeup-form { margin-top: 9px; padding: 0; }
     .extra-platform-list { display: grid; gap: 8px; }
     .extra-platform-card { padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
     .extra-platform-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -311,6 +322,7 @@ export function installQuotaWidget(
     .quota-wrap.is-light .btn.primary { color: #71438e; border-color: rgba(116,69,143,.28); background: rgba(116,69,143,.08); }
     .quota-wrap.is-light .account-remove { color: #b53d35; border-color: rgba(181,61,53,.2); background: rgba(181,61,53,.045); }
     .quota-wrap.is-light .account-remove:hover { background: rgba(181,61,53,.09); }
+    .quota-wrap.is-light .account-tooltip { color: #202124; background: #fff; border-color: rgba(0,0,0,.12); box-shadow: 0 6px 20px rgba(0,0,0,.12); }
     .quota-wrap.is-light .icon-btn:hover { background: rgba(0,0,0,.06); }
     .quota-wrap.is-light .provider-icon-btn {
       color: #70717c; background: transparent;
@@ -318,6 +330,7 @@ export function installQuotaWidget(
     .quota-wrap.is-light .provider-icon-btn:hover, .quota-wrap.is-light .provider-icon-btn:focus-visible {
       color: #363740; background: rgba(0,0,0,.06);
     }
+    .quota-wrap.is-light .wakeup-status:not(.primary) { color: #6f6f79; }
     .quota-wrap.is-light .add-panel, .quota-wrap.is-light .panel-version, .quota-wrap.is-light details { border-color: rgba(0,0,0,.09); }
     .quota-wrap.is-light input, .quota-wrap.is-light textarea, .quota-wrap.is-light select { color: #202124; border-color: rgba(0,0,0,.13); background: rgba(0,0,0,.025); }
     .quota-wrap.is-light .operation { color: #666670; background: rgba(0,0,0,.04); }
@@ -388,10 +401,11 @@ export function installQuotaWidget(
   function render() {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (!wrap) return;
+    hideAccountTooltip();
     const previousPopover = wrap.querySelector(".quota-popover");
     const previousScrollTop = previousPopover?.scrollTop ?? 0;
     const previousScrollLeft = previousPopover?.scrollLeft ?? 0;
-    const wakeupFocus = state.shadow.activeElement?.closest?.(".wakeup-form")
+    const wakeupFocus = state.shadow.activeElement?.closest?.(".wakeup-popover")
       ? state.shadow.activeElement.id : null;
     wrap.classList.toggle("is-light", isLightTheme());
     wrap.classList.toggle("is-open", state.pinned);
@@ -465,6 +479,8 @@ export function installQuotaWidget(
       : "";
     const popoverClass = contextPage
       ? "quota-popover context-popover"
+      : wakeupPage
+        ? "quota-popover wakeup-popover"
       : providerPage
         ? "quota-popover provider-popover"
         : extraModelsPage
@@ -479,7 +495,16 @@ export function installQuotaWidget(
         : extraModelsPage
           ? renderExtraModelsPage()
         : `
-        <header class="panel-head accounts-head"><div class="panel-title-wrap"><div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div><button class="icon-btn provider-icon-btn provider-open" type="button" aria-label="DeepSeek 设置" title="DeepSeek 设置"><span aria-hidden="true">DS</span></button><button class="icon-btn provider-icon-btn extra-models-open" type="button" aria-label="额外模型管理" title="额外模型管理"><span aria-hidden="true">M+</span></button><button class="icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文">⚙</button></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+        <header class="panel-head accounts-head">
+          <div class="panel-title-wrap">
+            <div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div>
+            <button class="icon-btn provider-icon-btn provider-open" type="button" aria-label="DeepSeek 设置" title="DeepSeek 设置"><span aria-hidden="true">DS</span></button>
+            <button class="icon-btn provider-icon-btn extra-models-open" type="button" aria-label="额外模型管理" title="额外模型管理"><span aria-hidden="true">M+</span></button>
+            <button class="icon-btn provider-icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.3 2.2h3.4l.5 2.6 3 1.7 2.5-.9 1.7 2.9-2 1.8v3.4l2 1.8-1.7 2.9-2.5-.9-3 1.7-.5 2.6h-3.4l-.5-2.6-3-1.7-2.5.9-1.7-2.9 2-1.8v-3.4l-2-1.8 1.7-2.9 2.5.9 3-1.7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button class="icon-btn provider-icon-btn wakeup-open" type="button" aria-label="定时任务" title="定时任务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h6"/></svg></button>
+          </div>
+          <button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button>
+        </header>
         <div class="account-list">${accountHtml}</div>
         ${operation}
         <section class="add-panel">
@@ -1203,7 +1228,7 @@ export function installQuotaWidget(
     return `
       <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn provider-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">DeepSeek 模型</div><div class="panel-subtitle">${escapeHtml(provider.model?.displayName ?? "DeepSeek V4 Flash")} · 推理深度 low / high / max</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
       <section class="provider-summary"><div class="provider-status"><span class="${provider.enabled ? "enabled" : "disabled"}">${provider.enabled ? "已启用" : "未启用"}</span><span class="badge">${escapeHtml(provider.model?.slug ?? "deepseek-v4-flash")}</span></div><div class="provider-note">启用后，OpenAI 官方模型和 DeepSeek 会同时出现在模型列表。供应商在新建任务时确定，同一任务不能中途切换。</div></section>
-      <form class="provider-form">
+      <form class="provider-form deepseek-form">
         <label class="provider-toggle"><input name="enabled" type="checkbox" ${enabled ? "checked" : ""} ${supported && !pendingRestart ? "" : "disabled"}>在模型列表中启用 DeepSeek</label>
         <div class="provider-field"><label>DeepSeek API Key（本地明文保存并完整回显）</label><input class="provider-key" name="apiKey" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(key)}" placeholder="sk-..." ${supported && !pendingRestart ? "" : "disabled"}></div>
         <div class="provider-warning">Key 保存在 ${escapeHtml(provider.settingsPath ?? "本地 provider-settings.json")}；不会写入系统安全存储。保存、停用或删除后都会重启 Codex。</div>
@@ -1353,13 +1378,23 @@ export function installQuotaWidget(
   }
 
   function renderWakeupPage(busy) {
-    const account = state.data.accounts?.find((item) => item.id === state.wakeupAccountId);
-    const header = '<header class="panel-head"><div class="panel-title">定时唤醒</div><button class="btn wakeup-back" type="button">返回账号</button></header>';
-    if (!account) return `${header}<div class="empty">账号已移除</div>`;
+    const accounts = (state.data.accounts ?? []).filter((item) => item.authMode === "oauth");
+    const header = `<header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn wakeup-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">每日唤醒</div><div class="panel-subtitle">${accounts.length} 个账号 · 已开启 ${accounts.filter((item) => item.wakeup?.enabled).length} 个</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>`;
+    if (!accounts.length) return `${header}<div class="empty">添加 OAuth 账号后可配置每日唤醒；API Key 账号不支持此功能</div>`;
+    return `${header}
+      <section class="provider-summary">
+        <div class="provider-note">每天按电脑本地时区执行，可添加多个时刻。需要保持 Codex 和注入器运行；关闭或长时间休眠后不补发错过的时刻。</div>
+        <div class="provider-note">自动使用可用的最低价模型及最低推理强度。手动唤醒无需开启定时；多个账号依次执行。</div>
+      </section>
+      <div class="account-list">${accounts.map((account) => renderWakeupAccount(account, busy)).join("")}</div>`;
+  }
+
+  function renderWakeupAccount(account, busy) {
     const wakeup = account.wakeup ?? {};
-    const draft = state.wakeupDraft ?? { enabled: Boolean(wakeup.enabled), times: [...(wakeup.times ?? [])] };
+    const draft = state.wakeupDrafts.get(account.id) ?? { enabled: Boolean(wakeup.enabled), times: [...(wakeup.times ?? [])] };
+    const accountId = escapeHtml(account.id);
     const lastRun = wakeup.lastRun;
-    const statusNames = { running: "执行中", success: "请求完成", error: "未完成" };
+    const statusNames = { running: "执行中", success: "唤醒成功（模型已回复）", error: "唤醒未成功" };
     const result = lastRun
       ? `<div class="operation wakeup-result ${escapeHtml(lastRun.status)}">
           <div>${lastRun.source === "scheduled" ? "定时" : "手动"}唤醒 · ${escapeHtml(statusNames[lastRun.status] ?? "未知")} · ${escapeHtml(formatUpdatedAt(lastRun.startedAt))}</div>
@@ -1371,25 +1406,36 @@ export function installQuotaWidget(
     const message = wakeup.message
       ? `<div class="operation ${escapeHtml(wakeup.message.status)}">${escapeHtml(wakeup.message.text)}</div>` : "";
     const timeRows = draft.times.map((time, index) => `<div class="wakeup-time-row">
-      <label for="wakeup-time-${index}">时刻 ${index + 1}</label>
-      <input id="wakeup-time-${index}" name="time" type="time" step="60" value="${escapeHtml(time)}" required ${busy ? "disabled" : ""}>
+      <label for="wakeup-time-${accountId}-${index}">时刻 ${index + 1}</label>
+      <input id="wakeup-time-${accountId}-${index}" name="time" type="time" step="60" value="${escapeHtml(time)}" required ${busy ? "disabled" : ""}>
       <button class="btn wakeup-time-remove" type="button" data-time-index="${index}" ${busy ? "disabled" : ""}>移除</button>
     </div>`).join("");
-    return `${header}
-      <div class="provider-summary">
-        <div class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</div>
-        <div class="provider-note">每天按电脑本地时区执行，可添加多个时刻。需要保持 Codex 和注入器运行；关闭或长时间休眠后不补发错过的时刻。</div>
-        <div class="provider-note">下次计划：${wakeup.nextAt ? escapeHtml(formatUpdatedAt(wakeup.nextAt)) : "未开启"}</div>
-      </div>
-      <form class="provider-form wakeup-form">
-        <label class="provider-toggle"><input id="wakeup-enabled" name="enabled" type="checkbox" ${draft.enabled ? "checked" : ""} ${busy ? "disabled" : ""}>开启每日定时唤醒</label>
+    return `<article id="wakeup-account-${accountId}" class="account-card ${account.current ? "current" : ""}">
+      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}<span class="badge ${wakeup.enabled ? "current" : ""}">${wakeup.enabled ? "已开启" : "未开启"}</span></span></div>
+      <div class="expiry">下次计划：${wakeup.nextAt ? escapeHtml(formatUpdatedAt(wakeup.nextAt)) : "未开启"}</div>
+      <form class="wakeup-form" data-account-id="${accountId}">
+        <label class="provider-toggle"><input id="wakeup-enabled-${accountId}" name="enabled" type="checkbox" ${draft.enabled ? "checked" : ""} ${busy ? "disabled" : ""}>开启每日定时唤醒</label>
         <div class="wakeup-times">${timeRows || '<div class="context-note">尚未添加时间</div>'}</div>
-        <div class="provider-actions"><button class="btn wakeup-time-add" type="button" ${busy ? "disabled" : ""}>添加时间</button><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>保存设置</button></div>
+        <div class="provider-actions"><button class="btn wakeup-time-add" type="button" ${busy ? "disabled" : ""}>添加时间</button><button class="btn wakeup-now" type="button" data-account-id="${accountId}" ${busy || wakeup.busy || account.authStatus === "needsReauth" ? "disabled" : ""}>${wakeup.busy ? "唤醒中…" : "立即唤醒"}</button><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>保存设置</button></div>
       </form>
       ${message}
-      <div class="wakeup-entry"><span>立即发送一次简短消息，验证账号是否可唤醒</span><button class="btn primary wakeup-now" type="button" data-account-id="${escapeHtml(account.id)}" ${busy || wakeup.busy || account.authStatus === "needsReauth" ? "disabled" : ""}>${wakeup.busy ? "唤醒中…" : "立即唤醒"}</button></div>
-      <div class="provider-note">手动唤醒无需开启定时，会产生少量模型用量。多个账号依次执行；同一账号仍在唤醒时跳过重叠时刻。请求完成后请查看额度重置时间，确认计时是否开始。</div>
-      ${result}`;
+      ${result}
+    </article>`;
+  }
+
+  function renderWakeupStatus(account) {
+    if (account.authMode !== "oauth") return "";
+    const wakeup = account.wakeup ?? {};
+    const lastRun = wakeup.lastRun;
+    const result = lastRun
+      ? ({ running: "执行中", success: "成功", error: "未成功" }[lastRun.status] ?? "未知")
+      : wakeup.busy ? "等待执行" : "尚未执行";
+    const lines = [
+      `配置时间：${wakeup.times?.length ? wakeup.times.join("、") : "未配置"}`,
+      lastRun?.startedAt ? `${formatUpdatedAt(lastRun.startedAt)} · ${result}` : result,
+    ];
+    const tooltip = escapeHtml(lines.join("\n"));
+    return `<button class="btn account-switch wakeup-status wakeup-open ${wakeup.enabled ? "primary" : ""}" type="button" data-account-id="${escapeHtml(account.id)}" data-account-tooltip="${tooltip}" aria-label="每日唤醒${wakeup.enabled ? "已开启" : "未开启"}；${tooltip}；点击打开设置">唤醒</button>`;
   }
 
   function readWakeupForm(form) {
@@ -1414,14 +1460,13 @@ export function installQuotaWidget(
       ? ""
       : needsReauth
         ? '<span class="badge">需要重新授权</span>'
-        : `<button class="btn primary account-switch switch-account" type="button" data-account-id="${escapeHtml(account.id)}" ${busy ? "disabled" : ""}>切换到此账号</button>`;
+        : `<button class="btn primary account-switch switch-account" type="button" data-account-id="${escapeHtml(account.id)}" data-account-tooltip="切换到此账号" aria-label="切换到此账号" ${busy ? "disabled" : ""}>切换</button>`;
     const removeControl = `<button class="btn account-remove remove-account" type="button" data-account-id="${escapeHtml(account.id)}" data-account-email="${escapeHtml(account.email)}" title="${account.current ? "当前账号请先切换后再移除" : "移除本工具保存的账号凭据"}" ${busy || account.current ? "disabled" : ""}>移除</button>`;
     return `<article class="account-card ${account.current ? "current" : ""}">
-      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}${switchControl}${removeControl}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
+      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}${switchControl}${removeControl}${renderWakeupStatus(account)}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
       <div class="expiry account-meta"><span>订阅：${escapeHtml(expiry)}</span><span>最后刷新：${escapeHtml(updatedAt)}</span></div>
       ${quotaHtml}
       ${account.quotaError ? `<div class="quota-error">刷新异常：${escapeHtml(account.quotaError)}</div>` : ""}
-      ${account.authMode === "oauth" ? `<div class="wakeup-entry"><span>${account.wakeup?.busy ? "正在唤醒…" : account.wakeup?.enabled ? `每日唤醒 · ${account.wakeup.times.length} 个时刻` : "定时唤醒未开启"}</span><button class="btn wakeup-open" type="button" data-account-id="${escapeHtml(account.id)}">唤醒设置</button></div>` : ""}
     </article>`;
   }
 
@@ -1444,49 +1489,99 @@ export function installQuotaWidget(
     </div>`;
   }
 
+  function hideAccountTooltip() {
+    window.clearTimeout(state.accountTooltipTimer);
+    state.accountTooltipTimer = null;
+    state.shadow?.querySelector(".account-tooltip")?.remove();
+  }
+
+  function scheduleAccountTooltip(button) {
+    hideAccountTooltip();
+    state.accountTooltipTimer = window.setTimeout(() => {
+      state.accountTooltipTimer = null;
+      if (!button.isConnected || !state.pinned || state.dismissed) return;
+      const panel = button.closest(".quota-popover");
+      if (!panel) return;
+      const tooltip = document.createElement("div");
+      tooltip.className = "account-tooltip";
+      tooltip.setAttribute("role", "tooltip");
+      tooltip.setAttribute("popover", "manual");
+      tooltip.textContent = button.dataset.accountTooltip;
+      panel.append(tooltip);
+      tooltip.showPopover();
+      const anchor = button.getBoundingClientRect();
+      const bounds = tooltip.getBoundingClientRect();
+      const left = Math.max(12, Math.min(window.innerWidth - bounds.width - 12,
+        anchor.left + (anchor.width - bounds.width) / 2));
+      const above = anchor.top - bounds.height - 6;
+      const top = above >= 12 ? above : Math.max(12,
+        Math.min(window.innerHeight - bounds.height - 12, anchor.bottom + 6));
+      tooltip.style.left = `${Math.round(left)}px`;
+      tooltip.style.top = `${Math.round(top)}px`;
+    }, ACCOUNT_TOOLTIP_DELAY_MS);
+  }
+
   function bindEvents(wrap) {
+    wrap.querySelectorAll("[data-account-tooltip]").forEach((button) => {
+      button.addEventListener("pointerenter", () => scheduleAccountTooltip(button));
+      button.addEventListener("focus", () => scheduleAccountTooltip(button));
+      button.addEventListener("pointerleave", hideAccountTooltip);
+      button.addEventListener("blur", hideAccountTooltip);
+      button.addEventListener("pointerdown", hideAccountTooltip);
+      button.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") hideAccountTooltip();
+      });
+    });
+    wrap.querySelector(".quota-popover")?.addEventListener("scroll", hideAccountTooltip, { passive: true });
     wrap.querySelectorAll(".wakeup-open").forEach((button) => button.addEventListener("click", () => {
-      const account = state.data.accounts?.find((item) => item.id === button.dataset.accountId);
-      if (!account) return;
-      state.wakeupAccountId = account.id;
-      state.wakeupDraft = { enabled: Boolean(account.wakeup?.enabled), times: [...(account.wakeup?.times ?? [])] };
+      state.wakeupDrafts.clear();
       state.page = "wakeup";
       state.pinned = true;
       state.dismissed = false;
       render();
+      const popover = wrap.querySelector(".quota-popover");
+      if (popover) popover.scrollTop = 0;
+      if (button.dataset.accountId) {
+        state.shadow.getElementById(`wakeup-account-${button.dataset.accountId}`)?.scrollIntoView({ block: "nearest" });
+      }
     }));
     wrap.querySelector(".wakeup-back")?.addEventListener("click", () => {
       state.page = "accounts";
-      state.wakeupDraft = null;
-      state.wakeupAccountId = null;
+      state.wakeupDrafts.clear();
       render();
     });
-    const wakeupForm = wrap.querySelector(".wakeup-form");
-    const keepWakeupDraft = () => { state.wakeupDraft = readWakeupForm(wakeupForm); };
-    wakeupForm?.addEventListener("input", keepWakeupDraft);
-    wakeupForm?.addEventListener("change", keepWakeupDraft);
-    wrap.querySelector(".wakeup-time-add")?.addEventListener("click", () => {
-      keepWakeupDraft();
-      state.wakeupDraft.times.push("");
-      render();
-      state.shadow.getElementById(`wakeup-time-${state.wakeupDraft.times.length - 1}`)?.focus();
+    wrap.querySelectorAll(".wakeup-form").forEach((form) => {
+      const accountId = form.dataset.accountId;
+      const keepWakeupDraft = () => {
+        const draft = readWakeupForm(form);
+        state.wakeupDrafts.set(accountId, draft);
+        return draft;
+      };
+      form.addEventListener("input", keepWakeupDraft);
+      form.addEventListener("change", keepWakeupDraft);
+      form.querySelector(".wakeup-time-add")?.addEventListener("click", () => {
+        const draft = keepWakeupDraft();
+        draft.times.push("");
+        render();
+        state.shadow.getElementById(`wakeup-time-${accountId}-${draft.times.length - 1}`)?.focus();
+      });
+      form.querySelectorAll(".wakeup-time-remove").forEach((button) => button.addEventListener("click", () => {
+        const draft = keepWakeupDraft();
+        draft.times.splice(Number(button.dataset.timeIndex), 1);
+        render();
+      }));
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const draft = keepWakeupDraft();
+        draft.times = [...new Set(draft.times)].sort();
+        enqueue({ type: "wakeup-save", accountId, ...draft });
+        render();
+      });
     });
-    wrap.querySelectorAll(".wakeup-time-remove").forEach((button) => button.addEventListener("click", () => {
-      keepWakeupDraft();
-      state.wakeupDraft.times.splice(Number(button.dataset.timeIndex), 1);
-      render();
+    wrap.querySelectorAll(".wakeup-now").forEach((button) => button.addEventListener("click", () => {
+      button.disabled = true;
+      enqueue({ type: "wakeup-now", accountId: button.dataset.accountId });
     }));
-    wakeupForm?.addEventListener("submit", (event) => {
-      event.preventDefault();
-      keepWakeupDraft();
-      state.wakeupDraft.times = [...new Set(state.wakeupDraft.times)].sort();
-      enqueue({ type: "wakeup-save", accountId: state.wakeupAccountId, ...state.wakeupDraft });
-      render();
-    });
-    wrap.querySelector(".wakeup-now")?.addEventListener("click", (event) => {
-      event.currentTarget.disabled = true;
-      enqueue({ type: "wakeup-now", accountId: event.currentTarget.dataset.accountId });
-    });
     const chip = wrap.querySelector(".quota-chip");
     chip?.addEventListener("click", () => {
       state.dismissed = false;
@@ -1535,10 +1630,10 @@ export function installQuotaWidget(
     wrap.querySelector(".provider-key")?.addEventListener("input", (event) => {
       state.deepSeekKeyDraft = event.currentTarget.value;
     });
-    wrap.querySelector('.provider-form input[name="enabled"]')?.addEventListener("change", (event) => {
+    wrap.querySelector('.deepseek-form input[name="enabled"]')?.addEventListener("change", (event) => {
       state.deepSeekEnabledDraft = event.currentTarget.checked;
     });
-    wrap.querySelector(".provider-form")?.addEventListener("submit", (event) => {
+    wrap.querySelector(".deepseek-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
       const apiKey = String(form.get("apiKey") ?? "");
@@ -1701,11 +1796,11 @@ export function installQuotaWidget(
   }
 
   function dismissPanel() {
+    hideAccountTooltip();
     state.pinned = false;
     state.dismissed = true;
     state.page = "accounts";
-    state.wakeupAccountId = null;
-    state.wakeupDraft = null;
+    state.wakeupDrafts.clear();
     state.contextEditingSlug = null;
     state.extraPlatformDraft = null;
     const wrap = state.shadow?.querySelector(".quota-wrap");
@@ -1903,6 +1998,7 @@ export function installQuotaWidget(
   });
   state.mountObserver.observe(document.documentElement, { childList: true, subtree: true });
   state.resizeHandler = () => {
+    hideAccountTooltip();
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (wrap) positionPopover(wrap);
     if (state.conversationTooltipTarget) {
@@ -1978,6 +2074,7 @@ export function installQuotaWidget(
       return state.actions.splice(0);
     },
     destroy() {
+      hideAccountTooltip();
       state.observer?.disconnect();
       state.observer = null;
       state.mountObserver?.disconnect();

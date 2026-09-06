@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCodexCliExecutable } from "./platform.mjs";
+import { getOpenAIShortContextRates } from "./token-pricing.mjs";
 import packageJson from "../package.json" with { type: "json" };
 
 const REQUEST_TIMEOUT_MS = 120_000;
@@ -168,8 +169,16 @@ export async function sendWakeupRequest(getCredentials, signal) {
     } while (cursor);
     const available = models.filter((model) => !model.hidden && model.model &&
       (!model.inputModalities || model.inputModalities.includes("text")));
-    const model = available.find((item) => item.isDefault) ?? available[0];
-    if (!model) throw new Error("此账号没有可用于唤醒的官方模型");
+    if (!available.length) throw new Error("此账号没有可用于唤醒的官方模型");
+    // Compare known standard short-context input + output rates. The wakeup is
+    // a fresh, tiny text request; API rates are a cost proxy, not OAuth billing.
+    // Never silently fall back to the account's potentially expensive default.
+    const priced = available.map((model) => ({ model, rates: getOpenAIShortContextRates(model.model) }))
+      .filter((item) => item.rates)
+      .sort((left, right) =>
+        (left.rates.ordinaryInput + left.rates.output) - (right.rates.ordinaryInput + right.rates.output));
+    const model = priced[0]?.model;
+    if (!model) throw new Error("此账号可用模型均缺少价格配置，无法选择最低价唤醒模型，请更新注入器后重试");
     const efforts = model.supportedReasoningEfforts?.map((item) => item.reasoningEffort) ?? [];
     const effort = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
       .find((value) => efforts.includes(value)) ?? model.defaultReasoningEffort;
