@@ -2,7 +2,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, realpath, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -1119,6 +1119,22 @@ function writeWithBackpressure(output, chunk, input) {
   output.once("drain", () => input.resume());
 }
 
+export async function runOfficialCliPassthrough() {
+  // This entry deliberately does not read relay/provider configuration or create
+  // relay state. A browser's auxiliary app-server is an ordinary official CLI.
+  const { resolveCodexCliExecutable } = await import("./platform.mjs");
+  const upstreamExecutable = await resolveCodexCliExecutable();
+  const [upstreamPath, runtimePath, entryPath] = await Promise.all([
+    realpath(upstreamExecutable),
+    realpath(process.execPath),
+    realpath(process.argv[1] ?? process.execPath),
+  ]);
+  if (upstreamPath === runtimePath || upstreamPath === entryPath) {
+    throw new Error("官方 Codex CLI 路径指向了注入器或其运行时，拒绝递归调用");
+  }
+  await runPassthrough(upstreamExecutable, process.argv.slice(2));
+}
+
 async function runPassthrough(upstreamExecutable, args) {
   const env = { ...process.env, CODEX_CLI_PATH: upstreamExecutable };
   clearRelayEnvironment(env);
@@ -1130,9 +1146,13 @@ async function runPassthrough(upstreamExecutable, args) {
     stdio: "inherit",
     windowsHide: process.platform === "win32",
   });
-  forwardSignals(child);
+  const stopForwardingSignals = forwardSignals(child);
   child.once("error", fail);
-  child.once("exit", (code, signal) => exitLikeChild(code, signal));
+  child.once("exit", (code, signal) => {
+    // Restore the default signal action before reproducing the child's exit.
+    stopForwardingSignals();
+    exitLikeChild(code, signal);
+  });
 }
 
 async function readOfficialModelSlugs(path) {
@@ -1290,11 +1310,17 @@ async function removeRelayState(path) {
 }
 
 function forwardSignals(child) {
+  const handlers = new Map();
   for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.once(signal, () => {
+    const handler = () => {
       if (!child.killed) child.kill(signal);
-    });
+    };
+    handlers.set(signal, handler);
+    process.once(signal, handler);
   }
+  return () => {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+  };
 }
 
 function exitLikeChild(code, signal) {

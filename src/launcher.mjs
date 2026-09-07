@@ -3,12 +3,28 @@
 import packageJson from "../package.json" with { type: "json" };
 import { isSea } from "node:sea";
 
-if (
+// A launch argument belongs to this invocation; an inherited environment variable
+// or the SEA packaging format cannot distinguish an app launch from a CLI call.
+const explicitStartRequested = process.argv.length === 3 &&
+  process.argv[2] === "--explicit-start";
+
+if (process.platform === "darwin" && explicitStartRequested) {
+  void runLauncher();
+} else if (
   process.env.CODEX_QUOTA_ROLE === "app-server-relay" ||
   String(process.env.CODEX_QUOTA_RELAY_CONFIG ?? "").trim()
 ) {
   void import("./app-server-relay.mjs")
     .then(({ runAppServerRelay }) => runAppServerRelay())
+    .catch((error) => {
+      console.error(error?.stack ?? error);
+      process.exit(1);
+    });
+} else if (process.platform === "darwin") {
+  // Browser Use receives CODEX_CLI_PATH without the main relay's environment.
+  // Its app-server requests must not initialize the launcher or main relay state.
+  void import("./app-server-relay.mjs")
+    .then(({ runOfficialCliPassthrough }) => runOfficialCliPassthrough())
     .catch((error) => {
       console.error(error?.stack ?? error);
       process.exit(1);
@@ -40,8 +56,10 @@ async function runLauncher() {
   const port = Number(process.env.CODEX_QUOTA_CDP_PORT ?? 9229);
   const instanceMode = isSea() ? "formal" : "dev";
   const instanceVersion = String(packageJson.version ?? "0.0.0");
-  const explicitStart = isSea() || process.env.CODEX_QUOTA_EXPLICIT_START === "1" ||
-    process.argv.includes("--explicit-start");
+  const explicitStart = process.platform === "darwin"
+    ? explicitStartRequested
+    : isSea() || process.env.CODEX_QUOTA_EXPLICIT_START === "1" ||
+      process.argv.includes("--explicit-start");
   process.title = "Codex Quota Injector";
   const logPath = installFileLogger();
   if (!explicitStart) {
