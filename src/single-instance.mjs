@@ -22,6 +22,7 @@ export async function acquireSingleInstance({
   version = "0.0.0",
   explicitStart = false,
   onTakeover,
+  onReuse,
 } = {}) {
   const owner = {
     mode: normalizeMode(mode),
@@ -39,12 +40,19 @@ export async function acquireSingleInstance({
         return;
       }
       const replace = shouldReplace(owner, request);
+      const reuse = !replace && shouldReuse(owner, request);
       socket.end(`${replace ? "replace" : "keep"}\n`);
-      if (!replace || takeoverStarted) return;
-      takeoverStarted = true;
-      socket.once("close", () => {
-        Promise.resolve(onTakeover?.(request)).catch(() => undefined);
-      });
+      if (replace) {
+        if (takeoverStarted) return;
+        takeoverStarted = true;
+        socket.once("close", () => {
+          Promise.resolve(onTakeover?.(request)).catch(() => undefined);
+        });
+      } else if (reuse) {
+        socket.once("close", () => {
+          Promise.resolve(onReuse?.(request)).catch(() => undefined);
+        });
+      }
     });
   });
   server.unref();
@@ -109,6 +117,11 @@ function shouldReplace(owner, requester) {
   if (!INSTANCE_MODES.has(owner.mode) || !INSTANCE_MODES.has(requester.mode)) return false;
   if (requester.mode === "formal" && owner.mode === "dev") return true;
   return compareVersions(requester.version, owner.version) > 0;
+}
+
+function shouldReuse(owner, requester) {
+  return requester.explicitStart &&
+    owner.mode === "formal" && requester.mode === "formal";
 }
 
 function parseTakeoverRequest(data) {

@@ -51,6 +51,8 @@ export async function runInjector({
     contextManager,
   }),
   refreshModelCatalog = () => refreshCodexModelCatalog({ accountManager, contextManager }),
+  recoverLaunch = null,
+  registerLaunchRecovery = null,
 } = {}) {
   if (!accountManagerInitialized) await accountManager.initialize();
   if (!managersInitialized) {
@@ -93,6 +95,7 @@ export async function runInjector({
   let lastWidgetHealthCheckAt = 0;
   let lastInjectionError = null;
   let lastInjectionErrorAt = 0;
+  let launchRecoveryRequested = false;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
   const wakeupManager = new AccountWakeupManager(accountManager, () => {
     markWidgetDataDirty();
@@ -115,6 +118,7 @@ export async function runInjector({
 
   const stop = () => {
     stopped = true;
+    registerLaunchRecovery?.(null);
     wakeupManager.close();
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
@@ -145,6 +149,12 @@ export async function runInjector({
   };
   process.once("SIGINT", () => void stopAndExit());
   process.once("SIGTERM", () => void stopAndExit());
+
+  if (typeof recoverLaunch === "function") {
+    registerLaunchRecovery?.(() => {
+      if (!stopped) launchRecoveryRequested = true;
+    });
+  }
 
   async function refreshQuotas() {
     if (accountManager.store.list().length > 0) {
@@ -667,6 +677,18 @@ export async function runInjector({
   while (!stopped) {
     _loopCount++;
     debugLog(`[DEBUG] loop#${_loopCount} cdp=${!!cdp} cdp.isConnected=${cdp?.isConnected} restartingCodex=${restartingCodex} hasSeenCodexProcess=${hasSeenCodexProcess} stopped=${stopped} deadline=${Date.now() >= startupDeadline}`);
+    if (launchRecoveryRequested && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
+      launchRecoveryRequested = false;
+      restartingCodex = true;
+      try {
+        const restarted = await recoverLaunch();
+        if (restarted) resetAfterCodexRestart();
+      } catch (error) {
+        console.error(`[lifecycle] Codex 启动状态恢复失败: ${error.message}`);
+      } finally {
+        restartingCodex = false;
+      }
+    }
     if (!cdp?.isConnected && !restartingCodex) {
       const codexRunning = await isCodexRunning();
       debugLog(`[DEBUG] loop#${_loopCount} isCodexRunning=${codexRunning}`);

@@ -69,6 +69,8 @@ async function runLauncher() {
   let instanceLock = null;
   let takeoverInProgress = false;
   let launchOptions = { env: {}, relay: null };
+  let pendingLaunchRecovery = false;
+  let requestLaunchRecovery = null;
   const accountManager = new AccountManager();
   const contextManager = new CodexContextManager();
   const deepSeekManager = new DeepSeekManager();
@@ -82,6 +84,28 @@ async function runLauncher() {
     process.exit(0);
   };
 
+  const reuseExistingInstance = (request) => {
+    console.log(
+      `[launcher] ${request?.mode ?? "unknown"} v${request?.version ?? "unknown"} ` +
+      "请求复用当前实例，正在重新检查 Codex 启动状态",
+    );
+    if (requestLaunchRecovery) {
+      requestLaunchRecovery();
+    } else {
+      pendingLaunchRecovery = true;
+    }
+  };
+
+  const prepareCurrentLaunch = async () => {
+    launchOptions = await prepareCodexLaunch({
+      accountManager,
+      deepSeekManager,
+      extraModelManager,
+      contextManager,
+    });
+    return launchOptions;
+  };
+
   try {
     try {
       instanceLock = await acquireSingleInstance({
@@ -89,6 +113,7 @@ async function runLauncher() {
         version: instanceVersion,
         explicitStart,
         onTakeover: restartFromTakeover,
+        onReuse: reuseExistingInstance,
       });
     } catch (error) {
       if (!(error instanceof SingleInstanceTakeoverError)) throw error;
@@ -106,13 +131,9 @@ async function runLauncher() {
     await contextManager.initialize();
     await deepSeekManager.initialize();
     await extraModelManager.initialize();
-    launchOptions = await prepareCodexLaunch({
-      accountManager,
-      deepSeekManager,
-      extraModelManager,
-      contextManager,
-    });
+    launchOptions = await prepareCurrentLaunch();
     await ensureCodexDebugMode(port, launchOptions);
+    pendingLaunchRecovery = false;
 
     console.log(`[launcher] 已启动，日志=${logPath}`);
     await runInjector({
@@ -124,12 +145,18 @@ async function runLauncher() {
       extraModelManager,
       managersInitialized: true,
       accountManagerInitialized: true,
-      prepareLaunch: () => prepareCodexLaunch({
-        accountManager,
-        deepSeekManager,
-        extraModelManager,
-        contextManager,
-      }),
+      prepareLaunch: prepareCurrentLaunch,
+      recoverLaunch: async () => {
+        const options = await prepareCurrentLaunch();
+        return ensureCodexDebugMode(port, options);
+      },
+      registerLaunchRecovery: (handler) => {
+        requestLaunchRecovery = handler;
+        if (handler && pendingLaunchRecovery) {
+          pendingLaunchRecovery = false;
+          handler();
+        }
+      },
     });
   } catch (error) {
     console.error(`[launcher] ${error?.stack ?? error}`);
@@ -170,10 +197,11 @@ async function runLauncher() {
     if (readiness.ready) {
       await activateCodex();
       console.log(`[launcher] Codex 已处于调试及模型中继模式（端口 ${cdpPort}）`);
-      return;
+      return false;
     }
     console.log(`[launcher] 正在以调试及模型中继模式重启 Codex（端口 ${cdpPort}）`);
     await restartCodex(cdpPort, options);
+    return true;
   }
 
 }
