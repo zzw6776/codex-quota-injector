@@ -1,6 +1,7 @@
 import { createServer, request as requestHttp } from "node:http";
 import { request as requestHttps } from "node:https";
 import { randomUUID } from "node:crypto";
+import { chatToolName, collectResponseTools, findResponseTool, responseCall, toChatCall, toChatTools } from "./chat-tool-adapter.mjs";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -63,9 +64,10 @@ async function proxyRequest(request, response, targets, history) {
       forwardJson(request.headers, response, route.url, body);
       return;
     }
-    const prepared = prepareChatRequest(body, history);
+    const scopedHistory = history.forPlatform(route.target.id);
+    const prepared = prepareChatRequest(body, scopedHistory);
     const targetUrl = new URL(`chat/completions${route.search}`, route.target.baseUrl);
-    forwardChatRequest(request.headers, response, targetUrl, prepared, history);
+    forwardChatRequest(request.headers, response, targetUrl, prepared, scopedHistory);
   } catch (error) {
     writeError(response, 502, `Chat 兼容代理请求失败：${error.message}`);
   }
@@ -106,11 +108,12 @@ function prepareChatRequest(request, history) {
   if (!request || typeof request !== "object") throw new Error("Responses 请求体无效");
   const model = text(request.model);
   if (!model) throw new Error("Responses 请求缺少模型 ID");
+  const declarations = collectResponseTools(request, history.getTools(text(request.previous_response_id)));
   const input = restoreToolCalls(request, history);
   const messages = [];
   const instructions = contentText(request.instructions);
   if (instructions) messages.push({ role: "system", content: instructions });
-  appendResponsesInput(messages, input);
+  appendResponsesInput(messages, input, declarations);
 
   // Responses and Chat use opposite defaults for streaming. Preserve the caller's
   // explicit choice instead of changing a non-streaming request into SSE.
@@ -123,28 +126,40 @@ function prepareChatRequest(request, history) {
   for (const key of ["temperature", "top_p", "tool_choice", "parallel_tool_calls"]) {
     if (request[key] != null) chat[key] = request[key];
   }
-  const tools = Array.isArray(request.tools)
-    ? request.tools.map(responseToolToChatTool).filter(Boolean)
-    : [];
+  if (["function", "custom"].includes(request.tool_choice?.type) && text(request.tool_choice.name)) {
+    const tool = findResponseTool(declarations, request.tool_choice.name, request.tool_choice.namespace);
+    chat.tool_choice = { type: "function", function: { name: tool ? chatToolName(tool) : request.tool_choice.name } };
+  }
+  const tools = toChatTools(declarations);
   if (tools.length) chat.tools = tools;
   if (!tools.length) {
     delete chat.tool_choice;
     delete chat.parallel_tool_calls;
   }
-  return { source: request, chat };
+  return { source: { ...request, tools: declarations }, chat };
 }
 
 function restoreToolCalls(request, history) {
   const source = Array.isArray(request.input) ? [...request.input] : request.input;
   const previousResponseId = text(request.previous_response_id);
-  if (!previousResponseId || !Array.isArray(source)) return source;
+  if (!Array.isArray(source)) return source;
   const outputCallIds = new Set(source
-    .filter((item) => item?.type === "function_call_output")
+    .filter((item) => ["function_call_output", "custom_tool_call_output"].includes(item?.type))
     .map((item) => text(item.call_id))
     .filter(Boolean));
   // Only tool-result continuations require us to restore the assistant tool call.
   // A normal next user turn has no such dependency.
   if (!outputCallIds.size) return source;
+  const existingCallIds = new Set(source
+    .filter((item) => ["function_call", "custom_tool_call"].includes(item?.type) && text(item.name))
+    .map((item) => text(item.call_id))
+    .filter(Boolean));
+  const missingCallIds = new Set([...outputCallIds].filter((id) => !existingCallIds.has(id)));
+  // Full histories remain usable after cache eviction, and must not be duplicated.
+  if (!missingCallIds.size) return source;
+  if (!previousResponseId) {
+    throw new Error(`工具结果缺少对应的调用：${[...missingCallIds].join("、")}`);
+  }
   const cachedCalls = history.get(previousResponseId);
   if (!cachedCalls?.length) {
     throw new Error(
@@ -152,15 +167,12 @@ function restoreToolCalls(request, history) {
       "请新建任务后再使用 Chat 兼容模式",
     );
   }
-  const existingCallIds = new Set(source
-    .filter((item) => item?.type === "function_call")
-    .map((item) => text(item.call_id))
-    .filter(Boolean));
-  const restored = cachedCalls.filter((item) =>
-    outputCallIds.has(text(item.call_id)) && !existingCallIds.has(text(item.call_id)),
-  );
-  if (!restored.length) return source;
-  const firstOutputIndex = source.findIndex((item) => item?.type === "function_call_output");
+  const restored = cachedCalls.filter((item) => missingCallIds.has(text(item.call_id)));
+  for (const item of restored) missingCallIds.delete(text(item.call_id));
+  if (missingCallIds.size) {
+    throw new Error(`工具结果与 previous_response_id=${previousResponseId} 的调用不匹配：${[...missingCallIds].join("、")}`);
+  }
+  const firstOutputIndex = source.findIndex((item) => ["function_call_output", "custom_tool_call_output"].includes(item?.type));
   return [
     ...source.slice(0, firstOutputIndex),
     ...restored,
@@ -168,7 +180,7 @@ function restoreToolCalls(request, history) {
   ];
 }
 
-function appendResponsesInput(messages, input) {
+function appendResponsesInput(messages, input, tools) {
   if (typeof input === "string") {
     if (input) messages.push({ role: "user", content: input });
     return;
@@ -191,13 +203,13 @@ function appendResponsesInput(messages, input) {
       pendingReasoning += reasoningText(item);
       continue;
     }
-    if (item.type === "function_call") {
+    if (["function_call", "custom_tool_call"].includes(item.type)) {
       if (!pendingReasoning) pendingReasoning = text(item.reasoning_content);
-      const call = responseFunctionCallToChat(item);
+      const call = toChatCall(item, tools);
       if (call) pendingCalls.push(call);
       continue;
     }
-    if (item.type === "function_call_output") {
+    if (["function_call_output", "custom_tool_call_output"].includes(item.type)) {
       flushCalls();
       const callId = text(item.call_id);
       if (callId) messages.push({
@@ -245,30 +257,6 @@ function responseContentToChatContent(value) {
   return content.length === 1 && content[0].type === "text" ? content[0].text : content;
 }
 
-function responseFunctionCallToChat(item) {
-  const id = text(item.call_id);
-  const name = text(item.name);
-  if (!id || !name) return null;
-  const call = {
-    id,
-    type: "function",
-    function: {
-      name,
-      arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {}),
-    },
-  };
-  return call;
-}
-
-function responseToolToChatTool(tool) {
-  if (tool?.type !== "function" || !text(tool.name)) return null;
-  const fn = { name: tool.name };
-  if (text(tool.description)) fn.description = tool.description;
-  if (tool.parameters && typeof tool.parameters === "object") fn.parameters = tool.parameters;
-  if (tool.strict != null) fn.strict = Boolean(tool.strict);
-  return { type: "function", function: fn };
-}
-
 function forwardChatRequest(requestHeaders, response, targetUrl, prepared, history) {
   const body = Buffer.from(JSON.stringify(prepared.chat));
   const headers = normalizedHeaders(requestHeaders, true);
@@ -309,7 +297,7 @@ async function forwardChatJson(upstream, response, source, history) {
   try {
     const body = JSON.parse(await readBodyText(upstream));
     const converted = chatJsonToResponse(body, source);
-    history.remember(converted);
+    history.remember(converted, source.tools);
     response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     response.end(JSON.stringify(converted));
   } catch (error) {
@@ -319,7 +307,7 @@ async function forwardChatJson(upstream, response, source, history) {
 
 function pipeChatStream(upstream, response, source, history) {
   let pending = "";
-  const state = new ChatResponseState(source, (completed) => history.remember(completed));
+  const state = new ChatResponseState(source, (completed) => history.remember(completed, source.tools));
   upstream.setEncoding("utf8");
   upstream.on("data", (chunk) => {
     pending += chunk;
@@ -348,7 +336,10 @@ function pipeChatStream(upstream, response, source, history) {
     }
   });
   upstream.once("end", () => {
-    if (!state.finished) state.finish(response);
+    if (!state.finished) {
+      if (state.finishReason) state.finish(response);
+      else state.fail(response, "Chat 流在完成标记前结束");
+    }
     response.end();
   });
   upstream.once("error", (error) => {
@@ -371,12 +362,14 @@ class ChatResponseState {
     this.textIndex = null;
     this.reasoningIndex = null;
     this.tools = new Map();
+    this.declarations = source.tools ?? [];
     this.nextOutputIndex = 0;
     this.usage = null;
     this.finishReason = null;
   }
 
   accept(response, chunk) {
+    if (this.finished) return;
     if (text(chunk.id)) this.id = responseId(text(chunk.id));
     if (text(chunk.model)) this.model = text(chunk.model);
     if (Number.isFinite(Number(chunk.created))) this.createdAt = Number(chunk.created);
@@ -479,7 +472,7 @@ class ChatResponseState {
         item: this.functionCallItem(tool, "in_progress", ""),
       });
     }
-    if (tool.sentArguments < tool.arguments.length) {
+    if (findResponseTool(this.declarations, tool.name)?.type !== "custom" && tool.sentArguments < tool.arguments.length) {
       const delta = tool.arguments.slice(tool.sentArguments);
       tool.sentArguments = tool.arguments.length;
       writeSse(response, "response.function_call_arguments.delta", {
@@ -491,6 +484,13 @@ class ChatResponseState {
 
   finish(response) {
     if (this.finished) return;
+    // Validate custom input before publishing any terminal items. A malformed
+    // JSON wrapper must fail the turn rather than execute a changed raw command.
+    try {
+      for (const tool of this.tools.values()) {
+        if (tool.callId && tool.name) this.functionCallItem(tool, "completed", tool.arguments);
+      }
+    } catch (error) { this.fail(response, error.message); return; }
     this.start(response);
     const output = [];
     if (this.reasoningIndex != null) {
@@ -529,9 +529,13 @@ class ChatResponseState {
       this.ensureToolStarted(response, tool);
       if (tool.index == null) continue;
       const item = this.functionCallItem(tool, "completed", tool.arguments);
-      writeSse(response, "response.function_call_arguments.done", {
-        type: "response.function_call_arguments.done", item_id: tool.itemId,
-        output_index: tool.index, arguments: tool.arguments,
+      if (item.type === "custom_tool_call") writeSse(response, "response.custom_tool_call_input.delta", {
+        type: "response.custom_tool_call_input.delta", item_id: tool.itemId, output_index: tool.index, delta: item.input,
+      });
+      const done = item.type === "custom_tool_call" ? "response.custom_tool_call_input.done" : "response.function_call_arguments.done";
+      writeSse(response, done, {
+        type: done, item_id: tool.itemId, output_index: tool.index,
+        ...(item.type === "custom_tool_call" ? { input: item.input } : { arguments: tool.arguments }),
       });
       writeSse(response, "response.output_item.done", {
         type: "response.output_item.done", output_index: tool.index, item,
@@ -544,7 +548,10 @@ class ChatResponseState {
       output.sort((left, right) => left.index - right.index).map((entry) => entry.item),
     );
     if (status === "incomplete") completed.incomplete_details = { reason: "max_output_tokens" };
-    writeSse(response, "response.completed", { type: "response.completed", response: completed });
+    const terminalEvent = status === "incomplete"
+      ? "response.incomplete"
+      : "response.completed";
+    writeSse(response, terminalEvent, { type: terminalEvent, response: completed });
     this.onCompleted(completed);
     this.finished = true;
   }
@@ -559,14 +566,9 @@ class ChatResponseState {
   }
 
   functionCallItem(tool, status, argumentText) {
-    const item = {
-      id: tool.itemId,
-      type: "function_call",
-      status,
-      call_id: tool.callId,
-      name: tool.name,
-      arguments: argumentText,
-    };
+    const item = responseCall(findResponseTool(this.declarations, tool.name), {
+      id: tool.itemId, status, callId: tool.callId, name: tool.name, arguments: argumentText,
+    });
     if (this.reasoning) item.reasoning_content = this.reasoning;
     return item;
   }
@@ -585,6 +587,11 @@ class ChatResponseState {
 }
 
 function chatJsonToResponse(chat, source) {
+  if (chat?.error) throw new Error(extractErrorMessage(JSON.stringify(chat)));
+  if (!Array.isArray(chat?.choices) || !chat.choices[0]?.message ||
+    typeof chat.choices[0].message !== "object") {
+    throw new Error("Chat 响应缺少有效的 choices[0].message");
+  }
   const message = Array.isArray(chat?.choices) ? chat.choices[0]?.message ?? {} : {};
   const id = responseId(text(chat?.id));
   const output = [];
@@ -600,16 +607,12 @@ function chatJsonToResponse(chat, source) {
     const callId = text(tool?.id) || `call_${index}`;
     const name = text(tool?.function?.name);
     if (!name) continue;
-    const item = {
-      id: `fc_${callId}`,
-      type: "function_call",
-      status: "completed",
-      call_id: callId,
-      name,
+    const item = responseCall(findResponseTool(source.tools ?? [], name), {
+      id: `fc_${callId}`, status: "completed", callId, name,
       arguments: typeof tool.function?.arguments === "string"
         ? tool.function.arguments
         : JSON.stringify(tool.function?.arguments ?? {}),
-    };
+    });
     if (reasoning) item.reasoning_content = reasoning;
     output.push(item);
   }
@@ -630,16 +633,24 @@ function chatJsonToResponse(chat, source) {
 function createToolCallHistory() {
   const records = new Map();
   return {
-    get(responseId) {
-      return records.get(responseId) ?? null;
-    },
-    remember(response) {
-      const calls = Array.isArray(response?.output)
-        ? response.output.filter((item) => item?.type === "function_call" && text(item.call_id))
-        : [];
-      if (!text(response?.id) || !calls.length) return;
-      records.set(response.id, calls);
-      while (records.size > MAX_CACHED_RESPONSES) records.delete(records.keys().next().value);
+    forPlatform(platformId) {
+      // Responses belong to a provider; switching models within that provider
+      // must still allow a tool result to reference its preceding response.
+      const key = (responseId) => JSON.stringify([platformId, responseId]);
+      return {
+        get(responseId) {
+          return records.get(key(responseId))?.calls ?? null;
+        },
+        getTools(responseId) { return records.get(key(responseId))?.tools ?? []; },
+        remember(response, tools = []) {
+          const calls = Array.isArray(response?.output)
+            ? response.output.filter((item) => ["function_call", "custom_tool_call"].includes(item?.type) && text(item.call_id))
+            : [];
+          if (!text(response?.id)) return;
+          records.set(key(response.id), { calls, tools });
+          while (records.size > MAX_CACHED_RESPONSES) records.delete(records.keys().next().value);
+        },
+      };
     },
   };
 }

@@ -12,9 +12,11 @@ const PROMPT = "只回复 OK。不要调用工具、读取文件或执行任何�
 
 // Each request gets a native official process and an empty home/work directory.
 // Credentials travel over stdin only; the desktop auth.json and keychain are untouched.
-export async function sendWakeupRequest(getCredentials, signal) {
+export async function sendWakeupRequest(getCredentials, signal, {
+  resolveExecutable = resolveCodexCliExecutable, spawnProcess = spawn, timeoutMs = REQUEST_TIMEOUT_MS,
+} = {}) {
   signal.throwIfAborted();
-  const executable = await resolveCodexCliExecutable();
+  const executable = await resolveExecutable();
   signal.throwIfAborted();
   const directory = await mkdtemp(join(tmpdir(), "codex-quota-wakeup-"));
   let child;
@@ -22,7 +24,7 @@ export async function sendWakeupRequest(getCredentials, signal) {
   let onExit;
   let onAbort;
   const secrets = new Set();
-  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
   const sanitize = (value) => {
     let text = String(value ?? "未知错误");
     for (const secret of secrets) text = text.replaceAll(secret, "[已隐藏凭据]");
@@ -35,7 +37,10 @@ export async function sendWakeupRequest(getCredentials, signal) {
       if (/^(CODEX_|OPENAI_|CHATGPT_)/i.test(key)) delete env[key];
     }
     env.CODEX_HOME = directory;
-    child = spawn(executable, [
+    env.HOME = directory;
+    env.XDG_CONFIG_HOME = join(directory, "config");
+    env.XDG_CACHE_HOME = join(directory, "cache");
+    child = spawnProcess(executable, [
       "-c", 'cli_auth_credentials_store="ephemeral"',
       "-c", 'model_provider="openai"',
       "-c", `log_dir=${JSON.stringify(directory)}`,

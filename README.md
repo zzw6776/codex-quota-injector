@@ -96,7 +96,7 @@ GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 - 推送 `v*` 标签：标签必须与 `package.json` 版本一致，构建成功后更新同版本 GitHub Release；
 - 支持在 Actions 页面手动触发。
 
-自动打包不运行测试，安装后的实际功能由使用者手动确认。
+自动打包前会在 macOS、Windows 和 Linux 上运行免费契约测试；任一平台失败都会阻止打包与发布。本机的官方运行时、浏览器测试和真实模型验收另有入口，结果只对本次平台生效。真实模型测试会产生用量，不在 CI 中执行。完整覆盖边界见 [`docs/testing.md`](docs/testing.md)。
 
 ## 本地开发
 
@@ -121,7 +121,15 @@ npm run doctor
 npm run read-quota
 npm run inject
 npm run preview
+npm test
+npm run test:coverage
+npm run test:offline
+npm run test:live -- --plan
 ```
+
+`npm test` 运行免费基础回归；`npm run test:offline` 在当前 macOS 上追加真实官方运行时和隔离 Chrome/Edge 页面操作，由系统限制仅访问本机服务，不消耗模型 Token。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI 和浏览器摘要。
+
+`npm run test:live -- --plan` 只查看当前配置的真实测试计划。免费测试通过并获得当次明确同意后，运行 `npm run test:live -- --confirm-token-use`；需要真实唤醒时追加 `--wakeup`。这批测试使用当前账号及启用的供应商，验证实际模型的工具执行、历史、压缩、图片和交互；不切换账号或重启日常 Codex。桌面特有工具按[宿主验收步骤](docs/testing-desktop-host.md)另外核对，不能把后台通过当作整个主入口通过。
 
 ## 限制
 

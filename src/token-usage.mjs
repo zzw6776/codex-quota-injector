@@ -19,10 +19,31 @@ import {
   resolveContextTier,
   TokenPricingManager,
 } from "./token-pricing.mjs";
+import { MIN_GENERATION_METRICS_VERSION } from "./relay-contract.mjs";
+import { assignOutputPhaseSpeed, generationSpeedWindow, normalizeOutputPhases } from "./generation-speed.mjs";
+import {
+  createToolExecutionLedger,
+  normalizeToolExecutionLedger,
+  projectToolExecutions,
+  recordToolExecution,
+  simplifyToolExecutionRecord,
+} from "./tool-executions.mjs";
 
-// Rebuild segments: previously unknown Astra requests shared a single standard
-// bucket, so their short/long context boundaries cannot be recovered from totals.
-const CACHE_VERSION = 10;
+// Version 14 discards generation metrics produced before structural tool-call
+// detection, because those records can mix tool arguments into visible speed.
+// Version 17 rebuilds rollout usage from response-level records so compacted
+// responses are priced from their exact token breakdown, and persists the
+// structural identity needed to pair exact records with legacy summaries.
+// Version 18 persists per-message phases and tool preparation timings used by
+// the request-stage breakdown. Version 19 stores the connection RTT sample
+// associated with each model request.
+// Version 20 retains sanitized, response-associated tool item lifecycles.
+// Version 21 replaces inferred command purposes with argument-free commands.
+// Version 22 preserves expandable file/command lists and Node entry points.
+// Version 23 adds request-level output coverage and attributable phase speeds.
+const CACHE_VERSION = 23;
+const MIN_SUPPORTED_CACHE_VERSION = 11;
+const MIN_GENERATION_METRICS_CACHE_VERSION = 14;
 const DISCOVERY_INTERVAL_MS = 5_000;
 const MAX_VIEW_TURNS = 120;
 const MAX_STORED_TURNS = 2_000;
@@ -31,12 +52,16 @@ const MAX_HISTORICAL_THREADS = 2_048;
 const MAX_HISTORICAL_SEGMENTS = 128;
 const READ_CHUNK_BYTES = 1024 * 1024;
 const COST_CACHE_VERSION = 3;
-const ROLLOUT_PARSER_VERSION = 3;
+const ROLLOUT_PARSER_VERSION = 9;
 const MAX_SEEN_EVENT_IDS = 50_000;
+const MAX_SEEN_USAGE_RESPONSE_IDS = 4_096;
+const MAX_PENDING_USAGE_RECORDS = 512;
+const MAX_PENDING_GENERATION_RECORDS = 512;
 const CACHE_PERSIST_DELAY_MS = 10_000;
 const UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS = 10_000;
 const UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY = 4;
 const ACTIVE_THREAD_HINT_TTL_MS = 5 * 60 * 1000;
+const RECENT_ROLLOUT_ACTIVITY_MS = 5 * 60 * 1000;
 const MAX_ROLLOUT_METADATA_BYTES = 4 * 1024 * 1024;
 const TOKEN_FIELDS = [
   "input_tokens",
@@ -57,6 +82,7 @@ const MODEL_SOURCE_PRIORITY = Object.freeze({
   "turn-started": 3,
   usage: 3,
   completed: 3,
+  generation: 3,
   "turn-response": 5,
   "turn-context": 4,
   rerouted: 6,
@@ -68,6 +94,7 @@ const { open, stat } = require("node:fs/promises");
 
 const READ_CHUNK_BYTES = 1024 * 1024;
 const ROLLOUT_RECORD_BATCH_SIZE = 256;
+const simplifyToolExecutionRecord = ${simplifyToolExecutionRecord.toString()};
 
 parentPort.on("message", async (request) => {
   try {
@@ -127,15 +154,19 @@ async function readRollout(request, emitBatch) {
       for (const line of lines) {
         const record = parseRecord(line);
         if (!record) continue;
+        const execution = simplifyToolExecutionRecord(record, currentTurnId);
         const simplified = simplifyRecord(record, currentTurnId, pendingModel);
         currentTurnId = simplified.currentTurnId;
         pendingModel = simplified.pendingModel;
         if (simplified.record) {
+          if (execution) simplified.record.toolExecution = execution;
           records.push(simplified.record);
-          if (records.length >= ROLLOUT_RECORD_BATCH_SIZE) {
-            emitBatch(records);
-            records = [];
-          }
+        } else if (execution) {
+          records.push({ type: "tool_execution_record", payload: execution });
+        }
+        if (records.length >= ROLLOUT_RECORD_BATCH_SIZE) {
+          emitBatch(records);
+          records = [];
         }
       }
     }
@@ -166,6 +197,23 @@ function simplifyRecord(record, currentTurnId, pendingModel) {
       currentTurnId: turnId ? String(turnId) : currentTurnId,
       pendingModel,
       record: null,
+    };
+  }
+  if (record.type === "token_usage_record" && payload?.turn_id && payload?.response_id) {
+    const turnId = String(payload.turn_id);
+    return {
+      currentTurnId: turnId,
+      pendingModel,
+      record: {
+        timestamp: record.timestamp,
+        type: "token_usage_record",
+        payload: {
+          turn_id: turnId,
+          response_id: String(payload.response_id),
+          usage: payload.usage,
+          turn_token_usage: payload.turn_token_usage,
+        },
+      },
     };
   }
   if (record.type !== "event_msg" || !payload) {
@@ -280,6 +328,8 @@ export class TokenUsageManager {
     this.activeThreadId = null;
     this.activeThreadHint = false;
     this.activeThreadHintAt = 0;
+    this.rolloutFallbackThreads = new Map();
+    this.recentRolloutThreads = new Set();
     this.rolloutPathsByThread = new Map();
     this.rolloutMetadataByPath = new Map();
     this.rolloutMetadataByThread = new Map();
@@ -433,12 +483,26 @@ export class TokenUsageManager {
           modelSource: _modelSource,
           segments: _segments,
           rolloutPath: _rolloutPath,
-          generationStartAt: _generationStartAt,
+          rolloutUsageFallback: _rolloutUsageFallback,
+          rolloutParserVersion: _rolloutParserVersion,
+          rolloutTokenCountTotalTokens: _rolloutTokenCountTotalTokens,
+          responseCumulativeTotalTokens: _responseCumulativeTotalTokens,
+          usageResponseIds: _usageResponseIds,
+          generationMetricsVersion: _generationMetricsVersion,
+          generationMetricsEnabled: _generationMetricsEnabled,
+          firstTokenLatencyTotalMs: _firstTokenLatencyTotalMs,
+          firstTokenLatencySamples: _firstTokenLatencySamples,
+          outputGenerationDurationMs: _outputGenerationDurationMs,
+          outputGenerationTokens: _outputGenerationTokens,
+          pendingGenerationSamples: _pendingGenerationSamples,
+          pendingGenerationUsages: _pendingGenerationUsages,
+          pendingToolTimings: _pendingToolTimings,
           costRevision: _costRevision,
           ...publicTurn
         } = turn;
         return {
           ...publicTurn,
+          generationDetails: publicGenerationDetails(publicTurn.generationDetails, publicTurn.toolExecutionLedger),
           cost: {
             ...cost,
             cumulativeAvailable: taskCost.pendingTurns === 0,
@@ -526,6 +590,8 @@ export class TokenUsageManager {
     this.rolloutReadPromises.clear();
     this.rolloutMetadataByPath.clear();
     this.rolloutMetadataByThread.clear();
+    this.rolloutFallbackThreads.clear();
+    this.recentRolloutThreads.clear();
     this.loggedSubagentModelTransitions.clear();
     this.historicalCostCache.clear();
     // Keep cache state alive until an in-flight asynchronous persistence has
@@ -595,11 +661,18 @@ export class TokenUsageManager {
       await this.#refreshRolloutCatalog();
       this.lastDiscoveryAt = now;
     }
-    await this.#ensureActiveRollout();
-    const activeState = this.activeThreadId
-      ? this.fileStates.get(this.activeThreadId)
-      : null;
-    if (activeState) await this.#readAppendedRollout(activeState);
+    const rolloutThreadIds = new Set(this.rolloutFallbackThreads.keys());
+    for (const threadId of this.recentRolloutThreads) rolloutThreadIds.add(threadId);
+    if (this.activeThreadId) rolloutThreadIds.add(this.activeThreadId);
+    for (const threadId of rolloutThreadIds) {
+      const states = await this.#ensureRolloutStates(threadId);
+      for (const state of states) await this.#readAppendedRollout(state);
+      const latestState = states.at(-1);
+      const currentTurn = latestState?.currentTurnId
+        ? this.turns.get(latestState.currentTurnId)
+        : null;
+      if (currentTurn?.completed) this.rolloutFallbackThreads.delete(threadId);
+    }
     if (this.#applySubagentMetadataToTurns()) {
       this.#markCacheDirty();
       this.#invalidateViewModel();
@@ -615,7 +688,8 @@ export class TokenUsageManager {
   async #loadCache() {
     const cached = await readJson(this.cachePath);
     const cachedVersion = positiveInteger(cached?.version);
-    if (!cached || cachedVersion !== CACHE_VERSION) return;
+    if (!cached || cachedVersion < MIN_SUPPORTED_CACHE_VERSION ||
+      cachedVersion > CACHE_VERSION) return;
     this.eventState = {
       offset: positiveInteger(cached.eventState?.offset),
       pending: String(cached.eventState?.pending ?? ""),
@@ -627,12 +701,19 @@ export class TokenUsageManager {
     this.activeThreadHint = Boolean(cached.activeThreadHint);
     this.activeThreadHintAt = positiveNumber(cached.activeThreadHintAt);
     for (const value of Array.isArray(cached.turns) ? cached.turns : []) {
-      const turn = normalizeCachedTurn(value);
+      const turn = normalizeCachedTurn(value, {
+        generationMetricsCompatible:
+          cachedVersion >= MIN_GENERATION_METRICS_CACHE_VERSION,
+      });
       if (turn) this.turns.set(turn.turnId, turn);
     }
     for (const value of Array.isArray(cached.fileStates) ? cached.fileStates : []) {
       const state = normalizeCachedFileState(value);
-      if (state) this.fileStates.set(state.threadId, state);
+      if (!state) continue;
+      this.fileStates.set(state.path, state);
+      if (state.parserVersion !== ROLLOUT_PARSER_VERSION) {
+        this.rolloutFallbackThreads.set(state.threadId, state.lastUsedAt || Date.now());
+      }
     }
     if (this.fileStates.size > MAX_TRACKED_ROLLOUT_STATES) {
       this.#pruneRolloutStates(null);
@@ -660,6 +741,8 @@ export class TokenUsageManager {
     this.activeThreadId = null;
     this.activeThreadHint = false;
     this.activeThreadHintAt = 0;
+    this.rolloutFallbackThreads.clear();
+    this.recentRolloutThreads.clear();
     this.#markCacheDirty();
     this.#invalidateViewModel();
   }
@@ -803,6 +886,13 @@ export class TokenUsageManager {
       this.activeThreadId = threadId;
       this.activeThreadHint = true;
       this.activeThreadHintAt = Date.now();
+      if (event.rolloutUsageFallback) {
+        this.rolloutFallbackThreads.delete(threadId);
+        this.rolloutFallbackThreads.set(threadId, updatedAt);
+        while (this.rolloutFallbackThreads.size > MAX_TRACKED_ROLLOUT_STATES) {
+          this.rolloutFallbackThreads.delete(this.rolloutFallbackThreads.keys().next().value);
+        }
+      }
       return;
     }
 
@@ -811,6 +901,25 @@ export class TokenUsageManager {
     if (event.type === "turn-started") {
       const turn = this.turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
       turn.source = "event";
+      turn.rolloutUsageFallback ||= Boolean(event.rolloutUsageFallback);
+      if (Object.hasOwn(event, "networkLatencySupported")) {
+        const previousConnectionId = turn.networkConnectionId;
+        turn.networkLatencySupported = Boolean(event.networkLatencySupported);
+        turn.networkConnectionId = nonEmptyString(event.networkConnectionId);
+        if (!turn.networkLatencySupported ||
+          (previousConnectionId && previousConnectionId !== turn.networkConnectionId)) {
+          turn.networkLatency = null;
+        }
+        const networkLatency = normalizeNetworkLatency(event.networkLatency);
+        if (networkLatency) turn.networkLatency = networkLatency;
+      }
+      const generationMetricsVersion = positiveInteger(event.generationMetricsVersion);
+      if (generationMetricsVersion > turn.generationMetricsVersion) {
+        if (turn.generationMetricsVersion < MIN_GENERATION_METRICS_VERSION) resetGenerationMetrics(turn);
+        turn.generationMetricsVersion = generationMetricsVersion;
+      }
+      turn.generationMetricsEnabled ||=
+        generationMetricsVersion >= MIN_GENERATION_METRICS_VERSION;
       if (!turn.startedAt) turn.startedAt = updatedAt;
       if (model) {
         fillUnknownSegmentModels(turn, model, event.modelSource ?? "turn-started");
@@ -818,6 +927,10 @@ export class TokenUsageManager {
       }
       turn.updatedAt = updatedAt;
       this.turns.set(turnId, turn);
+      if (turn.rolloutUsageFallback) {
+        this.rolloutFallbackThreads.delete(threadId);
+        this.rolloutFallbackThreads.set(threadId, updatedAt);
+      }
       return;
     }
     if (event.type === "usage") {
@@ -832,8 +945,7 @@ export class TokenUsageManager {
       if (!turn.startedAt) turn.startedAt = updatedAt;
       const modelSource = event.modelSource ?? "thread";
       const incomingTotal = positiveNumber(event.tokenUsage?.total?.totalTokens);
-      const previousTotal = positiveNumber(turn.cumulativeTotalTokens);
-      const previousOutputTokens = positiveNumber(turn.outputTokens);
+      const previousResponseTotal = positiveNumber(turn.responseCumulativeTotalTokens);
       if (model) {
         // A reroute starts a new model segment. Unknown tokens before that
         // boundary must stay unresolved instead of being relabeled with the
@@ -843,7 +955,25 @@ export class TokenUsageManager {
         }
         setTurnModel(turn, model, modelSource);
       }
-      if (incomingTotal <= 0 || incomingTotal > previousTotal) {
+      const waitForRollout = event.rolloutUsageFallback == null
+        ? turn.rolloutUsageFallback
+        : Boolean(event.rolloutUsageFallback);
+      if (waitForRollout) {
+        // Legacy official usage events and rollout records describe the same
+        // upstream response. Keep rollout authoritative for these events; an
+        // auxiliary event explicitly opts out when Codex may not persist it.
+        const modelContextWindow = positiveNumber(event.tokenUsage?.modelContextWindow);
+        if (modelContextWindow > 0) turn.modelContextWindow = modelContextWindow;
+        turn.updatedAt = updatedAt;
+        this.turns.set(turnId, turn);
+        return;
+      }
+      const responseId = nonEmptyString(event.responseId);
+      const isNewResponse = responseId ? markUsageResponse(turn, responseId) : true;
+      const shouldAdd = responseId
+        ? isNewResponse
+        : incomingTotal <= 0 || incomingTotal > previousResponseTotal;
+      if (shouldAdd) {
         // The event can carry a stale lower-priority model after a reroute.
         // Price the delta with the model that won the source-priority check,
         // rather than relabeling a post-reroute segment with that stale value.
@@ -853,14 +983,54 @@ export class TokenUsageManager {
           turn.model || model,
           turn.modelSource || modelSource,
         );
-        if (turn.outputTokens > previousOutputTokens) {
-          updateTotalGenerationRate(turn, updatedAt);
-        }
+        recordGenerationUsage(turn, last, responseId);
       }
-      turn.cumulativeTotalTokens = Math.max(previousTotal, incomingTotal);
+      turn.responseCumulativeTotalTokens = Math.max(previousResponseTotal, incomingTotal);
+      turn.cumulativeTotalTokens = Math.max(
+        positiveNumber(turn.cumulativeTotalTokens),
+        incomingTotal,
+      );
+      if (responseId) turn.rolloutParserVersion = ROLLOUT_PARSER_VERSION;
       const modelContextWindow = positiveNumber(event.tokenUsage?.modelContextWindow);
       if (modelContextWindow > 0) turn.modelContextWindow = modelContextWindow;
       turn.updatedAt = updatedAt;
+      this.turns.set(turnId, turn);
+      return;
+    }
+
+    if (event.type === "generation") {
+      const generationMetricsVersion = positiveInteger(event.generationMetricsVersion);
+      if (generationMetricsVersion < MIN_GENERATION_METRICS_VERSION) return;
+      const turn = this.turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
+      if (generationMetricsVersion > turn.generationMetricsVersion) {
+        if (turn.generationMetricsVersion < MIN_GENERATION_METRICS_VERSION) resetGenerationMetrics(turn);
+        turn.generationMetricsVersion = generationMetricsVersion;
+      }
+      turn.source = "event";
+      turn.generationMetricsEnabled = true;
+      if (!turn.startedAt) turn.startedAt = updatedAt;
+      if (model) {
+        fillUnknownSegmentModels(turn, model, event.modelSource ?? "generation");
+        setTurnModel(turn, model, event.modelSource ?? "generation");
+      }
+      recordGenerationSample(turn, event.generation);
+      turn.updatedAt = Math.max(positiveNumber(turn.updatedAt), updatedAt);
+      this.turns.set(turnId, turn);
+      return;
+    }
+
+    if (event.type === "generation-tool-timing") {
+      const generationMetricsVersion = positiveInteger(event.generationMetricsVersion);
+      if (generationMetricsVersion < MIN_GENERATION_METRICS_VERSION) return;
+      const turn = this.turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
+      if (generationMetricsVersion > turn.generationMetricsVersion) {
+        if (turn.generationMetricsVersion < MIN_GENERATION_METRICS_VERSION) resetGenerationMetrics(turn);
+        turn.generationMetricsVersion = generationMetricsVersion;
+      }
+      turn.source = "event";
+      turn.generationMetricsEnabled = true;
+      recordGenerationToolTiming(turn, event);
+      turn.updatedAt = Math.max(positiveNumber(turn.updatedAt), updatedAt);
       this.turns.set(turnId, turn);
       return;
     }
@@ -877,48 +1047,74 @@ export class TokenUsageManager {
       turn.completed = TERMINAL_TURN_STATUSES.has(turn.status);
       turn.updatedAt = updatedAt;
       this.turns.set(turnId, turn);
+      this.rolloutFallbackThreads.delete(threadId);
     }
   }
 
   async #refreshRolloutCatalog() {
     const paths = await collectRolloutFiles(join(this.codexHome, "sessions"), 4);
     this.rolloutPathsByThread.clear();
+    this.rolloutMetadataByThread.clear();
+    this.recentRolloutThreads.clear();
     const discoveredPaths = new Set(paths);
     for (const path of this.rolloutMetadataByPath.keys()) {
       if (!discoveredPaths.has(path)) this.rolloutMetadataByPath.delete(path);
     }
-    const metadataEntries = await Promise.all(paths.map(async (path) => {
+    const catalogEntries = (await Promise.all(paths.map(async (path) => {
       let metadata = this.rolloutMetadataByPath.get(path);
       if (!metadata) {
         metadata = await readRolloutSessionMetadata(path);
         if (metadata) this.rolloutMetadataByPath.set(path, metadata);
       }
-      return { path, metadata };
-    }));
-    this.rolloutMetadataByThread.clear();
-    const discoveredThreadIds = new Set();
-    for (const { path, metadata } of metadataEntries) {
-      const threadId = metadata?.threadId ?? threadIdFromRolloutPath(path);
-      if (threadId) {
-        discoveredThreadIds.add(threadId);
-        this.rolloutPathsByThread.set(threadId, path);
-        if (metadata) this.rolloutMetadataByThread.set(threadId, metadata);
+      let modifiedAt;
+      try {
+        modifiedAt = (await stat(path)).mtimeMs;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        return null;
       }
+      const threadId = metadata?.threadId ?? threadIdFromRolloutPath(path);
+      return threadId ? { path, metadata, threadId, modifiedAt } : null;
+    }))).filter(Boolean);
+    const entriesByThread = new Map();
+    for (const entry of catalogEntries) {
+      const entries = entriesByThread.get(entry.threadId) ?? [];
+      entries.push(entry);
+      entriesByThread.set(entry.threadId, entries);
+    }
+    const latestEntries = [];
+    for (const [threadId, entries] of entriesByThread) {
+      entries.sort((left, right) => left.modifiedAt - right.modifiedAt ||
+        basename(left.path).localeCompare(basename(right.path)));
+      this.rolloutPathsByThread.set(threadId, entries.map((entry) => entry.path));
+      const latestEntry = entries.at(-1);
+      latestEntries.push(latestEntry);
+      if (latestEntry.metadata) {
+        this.rolloutMetadataByThread.set(threadId, latestEntry.metadata);
+      }
+    }
+    const recentCutoff = Date.now() - RECENT_ROLLOUT_ACTIVITY_MS;
+    const recentEntries = latestEntries
+      .filter((entry) => entry.modifiedAt >= recentCutoff)
+      .sort((left, right) => right.modifiedAt - left.modifiedAt)
+      .slice(0, MAX_TRACKED_ROLLOUT_STATES);
+    for (const entry of recentEntries) {
+      this.recentRolloutThreads.add(entry.threadId);
     }
     if (this.#applySubagentMetadataToTurns()) {
       this.#markCacheDirty();
       this.#invalidateViewModel();
     }
-    for (const [threadId] of this.fileStates) {
-      if (!discoveredThreadIds.has(threadId)) {
-        this.fileStates.delete(threadId);
-        this.rolloutReadPromises.delete(threadId);
+    for (const [path] of this.fileStates) {
+      if (!discoveredPaths.has(path)) {
+        this.fileStates.delete(path);
+        this.rolloutReadPromises.delete(path);
         this.#markCacheDirty();
       }
     }
     const activeHintFresh = this.activeThreadHint &&
       Date.now() - this.activeThreadHintAt < ACTIVE_THREAD_HINT_TTL_MS;
-    if (this.activeThreadId && !discoveredThreadIds.has(this.activeThreadId) &&
+    if (this.activeThreadId && !entriesByThread.has(this.activeThreadId) &&
       !activeHintFresh) {
       this.activeThreadId = null;
       this.activeThreadHint = false;
@@ -927,25 +1123,18 @@ export class TokenUsageManager {
     }
     if (paths.length === 0) return;
 
-    // Windows 在没有可用 App Server relay 活动事件时，通过最近写入的 rollout 文件跟踪活动会话。
-    const latestPath = process.platform === "win32"
-      ? await findLatestRolloutPath(paths)
-      : [...paths].sort((left, right) => basename(right).localeCompare(basename(left)))[0];
-    const latestThreadId = threadIdFromRolloutPath(latestPath);
+    // 没有新鲜的活动事件时，通过最近写入的 rollout 文件跟踪活动会话。
+    const latestThreadId = latestEntries
+      .sort((left, right) => right.modifiedAt - left.modifiedAt ||
+        basename(right.path).localeCompare(basename(left.path)))[0]?.threadId;
     if (latestThreadId &&
       (!this.activeThreadId ||
-        (process.platform === "win32" && !activeHintFresh &&
-          this.activeThreadId !== latestThreadId))) {
+        (!activeHintFresh && this.activeThreadId !== latestThreadId))) {
       this.activeThreadId = latestThreadId;
       this.activeThreadHint = false;
       this.activeThreadHintAt = 0;
       this.#markCacheDirty();
     }
-  }
-
-  async #ensureActiveRollout() {
-    const threadId = this.activeThreadId;
-    return this.#ensureRolloutState(threadId);
   }
 
   #applySubagentMetadataToTurns() {
@@ -1027,65 +1216,58 @@ export class TokenUsageManager {
     return findTurnAtTimestamp(rootTurns, startedAt)?.turnId ?? null;
   }
 
-  async #ensureRolloutState(threadId) {
-    if (!threadId) return null;
-    const existing = this.fileStates.get(threadId);
-    if (existing) {
-      const currentPath = this.rolloutPathsByThread.get(threadId);
-      if (currentPath && existing.path !== currentPath) {
-        existing.path = currentPath;
-        existing.offset = 0;
-        existing.pending = "";
-        existing.currentTurnId = null;
-        existing.threadModel = null;
-        existing.modelReconciled = false;
-        existing.unknownModelChecked = false;
-        existing.unknownModelCheckOffset = 0;
+  async #ensureRolloutStates(threadId) {
+    if (!threadId) return [];
+    let paths = this.rolloutPathsByThread.get(threadId);
+    if (!paths) {
+      await this.#refreshRolloutCatalog();
+      paths = this.rolloutPathsByThread.get(threadId);
+    }
+    if (!Array.isArray(paths) || paths.length === 0) return [];
+    const states = [];
+    for (const path of paths) {
+      let state = this.fileStates.get(path);
+      if (!state) {
+        this.#pruneRolloutStates(threadId);
+        state = {
+          threadId,
+          path,
+          offset: 0,
+          pending: "",
+          currentTurnId: null,
+          threadModel: null,
+          pendingUsageRecords: [],
+          modelReconciled: false,
+          parserVersion: 0,
+          unknownModelChecked: false,
+          unknownModelCheckOffset: 0,
+          lastUsedAt: Date.now(),
+        };
+        this.fileStates.set(path, state);
         this.#markCacheDirty();
       }
-      existing.lastUsedAt = Date.now();
-      if (existing.parserVersion !== ROLLOUT_PARSER_VERSION) {
-        existing.modelReconciled = false;
-        existing.unknownModelChecked = false;
-        existing.unknownModelCheckOffset = 0;
+      state.lastUsedAt = Date.now();
+      if (state.parserVersion !== ROLLOUT_PARSER_VERSION) {
+        state.modelReconciled = false;
+        state.pendingUsageRecords = [];
+        state.unknownModelChecked = false;
+        state.unknownModelCheckOffset = 0;
       }
-      return existing;
+      states.push(state);
     }
-    let path = this.rolloutPathsByThread.get(threadId);
-    if (!path) {
-      await this.#refreshRolloutCatalog();
-      path = this.rolloutPathsByThread.get(threadId);
-    }
-    if (!path) return;
-    this.#pruneRolloutStates(threadId);
-    const state = {
-      threadId,
-      path,
-      offset: 0,
-      pending: "",
-      currentTurnId: null,
-      threadModel: null,
-      modelReconciled: false,
-      parserVersion: 0,
-      unknownModelChecked: false,
-      unknownModelCheckOffset: 0,
-      lastUsedAt: Date.now(),
-    };
-    this.fileStates.set(threadId, state);
-    this.#markCacheDirty();
-    return state;
+    return states;
   }
 
   async #readAppendedRollout(state) {
-    const inFlight = this.rolloutReadPromises.get(state.threadId);
+    const inFlight = this.rolloutReadPromises.get(state.path);
     if (inFlight) return inFlight;
     const task = this.#readAppendedRolloutOnce(state)
       .finally(() => {
-        if (this.rolloutReadPromises.get(state.threadId) === task) {
-          this.rolloutReadPromises.delete(state.threadId);
+        if (this.rolloutReadPromises.get(state.path) === task) {
+          this.rolloutReadPromises.delete(state.path);
         }
       });
-    this.rolloutReadPromises.set(state.threadId, task);
+    this.rolloutReadPromises.set(state.path, task);
     return task;
   }
 
@@ -1101,8 +1283,12 @@ export class TokenUsageManager {
       parserVersion: state.parserVersion,
     };
     if (reconcile) {
-      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+      this.#clearRolloutTurns(state.threadId, {
+        clearHistory: true,
+        rolloutPath: state.path,
+      });
       state.threadModel = null;
+      state.pendingUsageRecords = [];
     }
     let result;
     try {
@@ -1116,11 +1302,15 @@ export class TokenUsageManager {
           // The worker announces truncation before it emits the rebuilt
           // records. Clear the old projection first so the new batches are
           // not discarded after parsing completes.
-          this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+          this.#clearRolloutTurns(state.threadId, {
+            clearHistory: true,
+            rolloutPath: state.path,
+          });
           state.offset = 0;
           state.pending = "";
           state.currentTurnId = null;
           state.threadModel = null;
+          state.pendingUsageRecords = [];
           state.modelReconciled = false;
         },
       );
@@ -1130,17 +1320,21 @@ export class TokenUsageManager {
       // A worker may have emitted a few batches before failing. Rebuild this
       // rollout from the beginning so those partial records cannot be
       // duplicated by the main-thread fallback.
-      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+      this.#clearRolloutTurns(state.threadId, {
+        clearHistory: true,
+        rolloutPath: state.path,
+      });
       state.offset = 0;
       state.pending = "";
       state.currentTurnId = null;
       state.threadModel = null;
+      state.pendingUsageRecords = [];
       state.modelReconciled = false;
       await this.#readAppendedRolloutOnMain(state, true);
       return;
     }
     if (result.missing) {
-      this.fileStates.delete(state.threadId);
+      this.fileStates.delete(state.path);
       this.#markCacheDirty();
       this.#invalidateViewModel();
       return;
@@ -1178,25 +1372,33 @@ export class TokenUsageManager {
       info = await stat(state.path);
     } catch (error) {
       if (error.code === "ENOENT") {
-        this.fileStates.delete(state.threadId);
+        this.fileStates.delete(state.path);
         this.#markCacheDirty();
         return;
       }
       throw error;
     }
     if (reconcile) {
-      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+      this.#clearRolloutTurns(state.threadId, {
+        clearHistory: true,
+        rolloutPath: state.path,
+      });
       state.offset = 0;
       state.pending = "";
       state.currentTurnId = null;
       state.threadModel = null;
+      state.pendingUsageRecords = [];
     }
     if (info.size < state.offset) {
-      this.#clearRolloutTurns(state.threadId, { clearHistory: true });
+      this.#clearRolloutTurns(state.threadId, {
+        clearHistory: true,
+        rolloutPath: state.path,
+      });
       state.offset = 0;
       state.pending = "";
       state.currentTurnId = null;
       state.threadModel = null;
+      state.pendingUsageRecords = [];
       state.modelReconciled = false;
     }
     await readAppendedChunks(state.path, state, (line) => {
@@ -1226,6 +1428,19 @@ export class TokenUsageManager {
   }
 
   #processRolloutRecord(record, state) {
+    const execution = record.toolExecution ?? (record.type === "tool_execution_record"
+      ? record.payload
+      : simplifyToolExecutionRecord(record, state.currentTurnId));
+    if (execution && (!execution.threadId || execution.threadId === state.threadId)) {
+      const turn = this.turns.get(execution.turnId) ??
+        emptyTurn(execution.turnId, state.threadId, "rollout", state.path);
+      if (turn.threadId === state.threadId) {
+        recordToolExecution(turn.toolExecutionLedger, execution);
+        if (!turn.rolloutPath) turn.rolloutPath = state.path;
+        this.turns.set(turn.turnId, turn);
+        this.#markCacheDirty();
+      }
+    }
     if (record.type === "turn_context" && record.payload?.turn_id) {
       state.currentTurnId = String(record.payload.turn_id);
       const existing = this.turns.get(state.currentTurnId);
@@ -1242,6 +1457,51 @@ export class TokenUsageManager {
     if (record.type === "response_item") {
       const turnId = record.payload?.internal_chat_message_metadata_passthrough?.turn_id;
       if (turnId) state.currentTurnId = String(turnId);
+    }
+    if (record.type === "token_usage_record") {
+      const turnId = nonEmptyString(record.payload?.turn_id);
+      const responseId = nonEmptyString(record.payload?.response_id);
+      const usage = normalizeRolloutUsage(record.payload?.usage);
+      if (!turnId || !responseId || !usage) return;
+      state.currentTurnId = turnId;
+      enqueuePendingUsageRecord(state, turnId, responseId, usage);
+      const existing = this.turns.get(turnId);
+      const turn = existing ?? emptyTurn(turnId, state.threadId, "rollout", state.path);
+      // Unkeyed app-server notifications are a provisional live view. Once an
+      // exact response ledger exists, rebuild from that ledger regardless of
+      // provider or model so historical notifications cannot hide compaction.
+      prepareRolloutUsageTurn(turn);
+      if (!turn.rolloutPath) turn.rolloutPath = state.path;
+      const model = turn.model || state.threadModel;
+      if (model) {
+        setTurnModel(turn, model, turn.modelSource || "thread-settings");
+        fillUnknownSegmentModels(turn, model, turn.modelSource || "thread-settings");
+      }
+      const cumulativeTotal = positiveNumber(record.payload?.turn_token_usage?.total_tokens);
+      const previousResponseTotal = positiveNumber(turn.responseCumulativeTotalTokens);
+      // Response identity is authoritative. The cumulative figure is only a
+      // display watermark: auxiliary and rollout ledgers can use independent
+      // baselines, so comparing them would discard a valid newer response.
+      if (markUsageResponse(turn, responseId)) {
+        addUsage(turn, usage, turn.model || model, turn.modelSource);
+        recordGenerationUsage(turn, usage, responseId);
+      }
+      turn.responseCumulativeTotalTokens = Math.max(
+        previousResponseTotal,
+        cumulativeTotal,
+      );
+      turn.cumulativeTotalTokens = Math.max(
+        positiveNumber(turn.cumulativeTotalTokens),
+        cumulativeTotal,
+      );
+      if (!turn.startedAt) turn.startedAt = parseTimestamp(record.timestamp);
+      turn.updatedAt = Math.max(
+        positiveNumber(turn.updatedAt),
+        parseTimestamp(record.timestamp),
+      );
+      this.turns.set(turnId, turn);
+      this.#markCacheDirty();
+      return;
     }
     if (record.type !== "event_msg") return;
 
@@ -1304,7 +1564,41 @@ export class TokenUsageManager {
       const last = normalizeRolloutUsage(record.payload.info?.last_token_usage);
       if (!last) return;
       const existing = this.turns.get(state.currentTurnId);
-      if (existing?.source === "event") {
+      const incomingTotal = positiveNumber(
+        record.payload.info?.total_token_usage?.total_tokens,
+      );
+      const pairedUsageRecord = consumePendingUsageRecord(
+        state,
+        state.currentTurnId,
+        last,
+      );
+      if (pairedUsageRecord) {
+        const turn = existing ?? emptyTurn(
+          state.currentTurnId,
+          state.threadId,
+          "rollout",
+          state.path,
+        );
+        prepareRolloutUsageTurn(turn);
+        turn.rolloutTokenCountTotalTokens = Math.max(
+          positiveNumber(turn.rolloutTokenCountTotalTokens),
+          incomingTotal,
+        );
+        turn.cumulativeTotalTokens = Math.max(
+          positiveNumber(turn.cumulativeTotalTokens),
+          incomingTotal,
+        );
+        const modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
+        if (modelContextWindow > 0) turn.modelContextWindow = modelContextWindow;
+        turn.updatedAt = Math.max(
+          positiveNumber(turn.updatedAt),
+          parseTimestamp(record.timestamp),
+        );
+        this.turns.set(turn.turnId, turn);
+        this.#markCacheDirty();
+        return;
+      }
+      if (existing?.source === "event" && !existing.rolloutUsageFallback) {
         // Relay events are buffered and can arrive after this rollout record.
         // Do not advance their deduplication watermark without adding usage:
         // the matching relay event would otherwise be discarded as a duplicate.
@@ -1319,13 +1613,24 @@ export class TokenUsageManager {
         "rollout",
         state.path,
       );
-      const previousOutputTokens = positiveNumber(turn.outputTokens);
-      addUsage(turn, last, turn.model, turn.modelSource);
-      if (turn.outputTokens > previousOutputTokens) {
-        updateTotalGenerationRate(turn, parseTimestamp(record.timestamp));
+      prepareRolloutUsageTurn(turn);
+      const previousRolloutTotal = positiveNumber(turn.rolloutTokenCountTotalTokens);
+      if (incomingTotal > 0 && incomingTotal <= previousRolloutTotal) {
+        // Rollout can repeat the same cumulative token_count record, and a
+        // continued task can expose an overlapping record in another file.
+        // Treat the cumulative total as the common deduplication watermark.
+        const modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
+        if (modelContextWindow > 0) turn.modelContextWindow = modelContextWindow;
+        this.turns.set(turn.turnId, turn);
+        this.#markCacheDirty();
+        return;
       }
-      turn.cumulativeTotalTokens = positiveNumber(
-        record.payload.info?.total_token_usage?.total_tokens,
+      addUsage(turn, last, turn.model, turn.modelSource);
+      recordGenerationUsage(turn, last);
+      turn.rolloutTokenCountTotalTokens = Math.max(previousRolloutTotal, incomingTotal);
+      turn.cumulativeTotalTokens = Math.max(
+        positiveNumber(turn.cumulativeTotalTokens),
+        incomingTotal,
       );
       turn.modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
       turn.updatedAt = parseTimestamp(record.timestamp);
@@ -1422,9 +1727,13 @@ export class TokenUsageManager {
     void worker.terminate();
   }
 
-  #clearRolloutTurns(threadId, { clearHistory = false } = {}) {
+  #clearRolloutTurns(threadId, { clearHistory = false, rolloutPath = null } = {}) {
     for (const [turnId, turn] of this.turns) {
-      if (turn.threadId === threadId && turn.source === "rollout") {
+      if (turn.threadId === threadId && (!rolloutPath || turn.rolloutPath === rolloutPath)) {
+        turn.toolExecutionLedger = createToolExecutionLedger();
+      }
+      if (turn.threadId === threadId && turn.source === "rollout" &&
+        (!rolloutPath || turn.rolloutPath === rolloutPath)) {
         this.turns.delete(turnId);
         this.turnCostCache.delete(turnId);
       }
@@ -1439,12 +1748,15 @@ export class TokenUsageManager {
   #pruneRolloutStates(protectedThreadId) {
     if (this.fileStates.size < MAX_TRACKED_ROLLOUT_STATES) return;
     const removable = [...this.fileStates.entries()]
-      .filter(([threadId]) => threadId !== protectedThreadId &&
-        threadId !== this.activeThreadId && !this.rolloutReadPromises.has(threadId))
+      .filter(([path, state]) => state.threadId !== protectedThreadId &&
+        state.threadId !== this.activeThreadId &&
+        !this.rolloutFallbackThreads.has(state.threadId) &&
+        !this.recentRolloutThreads.has(state.threadId) &&
+        !this.rolloutReadPromises.has(path))
       .sort(([, left], [, right]) => positiveNumber(left.lastUsedAt) - positiveNumber(right.lastUsedAt));
     while (this.fileStates.size >= MAX_TRACKED_ROLLOUT_STATES && removable.length > 0) {
-      const [threadId] = removable.shift();
-      this.fileStates.delete(threadId);
+      const [path] = removable.shift();
+      this.fileStates.delete(path);
       this.#markCacheDirty();
     }
   }
@@ -1536,17 +1848,24 @@ export class TokenUsageManager {
     if (possibleThreads.length === 0) return;
     this.rolloutReconcilePromise = (async () => {
       const candidates = (await Promise.all(possibleThreads.map(async (threadId) => {
-        const state = this.fileStates.get(threadId);
-        if (!state || !state.unknownModelChecked) return threadId;
-        try {
-          const info = await stat(state.path);
-          return info.size !== state.unknownModelCheckOffset ? threadId : null;
-        } catch (error) {
-          if (error.code !== "ENOENT") {
-            console.error(`[token-usage] 检查线程 ${threadId} rollout 变化失败: ${error.message}`);
-          }
-          return null;
+        const paths = this.rolloutPathsByThread.get(threadId) ?? [];
+        const states = paths.map((path) => this.fileStates.get(path)).filter(Boolean);
+        if (states.length !== paths.length || states.some((state) => !state.unknownModelChecked)) {
+          return threadId;
         }
+        for (const state of states) {
+          try {
+            const info = await stat(state.path);
+            if (info.size !== state.unknownModelCheckOffset) return threadId;
+          } catch (error) {
+            if (error.code !== "ENOENT") {
+              console.error(
+                `[token-usage] 检查线程 ${threadId} rollout 变化失败: ${error.message}`,
+              );
+            }
+          }
+        }
+        return null;
       }))).filter(Boolean);
       if (candidates.length === 0) return;
       let changed = false;
@@ -1557,14 +1876,16 @@ export class TokenUsageManager {
           if (candidateIndex >= candidates.length) return;
           const threadId = candidates[candidateIndex];
           try {
-            const state = await this.#ensureRolloutState(threadId);
-            if (!state) continue;
+            const states = await this.#ensureRolloutStates(threadId);
+            if (states.length === 0) continue;
             const revision = this.cacheRevision;
-            await this.#readAppendedRollout(state);
-            if (!state.unknownModelChecked || state.unknownModelCheckOffset !== state.offset) {
-              state.unknownModelChecked = true;
-              state.unknownModelCheckOffset = state.offset;
-              this.#markCacheDirty();
+            for (const state of states) {
+              await this.#readAppendedRollout(state);
+              if (!state.unknownModelChecked || state.unknownModelCheckOffset !== state.offset) {
+                state.unknownModelChecked = true;
+                state.unknownModelCheckOffset = state.offset;
+                this.#markCacheDirty();
+              }
             }
             changed ||= this.cacheRevision !== revision;
           } catch (error) {
@@ -1599,6 +1920,18 @@ function buildDisplayTurns(turns) {
     ...turns,
     ...[...subagentGroups.values()].map(summarizeSubagentTurns),
   ];
+}
+
+function publicGenerationDetails(details, ledger) {
+  return (Array.isArray(details) ? details : []).map((detail) => {
+    const {
+      requestId: _requestId,
+      responseId: _responseId,
+      ...publicDetail
+    } = detail;
+    const executions = projectToolExecutions(ledger, detail.responseId);
+    return executions ? { ...publicDetail, toolExecutions: executions } : publicDetail;
+  });
 }
 
 function findTurnAtTimestamp(turns, timestamp) {
@@ -1645,6 +1978,8 @@ function summarizeSubagentTurns(turns) {
         : "completed"
     : null;
   for (const turn of ordered) {
+    summary.toolExecutionLedger.calls.push(...(turn.toolExecutionLedger?.calls ?? []));
+    summary.toolExecutionLedger.items.push(...(turn.toolExecutionLedger?.items ?? []));
     for (const field of TOKEN_FIELDS) {
       const publicField = toCamelCase(field);
       summary[publicField] += positiveNumber(turn[publicField]);
@@ -1660,8 +1995,40 @@ function summarizeSubagentTurns(turns) {
   const models = [...new Set(ordered.map((turn) => nonEmptyString(turn.model)).filter(Boolean))];
   summary.model = models.length === 1 ? models[0] : models.length > 1 ? "multiple" : "";
   summary.modelSource = "subagent";
-  const activeTurn = [...ordered].reverse().find((turn) => !turn.completed) ?? ordered.at(-1);
-  summary.totalGenerationRate = positiveNumber(activeTurn?.totalGenerationRate) || null;
+  summary.firstTokenLatencyTotalMs = ordered.reduce(
+    (total, turn) => total + positiveNumber(turn.firstTokenLatencyTotalMs),
+    0,
+  );
+  summary.firstTokenLatencySamples = ordered.reduce(
+    (total, turn) => total + positiveInteger(turn.firstTokenLatencySamples),
+    0,
+  );
+  summary.firstTokenLatencyMs = summary.firstTokenLatencySamples > 0
+    ? summary.firstTokenLatencyTotalMs / summary.firstTokenLatencySamples
+    : null;
+  summary.generationDetails = ordered.flatMap((turn) =>
+    Array.isArray(turn.generationDetails) ? turn.generationDetails : [])
+    .map((detail, index) => ({
+      ...detail,
+      sequence: index + 1,
+    }));
+  summary.outputGenerationDurationMs = ordered.reduce(
+    (total, turn) => total + positiveNumber(turn.outputGenerationDurationMs),
+    0,
+  );
+  summary.outputGenerationTokens = ordered.reduce(
+    (total, turn) => total + positiveNumber(turn.outputGenerationTokens),
+    0,
+  );
+  summary.outputSpeed = calculateOutputSpeed(summary);
+  summary.networkLatencySupported = ordered.some((turn) => turn.networkLatencySupported);
+  const latestNetworkLatency = ordered
+    .map((turn) => normalizeNetworkLatency(turn.networkLatency))
+    .filter(Boolean)
+    .sort((left, right) => left.sampledAt - right.sampledAt)
+    .at(-1) ?? null;
+  summary.networkLatency = latestNetworkLatency;
+  summary.networkConnectionId = latestNetworkLatency?.connectionId ?? null;
   return summary;
 }
 
@@ -1672,6 +2039,7 @@ function emptyTurn(turnId, threadId, source, rolloutPath = "") {
     taskKey: threadId,
     source,
     rolloutPath,
+    rolloutUsageFallback: false,
     isSubagent: false,
     isSubagentSummary: false,
     rootThreadId: threadId,
@@ -1689,16 +2057,130 @@ function emptyTurn(turnId, threadId, source, rolloutPath = "") {
     reasoningOutputTokens: 0,
     totalTokens: 0,
     cumulativeTotalTokens: 0,
+    rolloutTokenCountTotalTokens: 0,
+    responseCumulativeTotalTokens: 0,
+    rolloutParserVersion: 0,
+    usageResponseIds: [],
     modelContextWindow: 0,
     model: "",
     modelSource: "",
-    generationStartAt: 0,
-    totalGenerationRate: null,
+    generationMetricsVersion: 0,
+    generationMetricsEnabled: false,
+    firstTokenLatencyMs: null,
+    firstTokenLatencyTotalMs: 0,
+    firstTokenLatencySamples: 0,
+    outputSpeed: null,
+    outputGenerationDurationMs: 0,
+    outputGenerationTokens: 0,
+    networkLatencySupported: false,
+    networkConnectionId: null,
+    networkLatency: null,
+    generationDetails: [],
+    toolExecutionLedger: createToolExecutionLedger(),
+    pendingGenerationSamples: [],
+    pendingGenerationUsages: [],
+    pendingToolTimings: [],
     costRevision: 0,
     segments: [],
     startedAt: 0,
     updatedAt: 0,
   };
+}
+
+function prepareRolloutUsageTurn(turn) {
+  if (positiveInteger(turn.rolloutParserVersion) === ROLLOUT_PARSER_VERSION) return;
+  for (const field of TOKEN_FIELDS) turn[toCamelCase(field)] = 0;
+  turn.cumulativeTotalTokens = 0;
+  turn.rolloutTokenCountTotalTokens = 0;
+  turn.responseCumulativeTotalTokens = 0;
+  turn.usageResponseIds = [];
+  turn.segments = [];
+  turn.costRevision = positiveInteger(turn.costRevision) + 1;
+  turn.rolloutParserVersion = ROLLOUT_PARSER_VERSION;
+  resetGenerationUsageAttribution(turn);
+}
+
+function markUsageResponse(turn, responseId) {
+  const normalized = nonEmptyString(responseId);
+  if (!normalized) return false;
+  if (!Array.isArray(turn.usageResponseIds)) turn.usageResponseIds = [];
+  if (turn.usageResponseIds.includes(normalized)) return false;
+  turn.usageResponseIds.push(normalized);
+  if (turn.usageResponseIds.length > MAX_SEEN_USAGE_RESPONSE_IDS) {
+    turn.usageResponseIds.splice(
+      0,
+      turn.usageResponseIds.length - MAX_SEEN_USAGE_RESPONSE_IDS,
+    );
+  }
+  return true;
+}
+
+function enqueuePendingUsageRecord(state, turnId, responseId, usage) {
+  if (!Array.isArray(state.pendingUsageRecords)) state.pendingUsageRecords = [];
+  state.pendingUsageRecords.push({
+    turnId,
+    responseId,
+    usage: normalizeRolloutUsage(usage),
+  });
+  if (state.pendingUsageRecords.length > MAX_PENDING_USAGE_RECORDS) {
+    state.pendingUsageRecords.splice(
+      0,
+      state.pendingUsageRecords.length - MAX_PENDING_USAGE_RECORDS,
+    );
+  }
+}
+
+function consumePendingUsageRecord(state, turnId, summaryUsage) {
+  if (!Array.isArray(state.pendingUsageRecords)) return null;
+  const normalizedSummary = normalizeRolloutUsage(summaryUsage);
+  let index = state.pendingUsageRecords.findIndex((record) =>
+    record.turnId === turnId && usagesEqual(record.usage, normalizedSummary));
+  if (index < 0 && !hasItemizedUsage(normalizedSummary)) {
+    // Compaction summaries in some Codex versions expose only a thread-level
+    // total. They cannot be priced independently, but a preceding exact
+    // response record already contains the complete breakdown.
+    index = state.pendingUsageRecords.findIndex((record) => record.turnId === turnId);
+  }
+  if (index < 0) return null;
+  return state.pendingUsageRecords.splice(index, 1)[0] ?? null;
+}
+
+function usagesEqual(left, right) {
+  if (!left || !right) return false;
+  return TOKEN_FIELDS.every((field) =>
+    positiveNumber(left[field]) === positiveNumber(right[field]));
+}
+
+function hasItemizedUsage(usage) {
+  if (!usage) return false;
+  return TOKEN_FIELDS
+    .filter((field) => field !== "total_tokens")
+    .some((field) => positiveNumber(usage[field]) > 0);
+}
+
+function resetGenerationUsageAttribution(turn) {
+  turn.outputSpeed = null;
+  turn.outputGenerationDurationMs = 0;
+  turn.outputGenerationTokens = 0;
+  turn.pendingGenerationUsages = [];
+  turn.pendingGenerationSamples = [];
+  for (const detail of Array.isArray(turn.generationDetails) ? turn.generationDetails : []) {
+    const hasNonTextOutput = detail.outputSpeedUnavailableReason === "unattributed-output";
+    detail.outputSpeed = null;
+    detail.outputGenerationTokens = 0;
+    assignOutputPhaseSpeed(detail, null);
+    const sample = {
+      responseId: nonEmptyString(detail.responseId),
+      hasVisibleText: Boolean(detail.hasVisibleText),
+      hasNonTextOutput,
+      generationDurationMs: positiveNumber(detail.generationDurationMs),
+      ...outputPhaseFields(detail),
+      detailSequence: positiveInteger(detail.sequence),
+    };
+    detail.outputSpeedUnavailableReason = generationSpeedWindow(sample).reason;
+    turn.pendingGenerationSamples.push(sample);
+  }
+  trimGenerationQueue(turn.pendingGenerationSamples);
 }
 
 function addUsage(turn, usage, model, modelSource = turn.modelSource) {
@@ -1731,18 +2213,276 @@ function addUsage(turn, usage, model, modelSource = turn.modelSource) {
   turn.costRevision = positiveInteger(turn.costRevision) + 1;
 }
 
-function updateTotalGenerationRate(turn, updatedAt) {
-  // outputTokens is the total generated-token counter, including reasoning
-  // tokens. Keep this separate from the visible-text counter in the UI.
-  const timestamp = positiveNumber(updatedAt);
-  if (!timestamp || positiveNumber(turn.outputTokens) <= 0) return;
-  if (!positiveNumber(turn.generationStartAt)) {
-    turn.generationStartAt = timestamp;
+function recordGenerationSample(turn, value) {
+  if (!value || typeof value !== "object") return;
+  const textPhases = normalizeTextPhases(value.textPhases);
+  const networkLatency = normalizeNetworkLatency(value.networkLatency);
+  const hasVisibleText = Boolean(value.hasVisibleText) || textPhases.length > 0;
+  const hasNonTextOutput = Boolean(value.hasNonTextOutput);
+  const derivedFirstTokenLatencyMs = textPhases.reduce(
+    (minimum, phase) => Math.min(minimum, positiveNumber(phase.startLatencyMs) || Infinity),
+    Infinity,
+  );
+  const firstTokenLatencyMs = positiveNumber(value.firstTokenLatencyMs) ||
+    (Number.isFinite(derivedFirstTokenLatencyMs) ? derivedFirstTokenLatencyMs : 0);
+  const derivedGenerationDurationMs = textPhases.reduce(
+    (total, phase) => total + positiveNumber(phase.durationMs),
+    0,
+  );
+  const generationDurationMs = positiveNumber(value.generationDurationMs) ||
+    derivedGenerationDurationMs;
+  const detailSequence = nextGenerationSequence(turn);
+  if (hasVisibleText && firstTokenLatencyMs > 0) {
+    turn.firstTokenLatencyTotalMs += firstTokenLatencyMs;
+    turn.firstTokenLatencySamples += 1;
+    turn.firstTokenLatencyMs = turn.firstTokenLatencyTotalMs / turn.firstTokenLatencySamples;
+  }
+  const detail = {
+    requestId: nonEmptyString(value.requestId),
+    responseId: nonEmptyString(value.responseId),
+    sequence: detailSequence,
+    hasVisibleText,
+    followsToolResult: Boolean(value.followsToolResult),
+    toolNames: Array.isArray(value.toolNames)
+      ? [...new Set(value.toolNames.map(nonEmptyString).filter(Boolean))]
+      : [],
+    responseLatencyMs: nonNegativeNumberOrNull(value.responseLatencyMs),
+    reasoningDurationMs: nonNegativeNumberOrNull(value.reasoningDurationMs),
+    firstTokenLatencyMs: firstTokenLatencyMs || null,
+    outputSpeed: null,
+    outputGenerationTokens: 0,
+    generationDurationMs: generationDurationMs || null,
+    textPhases,
+    ...outputPhaseFields(value),
+    networkLatency,
+    toolTiming: normalizeToolTiming(value.toolTiming),
+    outputSpeedUnavailableReason: Array.isArray(value.outputPhases)
+      ? generationSpeedWindow(value).reason
+      : !hasVisibleText ? "no-visible-text" : hasNonTextOutput ? "unattributed-output" : null,
+  };
+  turn.generationDetails.push(detail);
+  if (networkLatency) {
+    turn.networkLatencySupported = true;
+    turn.networkConnectionId = networkLatency.connectionId;
+    turn.networkLatency = networkLatency;
+  }
+  applyPendingToolTimings(turn, detail);
+  turn.pendingGenerationSamples.push({
+    responseId: nonEmptyString(value.responseId),
+    hasVisibleText,
+    hasNonTextOutput,
+    generationDurationMs,
+    ...outputPhaseFields(value),
+    detailSequence,
+  });
+  trimGenerationQueue(turn.pendingGenerationSamples);
+  reconcileGenerationMetrics(turn);
+}
+
+function resetGenerationMetrics(turn) {
+  turn.generationMetricsEnabled = false;
+  turn.firstTokenLatencyMs = null;
+  turn.firstTokenLatencyTotalMs = 0;
+  turn.firstTokenLatencySamples = 0;
+  turn.outputSpeed = null;
+  turn.outputGenerationDurationMs = 0;
+  turn.outputGenerationTokens = 0;
+  turn.generationDetails = [];
+  turn.pendingGenerationSamples = [];
+  turn.pendingGenerationUsages = [];
+  turn.pendingToolTimings = [];
+}
+
+function recordGenerationToolTiming(turn, event) {
+  const requestId = nonEmptyString(event.requestId);
+  const toolTiming = normalizeToolTiming(event.toolTiming);
+  if (!requestId || !toolTiming) return;
+  const detail = turn.generationDetails.find((value) => value.requestId === requestId);
+  if (detail) {
+    mergeToolTiming(detail, toolTiming);
     return;
   }
-  const elapsedSeconds = (timestamp - turn.generationStartAt) / 1_000;
-  if (elapsedSeconds <= 0) return;
-  turn.totalGenerationRate = turn.outputTokens / elapsedSeconds;
+  turn.pendingToolTimings.push({ requestId, toolTiming });
+  trimGenerationQueue(turn.pendingToolTimings);
+}
+
+function applyPendingToolTimings(turn, detail) {
+  if (!detail.requestId || turn.pendingToolTimings.length === 0) return;
+  const remaining = [];
+  for (const pending of turn.pendingToolTimings) {
+    if (pending.requestId === detail.requestId) mergeToolTiming(detail, pending.toolTiming);
+    else remaining.push(pending);
+  }
+  turn.pendingToolTimings = remaining;
+}
+
+function mergeToolTiming(detail, toolTiming) {
+  detail.toolTiming = toolTiming;
+  detail.toolNames = [...new Set([
+    ...(Array.isArray(detail.toolNames) ? detail.toolNames : []),
+    ...toolTiming.toolNames,
+  ])];
+}
+
+function normalizeToolTiming(value) {
+  const durationMs = nonNegativeNumberOrNull(value?.durationMs);
+  if (durationMs == null) return null;
+  const calls = Array.isArray(value?.calls)
+    ? value.calls.map((call) => {
+      const callDurationMs = nonNegativeNumberOrNull(call?.durationMs);
+      if (callDurationMs == null) return null;
+      return {
+        toolName: nonEmptyString(call?.toolName),
+        preparationDurationMs: nonNegativeNumberOrNull(call?.preparationDurationMs),
+        durationMs: callDurationMs,
+      };
+    }).filter(Boolean)
+    : [];
+  return {
+    toolNames: Array.isArray(value?.toolNames)
+      ? [...new Set(value.toolNames.map(nonEmptyString).filter(Boolean))]
+      : [],
+    toolCount: positiveInteger(value?.toolCount) || calls.length,
+    readyLatencyMs: nonNegativeNumberOrNull(value?.readyLatencyMs),
+    preparationStartLatencyMs: nonNegativeNumberOrNull(value?.preparationStartLatencyMs),
+    preparationDurationMs: nonNegativeNumberOrNull(value?.preparationDurationMs),
+    durationMs,
+    calls,
+  };
+}
+
+function normalizeTextPhases(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((phase) => {
+    const startLatencyMs = nonNegativeNumberOrNull(phase?.startLatencyMs);
+    if (startLatencyMs == null) return null;
+    const type = ["commentary", "final_answer"].includes(phase?.phase)
+      ? phase.phase
+      : "unknown";
+    return {
+      phase: type,
+      startLatencyMs,
+      durationMs: nonNegativeNumberOrNull(phase?.durationMs),
+    };
+  }).filter(Boolean).sort((left, right) => left.startLatencyMs - right.startLatencyMs);
+}
+
+function outputPhaseFields(value) {
+  const outputPhases = normalizeOutputPhases(value?.outputPhases);
+  return outputPhases === null ? {} : {
+    outputPhases,
+    outputPhasesComplete: Boolean(value.outputPhasesComplete),
+  };
+}
+
+function normalizeNetworkLatency(value) {
+  if (!value || typeof value !== "object") return null;
+  const status = ["stable", "fluctuating", "reconnecting", "reconnected"]
+    .includes(value.status)
+    ? value.status
+    : null;
+  const latencyMs = nonNegativeNumberOrNull(value.latencyMs);
+  const sampledAt = positiveNumber(value.sampledAt) || null;
+  const connectionId = nonEmptyString(value.connectionId);
+  if (!status || !sampledAt || !connectionId) return null;
+  return { status, latencyMs, sampledAt, connectionId };
+}
+
+function recordGenerationUsage(turn, usage, responseId = null) {
+  if (!turn.generationMetricsEnabled) return;
+  const normalizedResponseId = nonEmptyString(responseId);
+  if (!normalizedResponseId &&
+    positiveInteger(turn.generationMetricsVersion) >= MIN_GENERATION_METRICS_VERSION) return;
+  const outputTokens = positiveNumber(usage?.output_tokens);
+  if (outputTokens <= 0) return;
+  const reasoningTokens = positiveNumber(usage?.reasoning_output_tokens);
+  turn.pendingGenerationUsages.push({
+    responseId: normalizedResponseId,
+    // Historical field name: this includes generated tool input as well as text.
+    visibleOutputTokens: Math.max(0, outputTokens - reasoningTokens),
+  });
+  trimGenerationQueue(turn.pendingGenerationUsages);
+  reconcileGenerationMetrics(turn);
+}
+
+function reconcileGenerationMetrics(turn) {
+  for (;;) {
+    const pair = takeNextGenerationPair(turn);
+    if (!pair) break;
+    const { sample, usage } = pair;
+    const nonReasoningOutputTokens = positiveNumber(usage.visibleOutputTokens);
+    const detail = turn.generationDetails.find((value) =>
+      value.sequence === sample.detailSequence);
+    const window = generationSpeedWindow(sample);
+    if (window.reason) {
+      if (detail) detail.outputSpeedUnavailableReason = window.reason;
+      continue;
+    }
+    // TPOT excludes the first output token because its delay is represented by TTFT.
+    const measuredOutputTokens = Math.max(0, nonReasoningOutputTokens - 1);
+    if (measuredOutputTokens <= 0) {
+      if (detail) detail.outputSpeedUnavailableReason = "insufficient-data";
+      continue;
+    }
+    turn.outputGenerationTokens += measuredOutputTokens;
+    turn.outputGenerationDurationMs += window.durationMs;
+    if (detail) {
+      detail.outputGenerationTokens = measuredOutputTokens;
+      detail.outputSpeed = measuredOutputTokens / (window.durationMs / 1_000);
+      detail.outputSpeedUnavailableReason = null;
+      assignOutputPhaseSpeed(detail, detail.outputSpeed);
+    }
+  }
+  turn.outputSpeed = calculateOutputSpeed(turn);
+}
+
+function takeNextGenerationPair(turn) {
+  const samples = turn.pendingGenerationSamples;
+  const usages = turn.pendingGenerationUsages;
+  if (!Array.isArray(samples) || !Array.isArray(usages) ||
+    samples.length === 0 || usages.length === 0) return null;
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
+    const responseId = nonEmptyString(samples[sampleIndex]?.responseId);
+    if (!responseId) continue;
+    const usageIndex = usages.findIndex((usage) => usage?.responseId === responseId);
+    if (usageIndex < 0) continue;
+    return {
+      sample: samples.splice(sampleIndex, 1)[0],
+      usage: usages.splice(usageIndex, 1)[0],
+    };
+  }
+  // Older app-server and rollout formats do not carry response IDs. Pair only
+  // when both sides are unkeyed; mixing a keyed and an unkeyed record could
+  // silently attribute compaction or tool output to the next visible answer.
+  const sampleIndex = samples.findIndex((sample) => !nonEmptyString(sample?.responseId));
+  const usageIndex = usages.findIndex((usage) => !nonEmptyString(usage?.responseId));
+  if (sampleIndex < 0 || usageIndex < 0) return null;
+  const rawUsage = usages.splice(usageIndex, 1)[0];
+  return {
+    sample: samples.splice(sampleIndex, 1)[0],
+    usage: typeof rawUsage === "number"
+      ? { responseId: null, visibleOutputTokens: positiveNumber(rawUsage) }
+      : rawUsage,
+  };
+}
+
+function nextGenerationSequence(turn) {
+  return turn.generationDetails.reduce(
+    (maximum, detail) => Math.max(maximum, positiveInteger(detail?.sequence)),
+    0,
+  ) + 1;
+}
+
+function calculateOutputSpeed(turn) {
+  const durationMs = positiveNumber(turn.outputGenerationDurationMs);
+  const tokens = positiveNumber(turn.outputGenerationTokens);
+  return durationMs > 0 && tokens > 0 ? tokens / (durationMs / 1_000) : null;
+}
+
+function trimGenerationQueue(queue) {
+  if (queue.length > MAX_PENDING_GENERATION_RECORDS) {
+    queue.splice(0, queue.length - MAX_PENDING_GENERATION_RECORDS);
+  }
 }
 
 function turnHasUnknownModel(turn) {
@@ -1819,7 +2559,7 @@ function normalizeRolloutUsage(value) {
   return Object.fromEntries(TOKEN_FIELDS.map((field) => [field, positiveNumber(value[field])]));
 }
 
-function normalizeCachedTurn(value) {
+function normalizeCachedTurn(value, { generationMetricsCompatible = false } = {}) {
   const turnId = nonEmptyString(value?.turnId);
   const threadId = nonEmptyString(value?.threadId ?? value?.taskKey);
   if (!turnId || !threadId) return null;
@@ -1833,8 +2573,90 @@ function normalizeCachedTurn(value) {
   turn.status = nonEmptyString(value.status);
   turn.model = String(value.model ?? "");
   turn.modelSource = String(value.modelSource ?? (turn.model ? "thread" : ""));
-  turn.generationStartAt = positiveNumber(value.generationStartAt);
-  turn.totalGenerationRate = positiveNumber(value.totalGenerationRate) || null;
+  turn.rolloutUsageFallback = Boolean(value.rolloutUsageFallback);
+  turn.toolExecutionLedger = normalizeToolExecutionLedger(value.toolExecutionLedger);
+  const cachedGenerationMetricsVersion = positiveInteger(value.generationMetricsVersion);
+  const keepGenerationMetrics = generationMetricsCompatible &&
+    cachedGenerationMetricsVersion >= MIN_GENERATION_METRICS_VERSION;
+  turn.generationMetricsVersion = keepGenerationMetrics ? cachedGenerationMetricsVersion : 0;
+  turn.generationMetricsEnabled = keepGenerationMetrics && Boolean(value.generationMetricsEnabled);
+  turn.firstTokenLatencyMs = keepGenerationMetrics
+    ? positiveNumber(value.firstTokenLatencyMs) || null
+    : null;
+  turn.firstTokenLatencyTotalMs = keepGenerationMetrics
+    ? positiveNumber(value.firstTokenLatencyTotalMs)
+    : 0;
+  turn.firstTokenLatencySamples = keepGenerationMetrics
+    ? positiveInteger(value.firstTokenLatencySamples)
+    : 0;
+  turn.outputSpeed = keepGenerationMetrics ? positiveNumber(value.outputSpeed) || null : null;
+  turn.outputGenerationDurationMs = keepGenerationMetrics
+    ? positiveNumber(value.outputGenerationDurationMs)
+    : 0;
+  turn.outputGenerationTokens = keepGenerationMetrics
+    ? positiveNumber(value.outputGenerationTokens)
+    : 0;
+  turn.networkLatencySupported = Boolean(value.networkLatencySupported);
+  turn.networkConnectionId = nonEmptyString(value.networkConnectionId);
+  turn.networkLatency = normalizeNetworkLatency(value.networkLatency);
+  turn.generationDetails = keepGenerationMetrics && Array.isArray(value.generationDetails)
+    ? value.generationDetails.map((detail, index) => ({
+        requestId: nonEmptyString(detail?.requestId),
+        responseId: nonEmptyString(detail?.responseId),
+        sequence: positiveInteger(detail?.sequence) || index + 1,
+        hasVisibleText: Boolean(detail?.hasVisibleText ?? detail?.firstTokenLatencyMs),
+        followsToolResult: Boolean(detail?.followsToolResult),
+        toolNames: Array.isArray(detail?.toolNames)
+          ? [...new Set(detail.toolNames.map(nonEmptyString).filter(Boolean))]
+          : [],
+        responseLatencyMs: nonNegativeNumberOrNull(detail?.responseLatencyMs),
+        reasoningDurationMs: nonNegativeNumberOrNull(detail?.reasoningDurationMs),
+        firstTokenLatencyMs: positiveNumber(detail?.firstTokenLatencyMs) || null,
+        outputSpeed: positiveNumber(detail?.outputSpeed) || null,
+        outputGenerationTokens: positiveNumber(detail?.outputGenerationTokens),
+        generationDurationMs: nonNegativeNumberOrNull(detail?.generationDurationMs),
+        textPhases: normalizeTextPhases(detail?.textPhases),
+        ...outputPhaseFields(detail),
+        networkLatency: normalizeNetworkLatency(detail?.networkLatency),
+        toolTiming: normalizeToolTiming(detail?.toolTiming),
+        outputSpeedUnavailableReason: [
+          "unattributed-output",
+          "insufficient-data",
+          "no-visible-text",
+        ]
+          .includes(detail?.outputSpeedUnavailableReason)
+          ? detail.outputSpeedUnavailableReason
+          : null,
+      }))
+    : [];
+  turn.pendingGenerationSamples = keepGenerationMetrics && Array.isArray(value.pendingGenerationSamples)
+    ? value.pendingGenerationSamples.slice(-MAX_PENDING_GENERATION_RECORDS).map((sample) => ({
+        responseId: nonEmptyString(sample?.responseId),
+        hasVisibleText: Boolean(sample?.hasVisibleText),
+        hasNonTextOutput: Boolean(sample?.hasNonTextOutput),
+        generationDurationMs: positiveNumber(sample?.generationDurationMs),
+        ...outputPhaseFields(sample),
+        detailSequence: positiveInteger(sample?.detailSequence),
+      }))
+    : [];
+  turn.pendingGenerationUsages = keepGenerationMetrics && Array.isArray(value.pendingGenerationUsages)
+    ? value.pendingGenerationUsages
+        .slice(-MAX_PENDING_GENERATION_RECORDS)
+        .map((usage) => typeof usage === "number"
+          ? { responseId: null, visibleOutputTokens: positiveNumber(usage) }
+          : {
+              responseId: nonEmptyString(usage?.responseId),
+              visibleOutputTokens: positiveNumber(usage?.visibleOutputTokens),
+            })
+    : [];
+  turn.pendingToolTimings = keepGenerationMetrics && Array.isArray(value.pendingToolTimings)
+    ? value.pendingToolTimings.slice(-MAX_PENDING_GENERATION_RECORDS)
+        .map((pending) => ({
+          requestId: nonEmptyString(pending?.requestId),
+          toolTiming: normalizeToolTiming(pending?.toolTiming),
+        }))
+        .filter((pending) => pending.requestId && pending.toolTiming)
+    : [];
   turn.costRevision = positiveInteger(value.costRevision);
   turn.isSubagent = Boolean(value.isSubagent);
   turn.isSubagentSummary = false;
@@ -1847,6 +2669,16 @@ function normalizeCachedTurn(value) {
   turn.taskKey = nonEmptyString(value.taskKey) ?? threadId;
   turn.startedAt = positiveNumber(value.startedAt);
   turn.cumulativeTotalTokens = positiveNumber(value.cumulativeTotalTokens);
+  turn.rolloutTokenCountTotalTokens = positiveNumber(value.rolloutTokenCountTotalTokens);
+  turn.responseCumulativeTotalTokens = positiveNumber(value.responseCumulativeTotalTokens) ||
+    (turn.source === "event" && !turn.rolloutUsageFallback
+      ? turn.cumulativeTotalTokens
+      : 0);
+  turn.rolloutParserVersion = positiveInteger(value.rolloutParserVersion);
+  turn.usageResponseIds = Array.isArray(value.usageResponseIds)
+    ? [...new Set(value.usageResponseIds.map(nonEmptyString).filter(Boolean))]
+        .slice(-MAX_SEEN_USAGE_RESPONSE_IDS)
+    : [];
   turn.modelContextWindow = positiveNumber(value.modelContextWindow);
   turn.updatedAt = positiveNumber(value.updatedAt);
   turn.segments = Array.isArray(value.segments)
@@ -1885,6 +2717,16 @@ function normalizeCachedFileState(value) {
     pending: String(value.pending ?? ""),
     currentTurnId: nonEmptyString(value.currentTurnId),
     threadModel: nonEmptyString(value.threadModel),
+    pendingUsageRecords: Array.isArray(value.pendingUsageRecords)
+      ? value.pendingUsageRecords
+          .map((record) => ({
+            turnId: nonEmptyString(record?.turnId),
+            responseId: nonEmptyString(record?.responseId),
+            usage: normalizeRolloutUsage(record?.usage),
+          }))
+          .filter((record) => record.turnId && record.responseId && record.usage)
+          .slice(-MAX_PENDING_USAGE_RECORDS)
+      : [],
     modelReconciled: Boolean(value.modelReconciled),
     parserVersion: positiveInteger(value.parserVersion),
     unknownModelChecked: Boolean(value.unknownModelChecked),
@@ -2064,26 +2906,8 @@ async function readRolloutSessionMetadata(path) {
   };
 }
 
-async function findLatestRolloutPath(paths) {
-  const fallback = [...paths].sort((left, right) => basename(right).localeCompare(basename(left)))[0];
-  const candidates = await Promise.all(paths.map(async (path) => {
-    try {
-      const info = await stat(path);
-      return { path, modifiedAt: info.mtimeMs };
-    } catch {
-      return null;
-    }
-  }));
-  return candidates
-    .filter(Boolean)
-    .sort((left, right) =>
-      right.modifiedAt - left.modifiedAt ||
-      basename(right.path).localeCompare(basename(left.path))
-    )[0]?.path ?? fallback;
-}
-
 function threadIdFromRolloutPath(path) {
-  const match = basename(path).match(/-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i);
+  const match = basename(path).match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})/i);
   return match?.[1] ?? null;
 }
 
@@ -2099,6 +2923,12 @@ function toCamelCase(value) {
 function positiveNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function nonNegativeNumberOrNull(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 function positiveInteger(value) {

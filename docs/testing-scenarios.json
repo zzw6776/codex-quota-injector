@@ -1,0 +1,331 @@
+{
+  "version": 1,
+  "description": "完整影响面索引；free 列表代表断言证据，不自动代表该场景全部通过。live 标出真实验收来源。",
+  "groups": [
+    {
+      "ids": [
+        "HAR-01",
+        "HAR-04"
+      ],
+      "free": [
+        "test/testing-boundaries.test.mjs",
+        "runtime-tests/desktop-fixture.test.mjs",
+        "runtime-tests/official-workflows.test.mjs"
+      ],
+      "note": "临时配置、测试凭据、内核出站限制及仅回收自己创建的子进程；日常客户端关闭后的存活另见 HAR-02。"
+    },
+    {
+      "ids": [
+        "HAR-02",
+        "HAR-03",
+        "LCH-01",
+        "LCH-03",
+        "LCH-05",
+        "LCH-06",
+        "ACC-04"
+      ],
+      "free": [
+        "test/lifecycle-runner.test.mjs",
+        "test/lifecycle-host.test.mjs",
+        "test/lifecycle-progress.test.mjs"
+      ],
+      "live": "lifecycle",
+      "note": "免费批次验证外部监督、检查点、目标协议、单实例、账号回滚和独立可视进度契约；真实关闭、重启、正式包更新与账号往返由当前平台 lifecycle 报告验收。"
+    },
+    {
+      "ids": [
+        "LCH-02",
+        "MOD-01",
+        "MOD-02",
+        "MOD-06"
+      ],
+      "free": [
+        "test/model-configuration.test.mjs",
+        "runtime-tests/official-workflows.test.mjs"
+      ],
+      "live": "backend",
+      "note": "官方解析、静态目录及模型配置；配置需要日常客户端重启才能生效的部分随生命周期场景处理。"
+    },
+    {
+      "ids": [
+        "LCH-04"
+      ],
+      "free": [
+        "test/runtime-contracts.test.mjs",
+        "test/model-configuration.test.mjs"
+      ],
+      "note": "就绪、失效状态与参数契约；实际客户端启动恢复随 LCH-01 处理。"
+    },
+    {
+      "ids": [
+        "MOD-03",
+        "MOD-04",
+        "MOD-05"
+      ],
+      "free": [
+        "test/model-router.test.mjs",
+        "test/model-router-recovery.test.mjs",
+        "test/chat-protocol-tools.test.mjs",
+        "runtime-tests/official-workflows.test.mjs",
+        "runtime-tests/official-context.test.mjs",
+        "runtime-tests/deepseek-history.test.mjs",
+        "runtime-tests/deepseek-tools.test.mjs"
+      ],
+      "live": "backend",
+      "note": "官方、Responses、Chat、实际生产目录及能力拒绝；每个已配置平台按不同协议抽一个模型，不代表目录内所有模型逐一验收。"
+    },
+    {
+      "ids": [
+        "RPC-01",
+        "RPC-02",
+        "RPC-03",
+        "RPC-04",
+        "RPC-05"
+      ],
+      "free": [
+        "test/relay-protocol.test.mjs",
+        "runtime-tests/official-workflows.test.mjs",
+        "runtime-tests/official-extensions.test.mjs"
+      ],
+      "live": "backend+host",
+      "note": "双向外壳/ID/改写/大消息、真实运行时及默认/实验 Schema 升级门禁；方法名回放不是每个方法的业务执行证据。"
+    },
+    {
+      "ids": [
+        "NET-01",
+        "NET-02",
+        "NET-03",
+        "NET-04",
+        "NET-05"
+      ],
+      "free": [
+        "test/model-router.test.mjs",
+        "test/model-router-recovery.test.mjs",
+        "test/chat-tool-contracts.test.mjs",
+        "test/chat-protocol-tools.test.mjs",
+        "runtime-tests/official-workflows.test.mjs"
+      ],
+      "live": "backend",
+      "note": "HTTP/SSE/WS、压缩编码、工具历史、预热、断流/取消/恢复、凭据隔离。"
+    },
+    {
+      "ids": [
+        "NET-06",
+        "SES-06"
+      ],
+      "free": [
+        "runtime-tests/official-context.test.mjs",
+        "runtime-tests/official-task-state.test.mjs",
+        "runtime-tests/deepseek-history.test.mjs",
+        "test/model-router.test.mjs"
+      ],
+      "live": "backend",
+      "note": "官方模型覆盖远程手动及自动压缩，DeepSeek/第三方供应商覆盖本地摘要压缩；实际模型是否保留语义由 B 判定。"
+    },
+    {
+      "ids": [
+        "TOOL-01",
+        "TOOL-02",
+        "TOOL-03",
+        "TOOL-07"
+      ],
+      "free": [
+        "runtime-tests/official-workflows.test.mjs",
+        "runtime-tests/official-interactions.test.mjs",
+        "runtime-tests/deepseek-tools.test.mjs",
+        "test/chat-tool-contracts.test.mjs",
+        "test/live-web-search-contract.test.mjs"
+      ],
+      "live": "backend",
+      "note": "发现、命令/PTY/文件/补丁/MCP/原生网页搜索实际执行、错误和续接；免费回归证明写入型 MCP 在 never 下被拒且无副作用、在隔离审批后执行；真实 MCP 先查就绪并直调预检，再由独立模型轮次调用，审批仅接受精确匹配的测试标记，结果有独立文件、官方事件和服务断言；网页搜索同时要求官方事件和指向 OpenAI 文档站或 openai/codex 仓库的 app-server 链接。"
+    },
+    {
+      "ids": [
+        "TOOL-04",
+        "TOOL-05",
+        "TOOL-06"
+      ],
+      "free": [
+        "runtime-tests/browser-host.test.mjs",
+        "runtime-tests/desktop-fixture.test.mjs",
+        "runtime-tests/official-interactions.test.mjs",
+        "test/chat-protocol-tools.test.mjs"
+      ],
+      "live": "host",
+      "note": "A 执行自有网页/浏览器适配器与动态工具共享契约；实际 functions.exec、web.run、computer use 必须在 B 桌面宿主单独验收，computer use 材料通过仅绑定本机的 HTTP 地址提供。"
+    },
+    {
+      "ids": [
+        "INT-01",
+        "INT-02"
+      ],
+      "free": [
+        "runtime-tests/official-interactions.test.mjs"
+      ],
+      "live": "backend+host",
+      "note": "真实命令同意/拒绝、Plan 用户输入、MCP elicitation；桌面实际呈现属于 B。"
+    },
+    {
+      "ids": [
+        "INT-03"
+      ],
+      "free": [
+        "test/relay-protocol.test.mjs",
+        "test/wakeup-client.test.mjs",
+        "runtime-tests/official-extensions.test.mjs"
+      ],
+      "live": "host",
+      "note": "认证刷新、attestation 和设备验证双向契约；当前 macOS 构建的 userVerification/status 已在隔离 shim 中明确返回 providerUnavailable，注册、删除和生物识别签名未自动执行，真实宿主未触发时不可标为成功。"
+    },
+    {
+      "ids": [
+        "SES-01",
+        "SES-02",
+        "SES-03",
+        "SES-04",
+        "SES-05",
+        "SES-07",
+        "SES-08"
+      ],
+      "free": [
+        "runtime-tests/official-workflows.test.mjs",
+        "runtime-tests/official-context.test.mjs",
+        "runtime-tests/official-interactions.test.mjs",
+        "runtime-tests/official-task-state.test.mjs",
+        "runtime-tests/deepseek-history.test.mjs"
+      ],
+      "live": "backend+host",
+      "note": "历史/分叉/时间线/分组/删除/恢复、steer、中断、队列一次执行、目标实际完成；子智能体独立执行仍需宿主验收，分叉不替代子智能体。"
+    },
+    {
+      "ids": [
+        "SES-09",
+        "ENV-02",
+        "IO-04"
+      ],
+      "free": [
+        "test/relay-protocol.test.mjs",
+        "runtime-tests/official-extensions.test.mjs"
+      ],
+      "live": "host",
+      "note": "A 仅公共协议与升级门禁。实际自动化、远程环境、实时语音依赖当前宿主开放与配置，不能凭 Schema 通过标绿。"
+    },
+    {
+      "ids": [
+        "ENV-01",
+        "ENV-03"
+      ],
+      "free": [
+        "runtime-tests/official-workflows.test.mjs",
+        "runtime-tests/official-task-state.test.mjs",
+        "runtime-tests/official-interactions.test.mjs",
+        "runtime-tests/official-extensions.test.mjs"
+      ],
+      "live": "backend+host",
+      "note": "实际临时 Git、审查、项目 CRUD/cwd 和文件搜索；桌面工作树创建/选择另行验证。"
+    },
+    {
+      "ids": [
+        "EXT-01",
+        "EXT-02"
+      ],
+      "free": [
+        "runtime-tests/official-context.test.mjs",
+        "runtime-tests/official-interactions.test.mjs",
+        "runtime-tests/official-extensions.test.mjs"
+      ],
+      "live": "host",
+      "note": "实际临时 Skills/Hooks 和本地插件发现/安装/卸载；已连接的 Apps 和插件独特调用在实际宿主验证。"
+    },
+    {
+      "ids": [
+        "IO-01",
+        "IO-02"
+      ],
+      "free": [
+        "runtime-tests/official-context.test.mjs",
+        "runtime-tests/official-workflows.test.mjs",
+        "test/chat-tool-contracts.test.mjs",
+        "test/token-usage.test.mjs"
+      ],
+      "live": "backend+host",
+      "note": "有效图片/附件、大文件、阶段及流式终态；真实识图仅运行于声明支持图片的模型。"
+    },
+    {
+      "ids": [
+        "IO-03"
+      ],
+      "free": [
+        "runtime-tests/official-context.test.mjs",
+        "test/tool-executions.test.mjs",
+        "runtime-tests/desktop-fixture.test.mjs"
+      ],
+      "live": "host",
+      "note": "A 验证实际文件产物和消息契约；真正媒体生成必须由实际工具执行并验证可打开的产物，费用单列。"
+    },
+    {
+      "ids": [
+        "ACC-01",
+        "ACC-02",
+        "ACC-03",
+        "ACC-05",
+        "ACC-06"
+      ],
+      "free": [
+        "test/account-manager.test.mjs",
+        "test/account-store.test.mjs",
+        "test/account-oauth.test.mjs",
+        "test/account-reliability.test.mjs",
+        "runtime-tests/widget-browser.test.mjs"
+      ],
+      "live": "backend+host",
+      "note": "测试凭据的 OAuth/取消/超时/导入导出/加密/并发/损坏/写失败；不操作真实 Keychain，不为测试购买、兑换或发送邮件。"
+    },
+    {
+      "ids": [
+        "WK-01",
+        "WK-02"
+      ],
+      "free": [
+        "test/account-wakeup.test.mjs",
+        "test/wakeup-client.test.mjs",
+        "runtime-tests/widget-browser.test.mjs"
+      ],
+      "live": "wakeup",
+      "note": "免费状态机和真实子进程控制、超时、刷新/最低价选择；真实唤醒单独授权，独立辅助链不能替代主入口。"
+    },
+    {
+      "ids": [
+        "OBS-01",
+        "OBS-02",
+        "OBS-03"
+      ],
+      "free": [
+        "test/token-usage.test.mjs",
+        "test/tool-executions.test.mjs",
+        "test/token-pricing.test.mjs",
+        "test/generation-speed.test.mjs",
+        "test/model-router-recovery.test.mjs",
+        "test/chat-protocol-tools.test.mjs",
+        "runtime-tests/official-workflows.test.mjs"
+      ],
+      "live": "backend+host",
+      "note": "用量/速度/费用/去重、故障隔离及有界历史；没有全天压力测试结论。"
+    },
+    {
+      "ids": [
+        "UI-01",
+        "UI-02",
+        "UI-03",
+        "UI-04"
+      ],
+      "free": [
+        "runtime-tests/widget-browser.test.mjs",
+        "runtime-tests/browser-host.test.mjs",
+        "test/runtime-contracts.test.mjs"
+      ],
+      "live": "host",
+      "note": "实际 Chrome/CDP 注入、点击/输入/表单到管理器、尺寸/主题/任务 DOM 变化；macOS 临时浏览器使用模拟钥匙串，不提示或读取日常 Chrome 钥匙串；日常桌面窗口与真实宿主状态仍由 B 核对。"
+    }
+  ]
+}

@@ -25,9 +25,12 @@ const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 export class AccountManager {
-  constructor({ store = new AccountStore(), codexHome = resolveCodexHome() } = {}) {
+  constructor({ store = new AccountStore(), codexHome = resolveCodexHome(),
+    oauth = {}, exportDirectory = join(homedir(), "Downloads") } = {}) {
     this.store = store;
     this.codexHome = codexHome;
+    this.oauth = { callbackPort: OAUTH_CALLBACK_PORT, timeoutMs: OAUTH_TIMEOUT_MS, openExternal, ...oauth };
+    this.exportDirectory = exportDirectory;
     this.operation = null;
     this.oauthPromise = null;
     this.oauthAbortController = null;
@@ -36,6 +39,7 @@ export class AccountManager {
     this.officialSyncPromise = null;
     this.officialCredentialWatcher = null;
     this.officialSyncTimer = null;
+    this.operationClearTimer = null;
   }
 
   async initialize() {
@@ -77,6 +81,8 @@ export class AccountManager {
   close() {
     clearTimeout(this.officialSyncTimer);
     this.officialSyncTimer = null;
+    clearTimeout(this.operationClearTimer);
+    this.operationClearTimer = null;
     this.officialCredentialWatcher?.close();
     this.officialCredentialWatcher = null;
     this.oauthAbortController?.abort(createOAuthCancelledError());
@@ -260,7 +266,7 @@ export class AccountManager {
       const exportedAt = new Date();
       const fileName = `codex-quota-accounts-${exportedAt.toISOString()
         .replace(/[:.]/g, "-")}.json`;
-      const exportPath = join(homedir(), "Downloads", fileName);
+      const exportPath = join(this.exportDirectory, fileName);
       const payload = {
         version: 1,
         exportedAt: exportedAt.toISOString(),
@@ -352,7 +358,9 @@ export class AccountManager {
   clearOperationAfter(ms = 4_000) {
     const current = this.operation;
     if (!current) return;
-    setTimeout(() => {
+    clearTimeout(this.operationClearTimer);
+    this.operationClearTimer = setTimeout(() => {
+      this.operationClearTimer = null;
       if (this.operation === current) this.operation = null;
     }, ms);
   }
@@ -632,14 +640,15 @@ export class AccountManager {
     const server = createServer();
     try {
       try {
-        await listen(server, OAUTH_CALLBACK_PORT);
+        await listen(server, this.oauth.callbackPort);
       } catch (error) {
         if (error?.code === "EADDRINUSE") {
-          throw new Error(`OAuth 回调端口 ${OAUTH_CALLBACK_PORT} 已被占用，请关闭旧授权流程后重试`);
+          throw new Error(`OAuth 回调端口 ${this.oauth.callbackPort} 已被占用，请关闭旧授权流程后重试`);
         }
         throw error;
       }
-      const redirectUri = `http://localhost:${OAUTH_CALLBACK_PORT}/auth/callback`;
+      abortController.signal.throwIfAborted();
+      const redirectUri = `http://localhost:${server.address().port}/auth/callback`;
       const authUrl = new URL(AUTH_ENDPOINT);
       authUrl.search = new URLSearchParams({
         response_type: "code",
@@ -657,7 +666,7 @@ export class AccountManager {
       const callback = waitForOAuthCallback(
         server,
         expectedState,
-        OAUTH_TIMEOUT_MS,
+        this.oauth.timeoutMs,
         abortController.signal,
       );
       this.#setOperation(
@@ -665,10 +674,11 @@ export class AccountManager {
         "请在浏览器中完成 OpenAI 授权…",
         { cancellable: "oauth" },
       );
-      openExternal(authUrl.toString());
+      this.oauth.openExternal(authUrl.toString());
       const code = await callback;
       this.#setOperation("loading", "授权完成，正在保存账号…");
-      const tokens = await exchangeAuthorizationCode(code, verifier, redirectUri);
+      const tokens = await exchangeAuthorizationCode(code, verifier, redirectUri, abortController.signal);
+      abortController.signal.throwIfAborted();
       const account = await this.#upsertOAuthTokens(tokens);
       await this.refreshAccount(account.id, { forceSubscription: true });
       this.#setOperation("success", `已添加 ${account.email}`);
@@ -773,7 +783,7 @@ export async function refreshTokens(refreshToken, currentIdToken = "") {
   };
 }
 
-async function exchangeAuthorizationCode(code, verifier, redirectUri) {
+async function exchangeAuthorizationCode(code, verifier, redirectUri, signal) {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -785,7 +795,7 @@ async function exchangeAuthorizationCode(code, verifier, redirectUri) {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
-    signal: AbortSignal.timeout(25_000),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25_000)]) : AbortSignal.timeout(25_000),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`Token 交换失败 ${response.status}`);

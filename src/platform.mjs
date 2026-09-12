@@ -172,7 +172,7 @@ export async function isCodexRunning() {
   return (await listCodexProcessIds()).length > 0;
 }
 
-export async function stopCodex({ timeoutMs = 2_000 } = {}) {
+export async function stopCodex({ timeoutMs = 5_000 } = {}) {
   const processIds = await listCodexProcessIds();
   if (processIds.length === 0) return;
 
@@ -182,14 +182,15 @@ export async function stopCodex({ timeoutMs = 2_000 } = {}) {
         windowsHide: true,
       }).catch(() => undefined)
     ));
-  } else {
-    for (const processId of processIds) {
-      try {
-        process.kill(processId, "SIGTERM");
-      } catch (error) {
-        if (error.code !== "ESRCH") throw error;
-      }
+  } else if (process.platform === "darwin") {
+    try {
+      await requestMacCodexQuit();
+    } catch (error) {
+      console.warn(`[platform] Codex 正常退出请求失败，回退到进程信号：${error.message}`);
+      signalProcesses(processIds, "SIGTERM");
     }
+  } else {
+    signalProcesses(processIds, "SIGTERM");
   }
 
   const deadline = Date.now() + timeoutMs;
@@ -214,13 +215,7 @@ export async function stopCodex({ timeoutMs = 2_000 } = {}) {
       }).catch(() => undefined);
     }
   } else {
-    for (const processId of remaining) {
-      try {
-        process.kill(processId, "SIGKILL");
-      } catch (error) {
-        if (error.code !== "ESRCH") throw error;
-      }
-    }
+    signalProcesses(remaining, "SIGKILL");
   }
 
   const forceDeadline = Date.now() + (process.platform === "win32" ? 1_000 : 3_000);
@@ -232,6 +227,23 @@ export async function stopCodex({ timeoutMs = 2_000 } = {}) {
     await delay(100);
   }
   throw new Error("Codex 进程未能在超时内退出");
+}
+
+export async function requestMacCodexQuit({ execFileImpl = execFileAsync } = {}) {
+  await execFileImpl("/usr/bin/osascript", [
+    "-e",
+    `tell application id "${MACOS_CODEX_BUNDLE_ID}" to quit`,
+  ], { timeout: 5_000 });
+}
+
+function signalProcesses(processIds, signal) {
+  for (const processId of processIds) {
+    try {
+      process.kill(processId, signal);
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  }
 }
 
 function isProcessAlive(pid) {

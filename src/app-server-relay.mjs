@@ -2,7 +2,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, realpath, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -38,12 +38,10 @@ const CUSTOM_REASONING_DESCRIPTIONS = {
   xhigh: "Extra-high reasoning depth for harder problems",
   max: "Maximum reasoning depth for the hardest problems",
 };
-const MAX_SERVER_INSPECTION_BYTES = 1024 * 1024;
 const PENDING_REQUEST_TTL_MS = 2 * 60 * 1000;
 const TURN_MODEL_TTL_MS = 15 * 60 * 1000;
 const THREAD_CONTEXT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RELAY_CLEANUP_INTERVAL_MS = 60 * 1000;
-const JSON_RPC_ID_RE = /^\s*\{\s*"id"\s*:\s*(?:"([^"\\]*)"|(-?\d+(?:\.\d+)?))/;
 const execFileAsync = promisify(execFile);
 
 export async function runAppServerRelay() {
@@ -87,6 +85,7 @@ export async function runAppServerRelay() {
     return null;
   });
   const deepSeekEnabled = Boolean(settings?.enabled && settings?.apiKey);
+  const router = normalizeRouterConfiguration(relayConfig?.router);
   const extraModelSettingsPath = await resolveRelayPath(
     relayConfig?.extraModelSettingsPath ?? process.env.CODEX_QUOTA_EXTRA_MODEL_SETTINGS,
   );
@@ -109,17 +108,56 @@ export async function runAppServerRelay() {
   const officialModels = await readOfficialModelSlugs(catalogPath);
   officialModels.delete(DEEPSEEK_MODEL);
   for (const modelId of customModelProviders.keys()) officialModels.delete(modelId);
-  const chatCompatibilityProxy = await startChatCompatibilityProxy(customPlatforms);
+  // macOS already owns the network-facing compatibility proxy inside the
+  // ModelRouter. Starting a second proxy here would bypass its route binding,
+  // usage observation and credential boundary.
+  const chatCompatibilityProxy = router
+    ? null
+    : await startChatCompatibilityProxy(customPlatforms);
 
   const args = [...originalArgs];
   const appServerConfigArgs = [];
-  if (deepSeekEnabled) appServerConfigArgs.push("-c", PROVIDER_CONFIG);
-  for (const platform of customPlatforms.values()) {
-    if (!platform.enabled) continue;
+  if (router) {
     appServerConfigArgs.push(
       "-c",
-      customProviderConfig(platform, chatCompatibilityProxy?.baseUrlFor(platform)),
+      `model_provider=${JSON.stringify(OPENAI_PROVIDER)}`,
+      "-c",
+      `openai_base_url=${JSON.stringify(router.baseUrl)}`,
+      "-c",
+      routerProviderConfig(router.providerId, "Codex Quota Router", router),
     );
+    const configuredProviderIds = new Set([router.providerId]);
+    if (deepSeekEnabled) {
+      appServerConfigArgs.push(
+        "-c",
+        routerProviderConfig(DEEPSEEK_PROVIDER, "DeepSeek", router),
+      );
+      configuredProviderIds.add(DEEPSEEK_PROVIDER);
+    }
+    for (const platform of customPlatforms.values()) {
+      if (!platform.enabled) continue;
+      appServerConfigArgs.push(
+        "-c",
+        routerProviderConfig(platform.providerId, platform.name, router),
+      );
+      configuredProviderIds.add(platform.providerId);
+    }
+    for (const providerId of router.legacyProviderIds) {
+      if (configuredProviderIds.has(providerId)) continue;
+      appServerConfigArgs.push(
+        "-c",
+        routerProviderConfig(providerId, "Codex Quota Router", router),
+      );
+    }
+  } else {
+    if (deepSeekEnabled) appServerConfigArgs.push("-c", PROVIDER_CONFIG);
+    for (const platform of customPlatforms.values()) {
+      if (!platform.enabled) continue;
+      appServerConfigArgs.push(
+        "-c",
+        customProviderConfig(platform, chatCompatibilityProxy?.baseUrlFor(platform)),
+      );
+    }
   }
   if (catalogPath) {
     appServerConfigArgs.push("-c", `model_catalog_json=${JSON.stringify(catalogPath)}`);
@@ -130,14 +168,14 @@ export async function runAppServerRelay() {
   args.splice(appServerIndex + 1, 0, ...appServerConfigArgs);
 
   const env = { ...process.env, CODEX_CLI_PATH: upstreamExecutable };
-  if (deepSeekEnabled) env[DEEPSEEK_ENV_KEY] = settings.apiKey;
+  if (deepSeekEnabled && !router) env[DEEPSEEK_ENV_KEY] = settings.apiKey;
   else delete env[DEEPSEEK_ENV_KEY];
   for (const key of Object.keys(env)) {
     if (key.startsWith("CODEX_QUOTA_MODEL_") && key.endsWith("_API_KEY")) delete env[key];
   }
   for (const platform of customPlatforms.values()) {
     const envKey = customProviderEnvKey(platform.id);
-    if (platform.enabled) env[envKey] = platform.apiKey;
+    if (platform.enabled && !router) env[envKey] = platform.apiKey;
     else delete env[envKey];
   }
   clearRelayEnvironment(env);
@@ -311,6 +349,9 @@ function rewriteClientLine(line, state) {
       return jsonRpcError(message.id, "该额外模型平台尚未启用或 API Key 为空");
     }
     if (provider) params.modelProvider = provider;
+    if (!normalizedModel(params.model) && requestedModel) {
+      params.model = requestedModel;
+    }
     if (provider === DEEPSEEK_PROVIDER) params.config = deepSeekThreadConfig(params.config);
     if (customPlatform?.enabled) {
       params.config = customThreadConfig(params.config, state.customModels.get(requestedModel));
@@ -322,6 +363,9 @@ function rewriteClientLine(line, state) {
     provider ??= knownProvider;
     if (method === "turn/start" && knownProvider && provider && knownProvider !== provider) {
       return jsonRpcError(message.id, "同一任务不能切换模型供应商；请新建任务后再选择目标模型");
+    }
+    if (!normalizedModel(params.model) && requestedModel) {
+      params.model = requestedModel;
     }
     if (provider === DEEPSEEK_PROVIDER) {
       if (!state.deepSeekEnabled) {
@@ -416,10 +460,6 @@ function rewriteClientLine(line, state) {
 }
 
 function rewriteServerLine(line, state) {
-  if (line.length > MAX_SERVER_INSPECTION_BYTES) {
-    completeLargeResponse(line, state);
-    return line;
-  }
   let message;
   try {
     message = JSON.parse(line);
@@ -431,10 +471,13 @@ function rewriteServerLine(line, state) {
     revision: 0,
   });
   captureUsageNotification(message, state);
-  if (message?.id == null) return line;
-  const pending = state.pendingRequests.get(String(message.id));
+  // Server-initiated approvals/tools have their own ID space. Only responses
+  // can complete a client request; preserve numeric versus string IDs as well.
+  if (message?.id == null || typeof message.method === "string" ||
+    (!Object.hasOwn(message, "result") && !Object.hasOwn(message, "error"))) return line;
+  const pending = state.pendingRequests.get(message.id);
   if (!pending) return line;
-  state.pendingRequests.delete(String(message.id));
+  state.pendingRequests.delete(message.id);
   if (message.error) {
     restoreThreadContext(
       state.threadContexts,
@@ -450,12 +493,26 @@ function rewriteServerLine(line, state) {
   const result = message?.result;
   const thread = result?.thread ?? result;
   const threadId = thread?.id ?? pending.threadId;
-  const provider = normalizedModel(result?.modelProvider) ??
-    normalizedModel(thread?.modelProvider) ?? pending.provider;
+  const reportedProvider = normalizedModel(result?.modelProvider) ??
+    normalizedModel(thread?.modelProvider);
   // thread/start, thread/resume and thread/fork return the selected model at
   // the response envelope level, while the nested Thread object does not.
   const responseModel = normalizedModel(result?.model) ?? normalizedModel(thread?.model);
-  const model = responseModel ?? pending.model;
+  const responseProvider = providerForModel(responseModel, state) ?? reportedProvider;
+  const responseConflictsWithRequest = Boolean(
+    pending.provider && responseProvider && pending.provider !== responseProvider,
+  );
+  const model = pending.model &&
+    (isExtensionProvider(pending.provider) || responseConflictsWithRequest)
+    ? pending.model
+    : responseModel ?? pending.model;
+  // Some app-server paths report their configured default provider (`openai`)
+  // even when the selected catalog model belongs to an explicitly injected
+  // provider. The catalog mapping is unambiguous after conflict filtering and
+  // must win, otherwise a fork is falsely rejected as a provider switch.
+  const provider = responseConflictsWithRequest
+    ? pending.provider
+    : providerForModel(model, state) ?? reportedProvider ?? pending.provider;
   if (threadId && (provider || model)) {
     updateThreadContext(state.threadContexts, threadId, {
       model,
@@ -611,56 +668,6 @@ function reportModelListStatus(state, status, message) {
   console.error(`[codex-quota-relay] ${message}`);
 }
 
-function completeLargeResponse(line, state) {
-  const match = line.match(JSON_RPC_ID_RE);
-  if (!match) return;
-  const requestId = match[1] ?? match[2];
-  const pending = state.pendingRequests.get(requestId);
-  if (!pending) return;
-  state.pendingRequests.delete(requestId);
-  const resultIndex = line.indexOf('"result"');
-  const errorIndex = line.indexOf('"error"');
-  if (errorIndex >= 0 && (resultIndex < 0 || errorIndex < resultIndex)) {
-    restoreThreadContext(
-      state.threadContexts,
-      pending.threadId,
-      pending.previousContext,
-      pending.modelRevision,
-    );
-    return;
-  }
-  const threadId = extractResponseThreadId(line) ?? pending.threadId;
-  const provider = extractResponseStringField(line, "modelProvider") ?? pending.provider;
-  const responseModel = extractResponseStringField(line, "model");
-  const model = responseModel ?? pending.model;
-  if (threadId && (provider || model)) {
-    updateThreadContext(state.threadContexts, threadId, {
-      model,
-      modelPresent: Boolean(model),
-      provider,
-      providerPresent: Boolean(provider),
-      source: "thread-response",
-      revision: pending.modelRevision ?? 0,
-    });
-  }
-  const turnId = extractResponseTurnId(line);
-  const resolvedTurnModel = model;
-  if (pending.method === "turn/start" && turnId && resolvedTurnModel) {
-    rememberTurnModel(state, turnId, {
-      model: resolvedTurnModel,
-      source: responseModel ? "turn-response" : pending.modelSource ?? "thread",
-    });
-  }
-  if (threadId && THREAD_METHODS.has(pending.method)) {
-    state.emitUsageEvent({
-      type: "thread-active",
-      threadId,
-      model,
-      modelSource: "thread-response",
-    });
-  }
-}
-
 function learnThreadContexts(value, state, { source, revision }) {
   if (!value || typeof value !== "object") return;
   const candidates = [
@@ -681,8 +688,9 @@ function learnThreadContexts(value, state, { source, revision }) {
   for (const thread of candidates) {
     const configuredModel = readModelSetting(thread?.threadSettings ?? thread?.thread_settings);
     const model = normalizedModel(thread?.model) ?? configuredModel.model;
-    const provider = normalizedModel(thread?.modelProvider);
+    const reportedProvider = normalizedModel(thread?.modelProvider);
     const threadId = thread?.id ?? thread?.threadId;
+    const provider = providerForModel(model, state) ?? reportedProvider;
     if (threadId && (model || provider)) {
       updateThreadContext(state.threadContexts, threadId, {
         model,
@@ -876,7 +884,7 @@ function resolveTurnModel(state, threadId, turnId, value) {
 }
 
 function rememberPendingRequest(state, requestId, value) {
-  state.pendingRequests.set(String(requestId), {
+  state.pendingRequests.set(requestId, {
     ...value,
     createdAt: Date.now(),
   });
@@ -918,49 +926,6 @@ function normalizedModel(value) {
   return model || null;
 }
 
-function extractResponseStringField(line, field) {
-  const resultIndex = line.indexOf('"result"');
-  if (resultIndex < 0) return null;
-  const escapedField = String(field).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = line.slice(resultIndex).match(
-    new RegExp(`"${escapedField}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`),
-  );
-  if (!match) return null;
-  try {
-    return normalizedModel(JSON.parse(`"${match[1]}"`));
-  } catch {
-    return null;
-  }
-}
-
-function extractResponseTurnId(line) {
-  const resultIndex = line.indexOf('"result"');
-  if (resultIndex < 0) return null;
-  const turnIndex = line.indexOf('"turn"', resultIndex);
-  if (turnIndex < 0) return null;
-  const match = line.slice(turnIndex).match(/"id"\s*:\s*"((?:\\.|[^"\\])*)"/);
-  if (!match) return null;
-  try {
-    return normalizedModel(JSON.parse(`"${match[1]}"`));
-  } catch {
-    return null;
-  }
-}
-
-function extractResponseThreadId(line) {
-  const resultIndex = line.indexOf('"result"');
-  if (resultIndex < 0) return null;
-  const threadIndex = line.indexOf('"thread"', resultIndex);
-  if (threadIndex < 0) return null;
-  const match = line.slice(threadIndex).match(/"id"\s*:\s*"((?:\\.|[^"\\])*)"/);
-  if (!match) return null;
-  try {
-    return normalizedModel(JSON.parse(`"${match[1]}"`));
-  } catch {
-    return null;
-  }
-}
-
 function providerForModel(model, state) {
   if (model === DEEPSEEK_MODEL) return DEEPSEEK_PROVIDER;
   if (typeof model === "string" && state.customModelProviders.has(model)) {
@@ -995,6 +960,10 @@ function customThreadConfig(config, model) {
 
 function isCustomProvider(provider) {
   return typeof provider === "string" && provider.startsWith(CUSTOM_PROVIDER_PREFIX);
+}
+
+function isExtensionProvider(provider) {
+  return provider === DEEPSEEK_PROVIDER || isCustomProvider(provider);
 }
 
 function customPlatformForProvider(provider, state) {
@@ -1053,6 +1022,57 @@ function customProviderConfig(platform, baseUrl = platform.baseUrl) {
     `base_url=${JSON.stringify(baseUrl)},` +
     `env_key=${JSON.stringify(customProviderEnvKey(platform.id))},` +
     `wire_api="responses"}`;
+}
+
+function routerProviderConfig(providerId, name, router) {
+  return `model_providers.${providerId}={` +
+    `name=${JSON.stringify(name)},` +
+    `base_url=${JSON.stringify(router.baseUrl)},` +
+    `requires_openai_auth=true,` +
+    `wire_api="responses",` +
+    `supports_websockets=false,` +
+    `env_http_headers={` +
+      `${JSON.stringify(router.tokenHeader)}=${JSON.stringify(router.tokenEnv)}` +
+    `}}`;
+}
+
+function normalizeRouterConfiguration(value) {
+  if (value == null) return null;
+  const providerId = String(value.providerId ?? "").trim();
+  const baseUrl = String(value.baseUrl ?? "").trim();
+  const tokenEnv = String(value.tokenEnv ?? "").trim();
+  const tokenHeader = String(value.tokenHeader ?? "").trim().toLowerCase();
+  const legacyProviderIds = [...new Set(
+    (Array.isArray(value.legacyProviderIds) ? value.legacyProviderIds : [])
+      .map((provider) => String(provider ?? "").trim())
+      .filter(Boolean),
+  )];
+  const providerIds = [providerId, ...legacyProviderIds];
+  if (!providerIds.every((provider) => /^[A-Za-z0-9_-]+$/.test(provider))) {
+    throw new Error("模型 Router 配置中的供应商 ID 不安全");
+  }
+  if (!/^[A-Z][A-Z0-9_]*$/.test(tokenEnv)) {
+    throw new Error("模型 Router 配置中的 Token 环境变量名不安全");
+  }
+  if (!/^[a-z0-9-]+$/.test(tokenHeader)) {
+    throw new Error("模型 Router 配置中的 Token 请求头名称不安全");
+  }
+  let parsed;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new Error("模型 Router 配置中的地址无效");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error("模型 Router 配置中的地址协议或凭据无效");
+  }
+  return {
+    providerId,
+    baseUrl: parsed.toString(),
+    tokenEnv,
+    tokenHeader,
+    legacyProviderIds,
+  };
 }
 
 function containsImageInput(value) {
@@ -1117,22 +1137,6 @@ function writeWithBackpressure(output, chunk, input) {
   if (output.write(chunk)) return;
   input.pause();
   output.once("drain", () => input.resume());
-}
-
-export async function runOfficialCliPassthrough() {
-  // This entry deliberately does not read relay/provider configuration or create
-  // relay state. A browser's auxiliary app-server is an ordinary official CLI.
-  const { resolveCodexCliExecutable } = await import("./platform.mjs");
-  const upstreamExecutable = await resolveCodexCliExecutable();
-  const [upstreamPath, runtimePath, entryPath] = await Promise.all([
-    realpath(upstreamExecutable),
-    realpath(process.execPath),
-    realpath(process.argv[1] ?? process.execPath),
-  ]);
-  if (upstreamPath === runtimePath || upstreamPath === entryPath) {
-    throw new Error("官方 Codex CLI 路径指向了注入器或其运行时，拒绝递归调用");
-  }
-  await runPassthrough(upstreamExecutable, process.argv.slice(2));
 }
 
 async function runPassthrough(upstreamExecutable, args) {

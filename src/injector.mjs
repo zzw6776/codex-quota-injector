@@ -5,18 +5,12 @@ import { CodexContextManager } from "./codex-context.mjs";
 import { prepareCodexLaunch, refreshCodexModelCatalog } from "./codex-bridge.mjs";
 import { DeepSeekManager } from "./deepseek-manager.mjs";
 import { ExtraModelManager } from "./extra-model-manager.mjs";
+import { ModelRouterManager } from "./model-router.mjs";
 import { isCodexRunning, isRelayStateCurrent, restartCodex } from "./platform.mjs";
 import { TokenUsageManager } from "./token-usage.mjs";
 import packageJson from "../package.json" with { type: "json" };
 import { isSea } from "node:sea";
-import {
-  widgetDrainActionsExpression,
-  widgetInstallExpression,
-  widgetTokenUsageDeltaUpdateExpressionJson,
-  widgetUpdateExpressionJson,
-  widgetRuntimeVersionExpression,
-  WIDGET_RUNTIME_VERSION,
-} from "./widget.mjs";
+import * as initialWidget from "./widget.mjs";
 
 const DEFAULT_PORT = 9229;
 const APP_VERSION = String(packageJson.version ?? "0.0.0");
@@ -41,6 +35,7 @@ export async function runInjector({
   contextManager = new CodexContextManager(),
   deepSeekManager = new DeepSeekManager(),
   extraModelManager = new ExtraModelManager(),
+  modelRouterManager = new ModelRouterManager(),
   tokenUsageManager = new TokenUsageManager(),
   managersInitialized = false,
   accountManagerInitialized = false,
@@ -49,10 +44,12 @@ export async function runInjector({
     deepSeekManager,
     extraModelManager,
     contextManager,
+    modelRouterManager,
   }),
   refreshModelCatalog = () => refreshCodexModelCatalog({ accountManager, contextManager }),
   recoverLaunch = null,
   registerLaunchRecovery = null,
+  registerWidgetReload = null,
 } = {}) {
   if (!accountManagerInitialized) await accountManager.initialize();
   if (!managersInitialized) {
@@ -80,6 +77,7 @@ export async function runInjector({
   let lastStableTokenUsage = null;
   let lastStableTokenUsageAt = 0;
   let removeTokenUsageListener = () => {};
+  let removeNetworkListener = () => {};
   let activeAction = null;
   let restartingCodex = false;
   let hasSeenCodexProcess = false;
@@ -96,6 +94,11 @@ export async function runInjector({
   let lastInjectionError = null;
   let lastInjectionErrorAt = 0;
   let launchRecoveryRequested = false;
+  let widget = initialWidget;
+  let appDisplayVersion = APP_DISPLAY_VERSION;
+  let pendingWidgetReload = null;
+  let widgetReloading = false;
+  let modelRouterClosePromise = null;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
   const wakeupManager = new AccountWakeupManager(accountManager, () => {
     markWidgetDataDirty();
@@ -119,6 +122,7 @@ export async function runInjector({
   const stop = () => {
     stopped = true;
     registerLaunchRecovery?.(null);
+    registerWidgetReload?.(null);
     wakeupManager.close();
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
@@ -129,11 +133,16 @@ export async function runInjector({
     tokenUsageFallbackTimer = null;
     removeTokenUsageListener();
     removeTokenUsageListener = () => {};
+    removeNetworkListener();
+    removeNetworkListener = () => {};
     cdp?.close();
     accountManager.close();
     deepSeekManager.close();
     extraModelManager.close();
     tokenUsageManager.close();
+    modelRouterClosePromise ??= modelRouterManager.close().catch((error) => {
+      console.error(`[model-router] 关闭失败：${error.message}`);
+    });
   };
   const stopAndExit = async () => {
     if (stopping) return;
@@ -145,6 +154,7 @@ export async function runInjector({
     await tokenUsageManager.flush().catch((error) => {
       console.error(`[token-usage] 退出前保存缓存失败: ${error.message}`);
     });
+    await modelRouterClosePromise;
     setTimeout(() => process.exit(0), 250);
   };
   process.once("SIGINT", () => void stopAndExit());
@@ -155,6 +165,9 @@ export async function runInjector({
       if (!stopped) launchRecoveryRequested = true;
     });
   }
+  registerWidgetReload?.((nextWidget, version) => {
+    if (!stopped && !isSea()) pendingWidgetReload = { widget: nextWidget, version };
+  });
 
   async function refreshQuotas() {
     if (accountManager.store.list().length > 0) {
@@ -218,7 +231,7 @@ export async function runInjector({
       await contextManager.refresh();
     }
     if (!widgetInstalled) {
-      await cdp.evaluate(widgetInstallExpression());
+      await cdp.evaluate(widget.widgetInstallExpression());
       widgetInstalled = true;
       lastWidgetHealthCheckAt = Date.now();
       markWidgetDataDirty();
@@ -265,12 +278,12 @@ export async function runInjector({
 
   async function pushWidgetViewModel() {
     const currentCdp = cdp;
-    if (!currentCdp?.isConnected || stopped) return false;
+    if (!currentCdp?.isConnected || !widgetInstalled || stopped) return false;
     if (widgetInstalled && Date.now() - lastWidgetHealthCheckAt >= WIDGET_HEALTH_CHECK_MS) {
       lastWidgetHealthCheckAt = Date.now();
-      const runtimeVersion = await currentCdp.evaluate(widgetRuntimeVersionExpression());
-      if (runtimeVersion !== WIDGET_RUNTIME_VERSION) {
-        await currentCdp.evaluate(widgetInstallExpression());
+      const runtimeVersion = await currentCdp.evaluate(widget.widgetRuntimeVersionExpression());
+      if (runtimeVersion !== widget.WIDGET_RUNTIME_VERSION) {
+        await currentCdp.evaluate(widget.widgetInstallExpression());
         widgetInstalled = true;
         lastStaticJson = null;
         lastTokenUsageSignatures = new Map();
@@ -308,10 +321,11 @@ export async function runInjector({
       context: contextManager.getViewModel(),
       deepSeek: deepSeekManager.getViewModel(),
       extraModels: extraModelManager.getViewModel(),
+      network: modelRouterManager.getNetworkViewModel?.() ?? null,
       tokenUsage: stableTokenUsage,
     };
     const staticViewModel = {
-      version: APP_DISPLAY_VERSION,
+      version: appDisplayVersion,
       injectionMode,
       accounts: viewModel.accounts.map((account) => ({
         ...account,
@@ -323,6 +337,7 @@ export async function runInjector({
       context: viewModel.context,
       deepSeek: viewModel.deepSeek,
       extraModels: viewModel.extraModels,
+      network: viewModel.network,
     };
     const staticJson = JSON.stringify(staticViewModel);
     const nextTokenUsageSignatures = new Map();
@@ -346,7 +361,7 @@ export async function runInjector({
       (stableTokenUsage.error ?? null) !== lastTokenUsageError ||
       tokenUsageUpdates.length > 0 || removedTurnIds.length > 0;
     if (staticJson !== lastStaticJson) {
-      await currentCdp.evaluate(widgetUpdateExpressionJson(
+      await currentCdp.evaluate(widget.widgetUpdateExpressionJson(
         JSON.stringify({ ...staticViewModel, tokenUsage: stableTokenUsage }),
         ++widgetUpdateRevision,
       ));
@@ -357,7 +372,7 @@ export async function runInjector({
         lastTokenUsageError = stableTokenUsage.error ?? null;
       }
     } else if (tokenUsageChanged) {
-      await currentCdp.evaluate(widgetTokenUsageDeltaUpdateExpressionJson(
+      await currentCdp.evaluate(widget.widgetTokenUsageDeltaUpdateExpressionJson(
         JSON.stringify(tokenUsageDelta),
         ++widgetUpdateRevision,
       ));
@@ -374,6 +389,7 @@ export async function runInjector({
   }
 
   function requestWidgetUpdate() {
+    if (widgetReloading) return Promise.resolve(false);
     widgetUpdateRequested = true;
     if (widgetUpdatePromise) return widgetUpdatePromise;
     const task = (async () => {
@@ -394,6 +410,12 @@ export async function runInjector({
       console.error(`[token-usage] 事件驱动 Widget 刷新失败: ${error.message}`);
     });
   });
+  removeNetworkListener = modelRouterManager.onNetworkChange?.(() => {
+    markWidgetDataDirty();
+    void requestWidgetUpdate().catch((error) => {
+      console.error(`[model-router] 网络状态 Widget 刷新失败: ${error.message}`);
+    });
+  }) ?? (() => {});
 
   async function startAction(action) {
     markWidgetDataDirty();
@@ -675,6 +697,26 @@ export async function runInjector({
   }
   let _loopCount = 0;
   while (!stopped) {
+    if (pendingWidgetReload && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
+      widgetReloading = true;
+      try {
+        await widgetUpdatePromise?.catch(() => {});
+        const next = pendingWidgetReload;
+        pendingWidgetReload = null;
+        widget = next.widget;
+        appDisplayVersion = `${next.version}.dev`;
+        widgetInstalled = false;
+        lastStaticJson = null;
+        lastTokenUsageSignatures = new Map();
+        lastTokenUsageStatus = null;
+        lastTokenUsageError = null;
+        widgetUpdateRevision = 0;
+        lastWidgetHealthCheckAt = 0;
+        markWidgetDataDirty();
+      } finally {
+        widgetReloading = false;
+      }
+    }
     _loopCount++;
     debugLog(`[DEBUG] loop#${_loopCount} cdp=${!!cdp} cdp.isConnected=${cdp?.isConnected} restartingCodex=${restartingCodex} hasSeenCodexProcess=${hasSeenCodexProcess} stopped=${stopped} deadline=${Date.now() >= startupDeadline}`);
     if (launchRecoveryRequested && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
@@ -706,7 +748,7 @@ export async function runInjector({
       const injected = await connectAndInject();
       debugLog(`[DEBUG] loop#${_loopCount} injected=${injected}`);
       if (injected && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
-        const actions = await cdp.evaluate(widgetDrainActionsExpression());
+        const actions = await cdp.evaluate(widget.widgetDrainActionsExpression());
         if (Array.isArray(actions) && actions.length > 0) {
           activeAction = (async () => {
             await modelCatalogRefreshPromise;
@@ -746,12 +788,14 @@ export async function runInjector({
     await tokenUsageManager.flush().catch((error) => {
       console.error(`[token-usage] 保存缓存失败: ${error.message}`);
     });
+    await modelRouterClosePromise;
     return accountManager.getViewModel();
   }
   stop();
   await tokenUsageManager.flush().catch((error) => {
     console.error(`[token-usage] 保存缓存失败: ${error.message}`);
   });
+  await modelRouterClosePromise;
 }
 
 function delay(ms) {

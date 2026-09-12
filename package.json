@@ -1,6 +1,6 @@
 {
   "name": "codex-quota-injector",
-  "version": "0.1.168",
+  "version": "0.1.203",
   "private": true,
   "type": "module",
   "description": "Inject a standalone multi-account quota, expiry and account-switching panel into the Codex macOS and Windows clients.",
@@ -9,6 +9,11 @@
     "read-quota": "node src/cli.mjs read-quota",
     "inject": "node src/cli.mjs inject",
     "launch": "node src/launcher.mjs --explicit-start",
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "test:coverage": "node --test --test-concurrency=1 --experimental-test-coverage --test-coverage-include=src/account-store.mjs --test-coverage-include=src/account-manager.mjs --test-coverage-include=src/account-wakeup.mjs --test-coverage-include=src/app-server-relay.mjs --test-coverage-include=src/cdp-client.mjs --test-coverage-include=src/chat-compat-proxy.mjs --test-coverage-include=src/codex-context.mjs --test-coverage-include=src/deepseek-manager.mjs --test-coverage-include=src/extra-model-manager.mjs --test-coverage-include=src/model-router.mjs --test-coverage-include=src/official-model-catalog.mjs --test-coverage-include=src/platform.mjs --test-coverage-include=src/single-instance.mjs --test-coverage-include=src/token-pricing.mjs --test-coverage-include=src/token-usage.mjs --test-coverage-include=src/widget.mjs \"test/*.test.mjs\"",
+    "test:offline": "node scripts/test-offline.mjs",
+    "test:live": "node scripts/test-live.mjs",
+    "test:lifecycle": "node scripts/test-lifecycle.mjs",
     "build:relay:windows": "node scripts/build-windows-relay.mjs",
     "preview": "node src/preview-server.mjs",
     "build:sea": "node scripts/build-sea.mjs",
@@ -16,7 +21,10 @@
     "package:windows": "node scripts/package-windows.mjs"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.23.1"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
   },
   "devDependencies": {
     "esbuild": "0.28.1",

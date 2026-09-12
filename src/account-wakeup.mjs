@@ -5,10 +5,11 @@ const CHECK_INTERVAL_MS = 15_000;
 const MAX_SCHEDULE_DELAY_MS = 60_000;
 
 export class AccountWakeupManager {
-  constructor(accountManager, onChange) {
+  constructor(accountManager, onChange, { sendRequest = sendWakeupRequest } = {}) {
     this.accounts = accountManager;
     this.store = accountManager.store;
     this.onChange = onChange;
+    this.sendRequest = sendRequest;
     this.jobs = new Map();
     this.messages = new Map();
     this.queue = Promise.resolve();
@@ -157,7 +158,7 @@ export class AccountWakeupManager {
     this.onChange();
     try {
       const result = await this.accounts.withWakeupAccount(accountId, (getCredentials) =>
-        sendWakeupRequest(getCredentials, this.abortController.signal));
+        this.sendRequest(getCredentials, this.abortController.signal));
       Object.assign(lastRun, result, {
         status: "success",
         completedAt: Date.now(),

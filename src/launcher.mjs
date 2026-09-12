@@ -20,15 +20,6 @@ if (process.platform === "darwin" && explicitStartRequested) {
       console.error(error?.stack ?? error);
       process.exit(1);
     });
-} else if (process.platform === "darwin") {
-  // Browser Use receives CODEX_CLI_PATH without the main relay's environment.
-  // Its app-server requests must not initialize the launcher or main relay state.
-  void import("./app-server-relay.mjs")
-    .then(({ runOfficialCliPassthrough }) => runOfficialCliPassthrough())
-    .catch((error) => {
-      console.error(error?.stack ?? error);
-      process.exit(1);
-    });
 } else {
   void runLauncher();
 }
@@ -41,6 +32,7 @@ async function runLauncher() {
   const { ExtraModelManager } = await import("./extra-model-manager.mjs");
   const { installFileLogger } = await import("./file-logger.mjs");
   const { runInjector } = await import("./injector.mjs");
+  const { ModelRouterManager } = await import("./model-router.mjs");
   const {
     activateCodex,
     getCodexLaunchReadiness,
@@ -71,10 +63,14 @@ async function runLauncher() {
   let launchOptions = { env: {}, relay: null };
   let pendingLaunchRecovery = false;
   let requestLaunchRecovery = null;
+  let reloadWidget = null;
+  const devRuntime = instanceMode === "dev" ? await import("./dev-runtime.mjs") : null;
+  const runtimeIdentity = devRuntime ? await devRuntime.readDevRuntimeIdentity() : null;
   const accountManager = new AccountManager();
   const contextManager = new CodexContextManager();
   const deepSeekManager = new DeepSeekManager();
   const extraModelManager = new ExtraModelManager();
+  const modelRouterManager = new ModelRouterManager();
 
   const restartFromTakeover = async (request) => {
     if (takeoverInProgress) return;
@@ -102,6 +98,7 @@ async function runLauncher() {
       deepSeekManager,
       extraModelManager,
       contextManager,
+      modelRouterManager,
     });
     return launchOptions;
   };
@@ -112,8 +109,18 @@ async function runLauncher() {
         mode: instanceMode,
         version: instanceVersion,
         explicitStart,
+        runtimeIdentity,
         onTakeover: restartFromTakeover,
         onReuse: reuseExistingInstance,
+        onReload: devRuntime ? async (request) => {
+          if (!reloadWidget) throw new Error("页面尚未就绪，请稍后再次启动开发版");
+          if (await devRuntime.readDevRuntimeIdentity() !== runtimeIdentity) {
+            throw new Error("后端代码已变化，不能作为页面更新加载");
+          }
+          const widget = await devRuntime.loadDevWidget();
+          reloadWidget(widget, request.version);
+          console.log(`[launcher] dev v${request.version} 仅更新页面，保留 Router 与现有连接`);
+        } : null,
       });
     } catch (error) {
       if (!(error instanceof SingleInstanceTakeoverError)) throw error;
@@ -143,6 +150,7 @@ async function runLauncher() {
       contextManager,
       deepSeekManager,
       extraModelManager,
+      modelRouterManager,
       managersInitialized: true,
       accountManagerInitialized: true,
       prepareLaunch: prepareCurrentLaunch,
@@ -157,11 +165,15 @@ async function runLauncher() {
           handler();
         }
       },
+      registerWidgetReload: (handler) => { reloadWidget = handler; },
     });
   } catch (error) {
     console.error(`[launcher] ${error?.stack ?? error}`);
     process.exitCode = 1;
   } finally {
+    await modelRouterManager.close().catch((error) => {
+      console.error(`[model-router] 关闭失败：${error.message}`);
+    });
     await closeSingleInstance(instanceLock);
   }
 

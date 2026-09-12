@@ -1,4 +1,361 @@
-export const WIDGET_RUNTIME_VERSION = 103;
+export const WIDGET_RUNTIME_VERSION = 123;
+
+export function paginateGenerationDetails(details, visibleCount = 20) {
+  const ordered = Array.isArray(details)
+    ? [...details].sort((left, right) => Number(right?.sequence) - Number(left?.sequence))
+    : [];
+  const count = Math.max(0, Math.floor(Number(visibleCount) || 0));
+  return {
+    total: ordered.length,
+    items: ordered.slice(0, count),
+    remaining: Math.max(0, ordered.length - count),
+  };
+}
+
+export function formatGenerationDetailTitle(detail, isLatestCompleted = false) {
+  // Prefer the actual inner executions; do not prepend the exec wrapper.
+  const calls = Array.isArray(detail?.toolExecutions?.calls) && detail.toolExecutions.calls.length
+    ? detail.toolExecutions.calls
+    : Array.isArray(detail?.toolTiming?.calls) && detail.toolTiming.calls.length
+      ? detail.toolTiming.calls : null;
+  const toolNames = calls
+    ? calls.map((call) => String(call?.toolName ?? "").trim() || "工具调用")
+    : [...new Set([
+        ...(Array.isArray(detail?.toolNames) ? detail.toolNames : []),
+        ...(Array.isArray(detail?.toolTiming?.toolNames) ? detail.toolTiming.toolNames : []),
+      ].map((name) => String(name ?? "").trim()).filter(Boolean))];
+  if (toolNames.length > 0) {
+    const counts = new Map();
+    for (const name of toolNames) counts.set(name, (counts.get(name) || 0) + 1);
+    return [...counts].map(([name, count]) => count > 1 ? `${name} ×${count}` : name).join("、");
+  }
+  if (detail?.toolTiming) return "工具调用";
+  if (isLatestCompleted && detail?.hasVisibleText) return "最终回复";
+  if (detail?.followsToolResult) return "处理工具结果";
+  return detail?.hasVisibleText ? "生成回复" : "模型请求";
+}
+
+export function formatGenerationPhaseText(detail) {
+  const formatDuration = (value) => {
+    if (value == null || value === "") return "—";
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+    if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+    const seconds = milliseconds / 1_000;
+    const digits = seconds >= 100 ? 0 : 1;
+    return `${seconds.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}s`;
+  };
+  const numberOrNull = (value) => {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  };
+  const stages = [];
+  const formatPhaseSpeed = (value) => {
+    const speed = Number(value);
+    if (!Number.isFinite(speed) || speed <= 0) return "";
+    return `（${speed.toLocaleString(undefined, { maximumFractionDigits: speed >= 100 ? 0 : speed >= 10 ? 1 : 2 })} tok/s）`;
+  };
+  const outputPhases = Array.isArray(detail?.outputPhases) ? detail.outputPhases : [];
+  const responseLatencyMs = numberOrNull(detail?.responseLatencyMs);
+  let cursor = responseLatencyMs;
+  let hasText = false;
+  if (responseLatencyMs != null) stages.push(`响应 ${formatDuration(responseLatencyMs)}`);
+
+  let textPhases = Array.isArray(detail?.textPhases)
+    ? detail.textPhases.map((phase, index) => ({
+        kind: "text",
+        phase: phase?.phase,
+        startLatencyMs: numberOrNull(phase?.startLatencyMs),
+        durationMs: numberOrNull(phase?.durationMs),
+        outputSpeed: outputPhases.find((value) => value.kind === "text" && value.textPhaseIndex === index)?.outputSpeed,
+      })).filter((phase) => phase.startLatencyMs != null)
+    : [];
+  if (textPhases.length === 0 && detail?.hasVisibleText &&
+    numberOrNull(detail?.firstTokenLatencyMs) != null) {
+    textPhases = [{
+      phase: "unknown",
+      startLatencyMs: numberOrNull(detail.firstTokenLatencyMs),
+      durationMs: numberOrNull(detail.generationDurationMs),
+    }];
+  }
+  const measuredToolPhases = outputPhases.filter((phase) =>
+    phase.kind === "tool" && numberOrNull(phase.startLatencyMs) != null &&
+    numberOrNull(phase.durationMs) != null);
+  const phases = [...textPhases, ...measuredToolPhases]
+    .sort((left, right) => left.startLatencyMs - right.startLatencyMs);
+
+  const appendGap = (nextStart, fallbackLabel = "继续处理") => {
+    if (cursor == null || nextStart == null || nextStart < cursor) return;
+    const duration = nextStart - cursor;
+    if (duration > 0) stages.push(`${hasText ? fallbackLabel : "模型处理"} ${formatDuration(duration)}`);
+  };
+  for (const phase of phases) {
+    appendGap(phase.startLatencyMs);
+    const label = phase.kind === "tool" ? "生成调用" : phase.phase === "commentary"
+      ? "中间说明"
+      : phase.phase === "final_answer"
+        ? "回复生成"
+        : detail?.toolTiming ? "中间说明" : "回复生成";
+    if (phase.durationMs != null) stages.push(`${label} ${formatDuration(phase.durationMs)}${formatPhaseSpeed(phase.outputSpeed)}`);
+    hasText = true;
+    cursor = phase.durationMs == null
+      ? null
+      : Math.max(cursor ?? 0, phase.startLatencyMs + phase.durationMs);
+  }
+
+  const toolTiming = detail?.toolTiming;
+  if (toolTiming && measuredToolPhases.length === 0) {
+    const preparationStart = numberOrNull(toolTiming.preparationStartLatencyMs);
+    const readyLatency = numberOrNull(toolTiming.readyLatencyMs);
+    let preparationDuration = numberOrNull(toolTiming.preparationDurationMs);
+    if (preparationDuration == null && preparationStart != null &&
+      readyLatency != null && readyLatency >= preparationStart) {
+      preparationDuration = readyLatency - preparationStart;
+    }
+    if (preparationStart != null) {
+      appendGap(preparationStart);
+      if (preparationDuration != null) {
+        stages.push(`生成调用 ${formatDuration(preparationDuration)}`);
+      }
+      cursor = preparationDuration == null
+        ? null
+        : preparationStart + preparationDuration;
+    } else if (readyLatency != null) {
+      appendGap(readyLatency, "调用前处理");
+      cursor = readyLatency;
+    }
+  }
+  const readyLatency = numberOrNull(toolTiming?.readyLatencyMs);
+  if (measuredToolPhases.length > 0 && detail?.outputPhasesComplete &&
+    cursor != null && readyLatency != null && readyLatency > cursor) {
+    // The rate ends at the last input delta; stage accounting also includes
+    // the remaining wait for the completed tool-call item.
+    stages.push(`调用收尾 ${formatDuration(readyLatency - cursor)}`);
+  }
+  return stages.join(" · ");
+}
+
+export function generationToolRows(detail) {
+  if (Array.isArray(detail?.toolExecutions?.calls)) return detail.toolExecutions.calls;
+  // Older router records know the outer calls, not executions inside exec.
+  // Preserve their identities but do not present wrapper time as child time.
+  const calls = Array.isArray(detail?.toolTiming?.calls) && detail.toolTiming.calls.length
+    ? detail.toolTiming.calls
+    : (Array.isArray(detail?.toolNames) ? detail.toolNames.map((toolName) => ({ toolName })) : []);
+  return calls.map((call) => ({ toolName: call.toolName, description: "单项明细未记录", durationMs: null }));
+}
+
+export function generationExecutionRemainder(detail) {
+  const execution = detail?.toolExecutions;
+  const calls = execution?.calls;
+  const validDuration = (value) => value != null && value !== "" &&
+    Number.isFinite(Number(value)) && Number(value) >= 0;
+  if (!execution?.complete || !validDuration(execution.durationMs) ||
+    !Array.isArray(calls) || calls.length === 0 ||
+    calls.some((call) => !validDuration(call.durationMs))) return null;
+  // Reported child durations are not additive when tools run concurrently.
+  // Missing starts cannot establish overlaps, so do not invent a remainder.
+  if (calls.length > 1 && calls.some((call) => !validDuration(call.startedAt))) return null;
+  const origin = calls.length > 1 ? Math.min(...calls.map((call) => Number(call.startedAt))) : 0;
+  const intervals = calls.map((call) => {
+    const start = calls.length > 1 ? Number(call.startedAt) - origin : 0;
+    return [start, start + Number(call.durationMs)];
+  }).sort((left, right) => left[0] - right[0]);
+  let covered = 0;
+  let end = 0;
+  for (const [start, nextEnd] of intervals) {
+    covered += Math.max(0, nextEnd - Math.max(start, end));
+    end = Math.max(end, nextEnd);
+  }
+  const remaining = Number(execution.durationMs) - covered;
+  // This is only an accounting remainder, not an attribution to network or
+  // dispatch. Conflicting measurements must not become a negative duration.
+  return remaining > 0 ? remaining : null;
+}
+
+export function createGenerationToolRow(document, call, formatDuration) {
+  const detailList = call?.detailList;
+  const entries = ["commands", "files"].includes(detailList?.kind) && Array.isArray(detailList.items)
+    ? detailList.items.filter((entry) => typeof entry === "string" && entry.trim()) : [];
+  const description = entries.length
+    ? `${entries.length} ${detailList.kind === "files" ? "个文件" : "条命令"}` : call?.description;
+  const row = document.createElement("div");
+  row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;min-width:0;color:var(--color-token-text-tertiary,#9a9aa4);font-size:9px";
+  const name = document.createElement("span");
+  name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+  name.textContent = [call?.toolName || "工具调用", description].filter(Boolean).join(" · ");
+  name.title = name.textContent;
+  const duration = document.createElement("span");
+  duration.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
+  const durationText = call?.durationMs == null ? "未记录"
+    : Number(call.durationMs) > 0 && Number(call.durationMs) < 1 ? "<1ms"
+    : formatDuration(call.durationMs);
+  duration.textContent = `${call?.approximate && call.durationMs != null ? "约" : ""}${durationText}`;
+  duration.title = call?.durationMs == null
+    ? "当前记录没有可确认的单项耗时，不拆分外层执行时间"
+    : call?.approximate
+      ? "整体调用耗时扣除子工具上报耗时覆盖区间后的剩余值，不能直接归因为网络或调度耗时"
+      : "此工具自身上报的执行耗时；同组工具可能并行，耗时不能直接相加";
+  row.append(name, duration);
+  if (entries.length === 0) return row;
+
+  const disclosure = document.createElement("details");
+  disclosure.style.cssText = "min-width:0";
+  const summary = document.createElement("summary");
+  summary.style.cssText = "cursor:pointer;user-select:none;list-style-position:outside";
+  summary.append(row);
+  const list = document.createElement("div");
+  // Use the existing request scroll container; no extra scrolling region.
+  list.style.cssText = "display:grid;gap:2px;min-width:0;margin:3px 0 2px 13px;color:var(--color-token-text-tertiary,#9a9aa4);font-size:9px";
+  for (const entry of entries) {
+    const item = document.createElement("div");
+    item.style.cssText = "min-width:0;white-space:normal;overflow-wrap:anywhere";
+    item.textContent = entry;
+    list.append(item);
+  }
+  disclosure.append(summary, list);
+  return disclosure;
+}
+
+export function formatGenerationPrimaryText(
+  detail,
+  networkLatencyText = formatNetworkLatencyText,
+) {
+  const formatDuration = (value) => {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+    if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+    const seconds = milliseconds / 1_000;
+    const digits = seconds >= 100 ? 0 : 1;
+    return `${seconds.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}s`;
+  };
+  const parts = [];
+  const hasTools = Boolean(detail?.toolTiming || detail?.toolExecutions?.calls?.length || detail?.toolNames?.length);
+  if ((!hasTools || detail?.hasVisibleText) && Number(detail?.firstTokenLatencyMs) > 0) {
+    parts.push(`首字 ${formatDuration(detail.firstTokenLatencyMs)}`);
+  }
+  const speed = Number(detail?.outputSpeed);
+  if (Number.isFinite(speed) && speed > 0) {
+    const digits = speed >= 100 ? 0 : speed >= 10 ? 1 : 2;
+    parts.push(`速率 ${speed.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })} tok/s`);
+  }
+  parts.push(networkLatencyText(detail?.networkLatency));
+  return parts.join(" · ");
+}
+
+export function averageGenerationNetworkLatency(details) {
+  const values = (Array.isArray(details) ? details : [])
+    .map((detail) => detail?.networkLatency?.latencyMs)
+    .filter((value) => value != null && Number.isFinite(Number(value)) && Number(value) >= 0)
+    .map(Number);
+  if (values.length === 0) return null;
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+export function selectConversationNetworkLatency(usage, liveNetwork) {
+  const saved = usage?.networkLatency && typeof usage.networkLatency === "object"
+    ? usage.networkLatency
+    : null;
+  if (usage?.completed || !usage?.networkLatencySupported) return saved;
+  const live = liveNetwork && typeof liveNetwork === "object" ? liveNetwork : null;
+  if (!live) return saved;
+  const turnConnectionId = String(usage?.networkConnectionId ?? saved?.connectionId ?? "");
+  const liveConnectionId = String(live.connectionId ?? "");
+  return turnConnectionId && turnConnectionId === liveConnectionId ? live : saved;
+}
+
+export function formatNetworkLatencyText(network) {
+  const latency = network?.latencyMs == null ? Number.NaN : Number(network.latencyMs);
+  const value = Number.isFinite(latency) && latency >= 0
+    ? `${Math.round(latency)}ms`
+    : "—";
+  if (network?.status === "fluctuating") return `延时 ${value}（网络波动）`;
+  if (["reconnecting", "reconnected"].includes(network?.status)) {
+    return `延时 ${value}（连接重建）`;
+  }
+  return `延时 ${value}`;
+}
+
+export function formatConversationUsageSummary(usage, network, subagentLabel = "") {
+  const formatTokenCount = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return "0.00M";
+    return `${(number / 1_000_000).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 3,
+    })}M`;
+  };
+  const formatDuration = (value) => {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) return null;
+    if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+    const seconds = milliseconds / 1_000;
+    const digits = seconds >= 100 ? 0 : 1;
+    return `${seconds.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}s`;
+  };
+  const formatRate = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return null;
+    const digits = number >= 100 ? 0 : number >= 10 ? 1 : 2;
+    return `${number.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })} tok/s`;
+  };
+  const formatCny = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return "¥0.000000";
+    const digits = number >= 1 ? 2 : number >= 0.01 ? 4 : 6;
+    return `¥${number.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}`;
+  };
+  const inputTokens = Number(usage?.inputTokens);
+  const cachedInputTokens = Number(usage?.cachedInputTokens);
+  const cacheHitRate = Number.isFinite(inputTokens) && inputTokens > 0 &&
+    Number.isFinite(cachedInputTokens)
+    ? `${(cachedInputTokens / inputTokens * 100).toLocaleString(undefined, {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      })}%`
+    : "—";
+  const firstToken = formatDuration(usage?.firstTokenLatencyMs);
+  const speed = formatRate(usage?.outputSpeed);
+  const cost = usage?.cost ?? {};
+  const latency = network?.latencyMs == null ? Number.NaN : Number(network.latencyMs);
+  const latencyValue = Number.isFinite(latency) && latency >= 0
+    ? `${Math.round(latency)}ms`
+    : "—";
+  const networkLatencyText = network?.status === "fluctuating"
+    ? `延时 ${latencyValue}（网络波动）`
+    : ["reconnecting", "reconnected"].includes(network?.status)
+      ? `延时 ${latencyValue}（连接重建）`
+      : `延时 ${latencyValue}`;
+  return [
+    ...(subagentLabel ? [subagentLabel] : []),
+    `本轮 Token ${formatTokenCount(usage?.totalTokens)}`,
+    `缓存命中率 ${cacheHitRate}`,
+    `累计 ${formatTokenCount(usage?.cumulativeTotalTokens)}`,
+    ...(firstToken ? [`首字 ${firstToken}`] : []),
+    ...(speed ? [`速率 ${speed}`] : []),
+    networkLatencyText,
+    cost.available ? `价格 ${formatCny(cost.totalCny)}` : "价格暂不可算",
+  ].join(" · ");
+}
 
 export function calculatePopoverMaxHeight(chipTop) {
   const TITLE_BAR_SAFE_TOP = 44;
@@ -12,6 +369,17 @@ export function calculatePopoverMaxHeight(chipTop) {
 export function installQuotaWidget(
   calculateMaxHeight = (chipTop) => Math.max(0, Math.min(720, Math.floor(Number(chipTop) - 54))),
   runtimeVersion = WIDGET_RUNTIME_VERSION,
+  paginateDetails = paginateGenerationDetails,
+  detailTitle = formatGenerationDetailTitle,
+  phaseText = formatGenerationPhaseText,
+  primaryText = formatGenerationPrimaryText,
+  usageSummaryText = formatConversationUsageSummary,
+  selectNetworkLatency = selectConversationNetworkLatency,
+  networkLatencyText = formatNetworkLatencyText,
+  averageNetworkLatency = averageGenerationNetworkLatency,
+  toolRows = generationToolRows,
+  toolRowElement = createGenerationToolRow,
+  executionRemainder = generationExecutionRemainder,
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
@@ -660,25 +1028,8 @@ export function installQuotaWidget(
         if (line.getAttribute("aria-label") !== summary) line.setAttribute("aria-label", summary);
         continue;
       }
-      const cost = usage.cost ?? {};
-      const costLabel = usage.completed ? (cost.label ?? "本轮费用") : "实时估算";
-      const costSummary = cost.available
-        ? `${costLabel} ${formatCny(cost.totalCny)}`
-        : "费用暂不可算";
-      const generationRate = Number(usage.totalGenerationRate) > 0
-        ? `速率 ${formatGenerationRate(usage.totalGenerationRate)}`
-        : null;
-      const tokenLabel = `${usage.completed ? "本轮" : "实时"} Token`;
-      const summary = [
-        ...(subagentLabel ? [subagentLabel] : []),
-        `${tokenLabel} ${formatTokenCount(usage.totalTokens)}`,
-        `输入 ${formatTokenCount(usage.inputTokens)}`,
-        `缓存输入 ${formatTokenCount(usage.cachedInputTokens)}`,
-        `输出 ${formatTokenCount(usage.outputTokens)}`,
-        `累计 ${formatTokenCount(usage.cumulativeTotalTokens)}`,
-        ...(generationRate ? [generationRate] : []),
-        costSummary,
-      ].join(" · ");
+      const networkLatency = selectNetworkLatency(usage, state.data.network);
+      const summary = usageSummaryText(usage, networkLatency, subagentLabel);
       if (line.textContent !== summary) line.textContent = summary;
       line.removeAttribute("title");
       const accessibilitySummary = `${summary}；缓存写入 ${formatTokenCount(usage.cacheWriteInputTokens)}；推理输出 ${formatTokenCount(usage.reasoningOutputTokens)}`;
@@ -766,14 +1117,8 @@ export function installQuotaWidget(
       `${formatTokenCount(inputSummary.cachedInputTokens)} / ${formatTokenCount(inputSummary.inputTokens)}`,
     );
     appendTierRows("输出", "output", (tierUsage) => tierUsage.output_tokens);
-    appendConversationTooltipMetricRow(
-      rows,
-      "速率",
-      formatGenerationRate(usage.totalGenerationRate),
-      Number(usage.totalGenerationRate) > 0
-        ? "包含推理输出，按流式事件估算"
-        : "等待更多流式数据",
-    );
+
+    appendGenerationDetails(rows, usage);
 
     const reasoningTiers = tiers.filter((tier) => tier.usage.reasoning_output_tokens > 0);
     if (reasoningTiers.length > 0) {
@@ -942,6 +1287,118 @@ export function installQuotaWidget(
     container.append(row);
   }
 
+  function appendGenerationDetails(container, usage) {
+    const details = Array.isArray(usage?.generationDetails) ? usage.generationDetails : [];
+    const averageParts = [];
+    if (Number(usage?.firstTokenLatencyMs) > 0) {
+      averageParts.push(`平均首字 ${formatFirstTokenLatency(usage.firstTokenLatencyMs)}`);
+    }
+    if (Number(usage?.outputSpeed) > 0) {
+      averageParts.push(`平均速率 ${formatGenerationRate(usage.outputSpeed)}`);
+    }
+    const averageLatencyMs = averageNetworkLatency(details);
+    if (details.length > 0) {
+      averageParts.push(`平均延时 ${averageLatencyMs == null
+        ? "—"
+        : formatMetricDuration(averageLatencyMs)}`);
+    }
+    const averageText = averageParts.join(" · ");
+    if (details.length === 0) {
+      const unavailable = document.createElement("div");
+      unavailable.style.cssText = "margin-top:2px;padding-top:5px;border-top:1px solid rgba(127,127,127,.14);color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px";
+      unavailable.textContent = `请求明细不可用${averageText ? ` · ${averageText}` : ""}`;
+      container.append(unavailable);
+      return;
+    }
+
+    const detailSection = document.createElement("details");
+    detailSection.style.cssText = "margin-top:2px;padding-top:5px;border-top:1px solid rgba(127,127,127,.14)";
+    const summary = document.createElement("summary");
+    summary.textContent = `请求明细 ${details.length} 次${averageText ? ` · ${averageText}` : ""}`;
+    summary.style.cssText = "cursor:pointer;color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px;user-select:none";
+    const list = document.createElement("div");
+    // Stable gutters cover classic scrollbars; explicit end padding also
+    // protects right-aligned metrics from macOS overlay scrollbars.
+    list.style.cssText = "display:grid;gap:5px;max-height:240px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;margin-top:5px;padding-right:16px;box-sizing:border-box";
+    let visibleCount = 20;
+
+    const renderDetails = () => {
+      const page = paginateDetails(details, visibleCount);
+      list.replaceChildren();
+      for (const [index, detail] of page.items.entries()) {
+        const title = detailTitle(
+          detail,
+          index === 0 && Boolean(usage?.completed),
+        );
+        const primaryMetrics = primaryText(detail, networkLatencyText);
+        const diagnostics = phaseText(detail);
+
+        const header = document.createElement("div");
+        header.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);align-items:baseline;gap:12px;font-size:10px";
+        const name = document.createElement("span");
+        name.style.cssText = "min-width:0;color:var(--color-token-text-tertiary,#9a9aa4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+        name.textContent = title;
+        const metrics = document.createElement("span");
+        metrics.style.cssText = "text-align:right;font-variant-numeric:tabular-nums";
+        metrics.textContent = primaryMetrics;
+        header.append(name, metrics);
+
+        const calls = toolRows(detail);
+        if (diagnostics || calls.length > 0) {
+          const request = document.createElement("details");
+          const requestSummary = document.createElement("summary");
+          requestSummary.style.cssText = "cursor:pointer;user-select:none;list-style-position:outside";
+          requestSummary.append(header);
+          const expanded = document.createElement("div");
+          expanded.style.cssText = "display:grid;gap:4px;max-height:180px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;margin:4px 0 1px 13px;padding:4px 16px 4px 5px;box-sizing:border-box;border-left:1px solid rgba(127,127,127,.18)";
+          if (diagnostics) {
+            const phaseRow = document.createElement("div");
+            phaseRow.style.cssText = "display:flex;flex-wrap:wrap;gap:2px 10px;min-width:0;color:var(--color-token-text-tertiary,#9a9aa4);font-size:9px;font-variant-numeric:tabular-nums";
+            for (const stage of diagnostics.split(" · ")) {
+              if (!stage) continue;
+              const segment = document.createElement("span");
+              segment.style.cssText = "max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+              segment.textContent = stage;
+              segment.title = stage;
+              phaseRow.append(segment);
+            }
+            expanded.append(phaseRow);
+          }
+          for (const call of calls) {
+            expanded.append(toolRowElement(document, call, formatMetricDuration));
+          }
+          const remainingDuration = executionRemainder(detail);
+          if (remainingDuration != null) {
+            expanded.append(toolRowElement(document, {
+              toolName: "其余调用耗时", durationMs: remainingDuration, approximate: true,
+            }, formatMetricDuration));
+          }
+          request.append(requestSummary, expanded);
+          list.append(request);
+        } else {
+          list.append(header);
+        }
+      }
+      if (page.remaining > 0) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.style.cssText = "border:0;padding:2px 0;background:transparent;color:var(--color-token-text-tertiary,#9a9aa4);font:inherit;text-align:left;cursor:pointer";
+        more.textContent = `显示更早 ${Math.min(20, page.remaining)} 次`;
+        more.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          visibleCount += 20;
+          renderDetails();
+        });
+        list.append(more);
+      }
+    };
+
+    renderDetails();
+    detailSection.append(summary, list);
+    container.append(detailSection);
+  }
+
   function summarizeConversationTooltipInput(tiers) {
     return tiers.reduce((summary, tier) => {
       const usage = tier.usage;
@@ -1052,9 +1509,11 @@ export function installQuotaWidget(
     tooltip.style.cssText = [
       "position:fixed",
       "z-index:2147483647",
-      "width:max-content",
-      "min-width:320px",
-      "max-width:min(420px,calc(100vw - 24px))",
+      "box-sizing:border-box",
+      "width:min(420px,calc(100vw - 24px))",
+      "min-width:0",
+      "max-width:calc(100vw - 24px)",
+      "overflow-x:clip",
       "padding:10px 12px",
       "border:1px solid rgba(127,127,127,.25)",
       "border-radius:10px",
@@ -1892,6 +2351,30 @@ export function installQuotaWidget(
     })} tok/s`;
   }
 
+  function formatFirstTokenLatency(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "—";
+    if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+    const seconds = milliseconds / 1_000;
+    const digits = seconds >= 100 ? 0 : 1;
+    return `${seconds.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}s`;
+  }
+
+  function formatMetricDuration(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+    if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+    const seconds = milliseconds / 1_000;
+    const digits = seconds >= 100 ? 0 : 1;
+    return `${seconds.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}s`;
+  }
+
   function formatCny(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || number < 0) return "¥0.000000";
@@ -1997,6 +2480,12 @@ export function installQuotaWidget(
     });
   });
   state.mountObserver.observe(document.documentElement, { childList: true, subtree: true });
+  // Theme changes need no data revision and must not rebuild an active form.
+  const themeQuery = window.matchMedia?.("(prefers-color-scheme: light)");
+  const syncTheme = () => ensureMounted();
+  const themeObserver = new MutationObserver(syncTheme);
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  themeQuery?.addEventListener("change", syncTheme);
   state.resizeHandler = () => {
     hideAccountTooltip();
     const wrap = state.shadow?.querySelector(".quota-wrap");
@@ -2074,6 +2563,8 @@ export function installQuotaWidget(
       return state.actions.splice(0);
     },
     destroy() {
+      themeObserver.disconnect();
+      themeQuery?.removeEventListener("change", syncTheme);
       hideAccountTooltip();
       state.observer?.disconnect();
       state.observer = null;
@@ -2113,7 +2604,7 @@ export function installQuotaWidget(
 }
 
 export function widgetInstallExpression() {
-  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()},${WIDGET_RUNTIME_VERSION})`;
+  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()},${WIDGET_RUNTIME_VERSION},${paginateGenerationDetails.toString()},${formatGenerationDetailTitle.toString()},${formatGenerationPhaseText.toString()},${formatGenerationPrimaryText.toString()},${formatConversationUsageSummary.toString()},${selectConversationNetworkLatency.toString()},${formatNetworkLatencyText.toString()},${averageGenerationNetworkLatency.toString()},${generationToolRows.toString()},${createGenerationToolRow.toString()},${generationExecutionRemainder.toString()})`;
 }
 
 export function widgetRuntimeVersionExpression() {

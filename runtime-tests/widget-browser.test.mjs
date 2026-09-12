@@ -1,0 +1,186 @@
+import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import test from "node:test";
+import { CodexContextManager } from "../src/codex-context.mjs";
+import { ExtraModelManager } from "../src/extra-model-manager.mjs";
+import { widgetInstallExpression, WIDGET_RUNTIME_VERSION,
+  widgetTokenUsageDeltaUpdateExpressionJson, widgetTokenUsageUpdateExpressionJson } from "../src/widget.mjs";
+import { fixtureData, SHADOW, startBrowser } from "./support/browser.mjs";
+
+test("[A UI-01 UI-03 TOOL-06] 真实浏览器挂载、重复注入、换节点、版本替换和销毁不拦截原生输入", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const count = () => b.client.evaluate('document.querySelectorAll("#codex-quota-injector-root").length');
+  assert.equal(await count(), 1);
+  await b.client.evaluate(widgetInstallExpression());
+  assert.equal(await count(), 1);
+  await b.click(".quota-chip");
+  assert.match(await b.value(".quota-wrap", "className"), /is-open/);
+  await b.fill("#composer", "原生消息 中文", { shadow: false });
+  await b.click("#send", { shadow: false });
+  assert.deepEqual(await b.client.evaluate("nativeMessages"), ["原生消息 中文"]);
+  assert.match(await b.value(".quota-wrap", "className"), /is-dismissed/);
+  await b.click("#native-tool", { shadow: false });
+  assert.equal(await b.client.evaluate("nativeToolClicks"), 1);
+  await b.client.evaluate(`document.getElementById('profile-row').outerHTML='<div id="profile-row"><button id="profile" aria-label="打开设置">新节点</button></div>'`);
+  await b.settled();
+  assert.equal(await count(), 1);
+  assert.equal(await b.value(".quota-chip"), "77%");
+  await b.client.evaluate("window.__codexQuotaWidget.version = -1");
+  await b.client.evaluate(widgetInstallExpression());
+  assert.equal(await b.client.evaluate("window.__codexQuotaWidget.version"), WIDGET_RUNTIME_VERSION);
+  assert.equal(await count(), 1);
+  await b.client.evaluate("window.__codexQuotaWidget.destroy()");
+  assert.equal(await count(), 0);
+  assert.equal(await b.client.evaluate('document.getElementById("codex-quota-injector-global-style")'), null);
+  await b.client.evaluate("document.getElementById('profile-row').append(document.createElement('span'))");
+  await b.settled();
+  assert.equal(await count(), 0, "销毁后观察器不能重新挂载");
+});
+
+test("[A UI-02 ACC-01 ACC-02 ACC-05] 页面刷新、导出、导入和授权取消产生唯一且完整的动作", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.click(".quota-chip");
+  for (const [selector, type] of [[".refresh-all", "refresh-all"], [".export-all", "export-all"], [".local-import", "local-import"], [".oauth-add", "oauth-add"]]) {
+    await b.click(selector);
+    const [action, ...extra] = await b.drain();
+    assert.equal(action.type, type);
+    assert.ok(action.id);
+    assert.deepEqual(extra, []);
+    assert.deepEqual(await b.drain(), []);
+  }
+  await b.click("details:has(.token-form) > summary");
+  await b.fill('.token-form [name="token"]', '{"fake":"凭据材料"}');
+  await b.click('.token-form button[type="submit"]');
+  assert.equal((await b.drain())[0].token, '{"fake":"凭据材料"}');
+  await b.click("details:has(.api-key-form) > summary");
+  await b.fill('.api-key-form [name="name"]', "测试账号");
+  await b.fill('.api-key-form [name="apiKey"]', "sk-offline-fixture");
+  await b.click('.api-key-form button[type="submit"]');
+  const [added] = await b.drain();
+  assert.equal(added.type, "api-key-add");
+  assert.equal(added.name, "测试账号");
+  assert.equal(added.apiKey, "sk-offline-fixture");
+  await b.update(fixtureData({ operation: { state: "loading", cancellable: "oauth", message: "等待测试授权" } }));
+  assert.equal(await b.value(".refresh-all", "disabled"), true);
+  await b.click(".oauth-cancel");
+  assert.equal((await b.drain())[0].type, "oauth-cancel");
+});
+
+test("[A UI-02 MOD-02 MOD-04] 页面上下文保存和重置的动作交给实际管理器后正确持久化", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const manager = new CodexContextManager({ codexHome: b.directory, dataDir: b.directory });
+  await writeFile(join(b.directory, "models_cache.json"), JSON.stringify({ models: [{ slug: "fixture-model", display_name: "Fixture", context_window: 128000, max_context_window: 128000 }] }));
+  await manager.initialize();
+  await b.click(".quota-chip");
+  await b.click(".context-open");
+  await b.click(".context-edit-open");
+  await b.fill('[name="contextWindow"]', "384000");
+  await b.click('.context-edit-form button[type="submit"]');
+  const [action] = await b.drain();
+  assert.equal(action.type, "context-save");
+  assert.equal(action.maxContextWindow, 384000);
+  await manager.setOverride(action.slug, action.contextWindow, action.maxContextWindow);
+  assert.equal(manager.getEffectiveCatalog().models[0].context_window, 384000);
+  const reloaded = new CodexContextManager({ codexHome: b.directory, dataDir: b.directory });
+  await reloaded.initialize();
+  assert.equal(reloaded.getViewModel().models[0].effectiveContextWindow, 384000);
+  await b.click(".context-edit-open");
+  await b.click(".context-reset");
+  const [reset] = await b.drain();
+  await manager.resetOverride(reset.slug);
+  assert.equal(manager.getEffectiveCatalog().models[0].context_window, 128000);
+  await b.click(".context-refresh");
+  assert.equal((await b.drain())[0].type, "context-refresh");
+  await b.click(".context-reset-all");
+  assert.equal((await b.drain())[0].type, "context-reset-all");
+});
+
+test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模型、取消和保存均使用真实 DOM", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.click(".quota-chip");
+  await b.click(".extra-models-open");
+  await b.click(".extra-platform-add");
+  await b.fill('.extra-platform-form [name="name"]', "本地平台");
+  await b.fill('[name="baseUrl"]', "http://127.0.0.1:1/v1");
+  await b.fill('.extra-platform-form [name="apiKey"]', "fixture-key");
+  await b.fill('[name="modelId"]', "fixture-extra");
+  await b.fill('[name="displayName"]', "测试模型");
+  await b.click('[name="supportsImage"]');
+  await b.click('[name="chatCompatibility"]');
+  await b.click('[name="reasoningEffort"][value="high"]');
+  assert.equal(await b.value('[name="defaultReasoningEffort"]', "value"), "high");
+  await b.click(".extra-model-add");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelectorAll('.extra-model-row').length`), 2);
+  await b.click('.extra-model-row[data-model-index="1"] .extra-model-remove');
+  await b.click('.extra-platform-form button[type="submit"]');
+  const [action] = await b.drain();
+  assert.equal(action.type, "extra-platform-save");
+  const manager = new ExtraModelManager({ dataDir: b.directory });
+  await manager.initialize();
+  await manager.savePlatform(action.platform);
+  const [platform] = manager.getViewModel().platforms;
+  assert.equal(platform.name, "本地平台");
+  assert.equal(platform.models[0].supportsImage, true);
+  assert.equal(platform.models[0].chatCompatibility, true);
+  assert.deepEqual(platform.models[0].reasoningEfforts, ["high"]);
+  assert.equal(platform.models[0].defaultReasoningEffort, "high");
+  await b.click(".extra-platform-cancel");
+  assert.equal(await b.value(".extra-platform-form"), null);
+  assert.deepEqual(await b.drain(), []);
+});
+
+test("[A UI-02 WK-01 MOD-03] 唤醒和供应商页面在刷新后保留草稿，动作完整且不执行真实请求", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.click(".quota-chip");
+  await b.click(".provider-open");
+  await b.fill(".provider-key", "changed-fixture-key");
+  await b.update(fixtureData({ windows: [{ label: "5h", remainingPercent: 65 }] }));
+  assert.equal(await b.value(".provider-key", "value"), "changed-fixture-key");
+  await b.click('.deepseek-form button[type="submit"]');
+  const [action] = await b.drain();
+  assert.equal(action.type, "deepseek-save");
+  assert.equal(action.apiKey, "changed-fixture-key");
+  await b.click(".deepseek-refresh-balance");
+  assert.equal((await b.drain())[0].type, "deepseek-refresh-balance");
+  await b.click(".provider-back");
+  await b.click(".wakeup-open");
+  await b.click(".wakeup-time-add");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelectorAll('.wakeup-time-remove').length`), 2);
+  await b.click('.wakeup-time-remove[data-time-index="1"]');
+  await b.click('.wakeup-form button[type="submit"]');
+  assert.equal((await b.drain())[0].type, "wakeup-save");
+  await b.click(".wakeup-now");
+  assert.equal((await b.drain())[0].type, "wakeup-now");
+  assert.equal(await b.value(".wakeup-now", "disabled"), true);
+});
+
+test("[A UI-03 UI-04 OBS-01 OBS-03] 页面大小、长列表、主题、任务切换和用量增量不串到另一任务", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const accounts = Array.from({ length: 40 }, (_, i) => ({ ...fixtureData().accounts[0], id: `a-${i}`, current: i === 0, email: `${i}-${"long".repeat(18)}@example.test` }));
+  await b.update(fixtureData({ accounts }));
+  await b.click(".quota-chip");
+  for (const [width, height] of [[1280,900], [800,600], [480,420]]) {
+    await b.client.request("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    await b.settled();
+    const bounds = await b.client.evaluate(`(() => {const e=${SHADOW}.querySelector('.quota-popover');const r=e.getBoundingClientRect();return {top:r.top,left:r.left,right:r.right,bottom:r.bottom,scroll:e.scrollHeight,client:e.clientHeight};})()`);
+    assert.ok(bounds.top >= 40 && bounds.left >= 0 && bounds.right <= width + 1 && bounds.bottom <= height, JSON.stringify(bounds));
+    assert.ok(bounds.scroll > bounds.client);
+  }
+  await b.client.evaluate('document.documentElement.className = "electron-light"');
+  await b.update(fixtureData({ accounts }));
+  assert.match(await b.value(".quota-wrap", "className"), /is-light/);
+  const usage = { turnId: "turn-a", totalTokens: 100, inputTokens: 90, outputTokens: 10, updatedAt: 1, completed: true, cost: { available: false } };
+  await b.client.evaluate(widgetTokenUsageUpdateExpressionJson(JSON.stringify({ status: "ready", turns: [usage] }), "revision-1"));
+  await b.settled();
+  assert.equal(await b.client.evaluate('document.querySelectorAll("[data-codex-token-usage]").length'), 1);
+  await b.client.evaluate(widgetTokenUsageDeltaUpdateExpressionJson(JSON.stringify({ status: "ready", updates: [{ ...usage, turnId: "turn-b", totalTokens: 200 }], removedTurnIds: ["turn-a"] }), "revision-2"));
+  await b.settled();
+  assert.deepEqual(await b.client.evaluate('[...document.querySelectorAll("[data-codex-token-usage]")].map(e=>e.getAttribute("data-codex-token-usage"))'), ["turn-b"]);
+  await b.client.evaluate('document.getElementById("conversation").innerHTML = `<article data-content-search-turn-key="turn-c"><div>另一个任务</div></article>`');
+  await b.settled();
+  assert.equal(await b.client.evaluate('document.querySelectorAll("[data-codex-token-usage]").length'), 0);
+  await b.client.evaluate(widgetTokenUsageUpdateExpressionJson(JSON.stringify({ status: "ready", turns: [{ ...usage, turnId: "turn-c" }] }), "revision-3"));
+  await b.settled();
+  assert.equal(await b.client.evaluate('document.querySelector("[data-codex-token-usage]").getAttribute("data-codex-token-usage")'), "turn-c");
+});

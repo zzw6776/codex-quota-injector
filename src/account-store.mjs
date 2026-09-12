@@ -110,9 +110,21 @@ export class AccountStore {
       createdAt: previous?.createdAt ?? account.createdAt ?? now,
       lastUsed: account.lastUsed ?? previous?.lastUsed ?? now,
     });
-    this.accounts.set(next.id, next);
     await this.#writeAccount(next);
-    await this.#writeIndex();
+    this.accounts.set(next.id, next);
+    try {
+      await this.#writeIndex();
+    } catch (error) {
+      if (previous) this.accounts.set(next.id, previous);
+      else this.accounts.delete(next.id);
+      try {
+        if (previous) await this.#writeAccount(previous);
+        else await removeFile(join(this.accountsDir, `${safeFileId(next.id)}.json`));
+      } catch (rollbackError) {
+        error.message += `（账号文件回滚失败：${rollbackError.message}）`;
+      }
+      throw error;
+    }
     return structuredClone(next);
   }
 
@@ -134,24 +146,36 @@ export class AccountStore {
   }
 
   async #loadOwnData() {
-    const index = await readJson(this.indexPath);
-    if (!index || !Array.isArray(index.accounts)) return false;
-    this.index = {
-      version: Number(index.version) || STORE_VERSION,
+    let index;
+    try {
+      index = JSON.parse(await readFile(this.indexPath, "utf8"));
+      if (!Array.isArray(index?.accounts)) throw new Error("账号索引格式损坏");
+      assertReadableVersion(index.version);
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw new Error(`无法读取账号索引，已停止启动以保护现有数据：${error.message}`);
+    }
+    const loadedIndex = {
+      version: index.version ?? 1,
       currentAccountId: index.currentAccountId ?? null,
       accounts: index.accounts,
     };
     const key = await this.#readOrCreateKey({ allowCreate: index.accounts.length === 0 });
+    const loadedAccounts = new Map();
     for (const summary of index.accounts) {
       const path = join(this.accountsDir, `${safeFileId(summary.id)}.json`);
       try {
         const content = await readFile(path, "utf8");
+        assertReadableVersion(JSON.parse(content).version);
         const account = normalizeAccount(decryptAccountFile(content, key));
-        this.accounts.set(account.id, account);
+        if (account.id !== summary.id || loadedAccounts.has(account.id)) throw new Error("账号 ID 与索引不一致或重复");
+        loadedAccounts.set(account.id, account);
       } catch (error) {
-        console.error(`[accounts] 无法读取 ${summary.id}: ${error.message}`);
+        throw new Error(`无法读取账号 ${summary.id}，已停止启动以保护现有数据：${error.message}`);
       }
     }
+    this.index = loadedIndex;
+    this.accounts = loadedAccounts;
     if (!this.accounts.has(this.index.currentAccountId)) {
       this.index.currentAccountId = null;
     }
@@ -223,8 +247,7 @@ export class AccountStore {
   }
 
   async #writeIndex() {
-    this.index.version = STORE_VERSION;
-    this.index.accounts = [...this.accounts.values()].map((account) => ({
+    const index = { ...this.index, version: STORE_VERSION, accounts: [...this.accounts.values()].map((account) => ({
       id: account.id,
       email: account.email,
       authMode: account.authMode,
@@ -232,8 +255,9 @@ export class AccountStore {
       subscriptionActiveUntil: account.subscriptionActiveUntil ?? null,
       createdAt: account.createdAt,
       lastUsed: account.lastUsed,
-    }));
-    await atomicWrite(this.indexPath, `${JSON.stringify(this.index, null, 2)}\n`, 0o600);
+    })) };
+    await atomicWrite(this.indexPath, `${JSON.stringify(index, null, 2)}\n`, 0o600);
+    this.index = index;
   }
 
   async #readOrCreateKey({ allowCreate = true } = {}) {
@@ -459,6 +483,12 @@ function decodeKey(value) {
   return key;
 }
 
+function assertReadableVersion(version = 1) {
+  if (!Number.isInteger(version) || version < 1 || version > STORE_VERSION) {
+    throw new Error(`不支持的账号存储版本 ${version}`);
+  }
+}
+
 async function readJson(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
@@ -478,8 +508,12 @@ async function removeFile(path) {
 async function atomicWrite(path, content, mode) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.tmp.${process.pid}.${randomBytes(5).toString("hex")}`;
-  await writeFile(temp, content, { mode });
-  await rename(temp, path);
+  try {
+    await writeFile(temp, content, { mode });
+    await rename(temp, path);
+  } finally {
+    await removeFile(temp).catch(() => undefined);
+  }
   try {
     const info = await stat(path);
     if ((info.mode & 0o777) !== mode) {

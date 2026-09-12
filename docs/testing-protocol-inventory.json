@@ -1,0 +1,1373 @@
+{
+  "capturedOn": "2026-09-12",
+  "purpose": "协议盘点；不是测试通过报告或桌面工具能力清单",
+  "projectVersionAtInspection": "0.1.203",
+  "desktopVersion": "26.908.40834",
+  "cliVersion": "0.154.0-alpha.6.2",
+  "source": "installed official desktop Resources/codex",
+  "generator": "codex app-server generate-json-schema --out <temporary-directory> [--experimental]",
+  "modes": {
+    "default": {
+      "ClientRequest": {
+        "count": 99,
+        "sha256": "da767fedd73502ceb644f5d7974927e1a6b7f1917b092aaa029e81949abf0125",
+        "methods": [
+          "initialize",
+          "thread/start",
+          "thread/resume",
+          "thread/fork",
+          "thread/archive",
+          "thread/delete",
+          "thread/unsubscribe",
+          "thread/name/set",
+          "thread/goal/set",
+          "thread/goal/get",
+          "thread/goal/clear",
+          "thread/metadata/update",
+          "thread/section/move",
+          "thread/unarchive",
+          "thread/compact/start",
+          "thread/shellCommand",
+          "thread/approveGuardianDeniedAction",
+          "thread/rollback",
+          "thread/revert",
+          "thread/list",
+          "threadSection/list",
+          "threadSection/create",
+          "threadSection/update",
+          "threadSection/delete",
+          "thread/loaded/list",
+          "thread/read",
+          "thread/turns/list",
+          "thread/items/list",
+          "thread/inject_items",
+          "skills/list",
+          "skills/extraRoots/set",
+          "hooks/list",
+          "marketplace/add",
+          "marketplace/remove",
+          "marketplace/upgrade",
+          "plugin/list",
+          "plugin/installed",
+          "plugin/reconcile",
+          "plugin/read",
+          "plugin/skill/read",
+          "plugin/share/save",
+          "plugin/share/updateTargets",
+          "plugin/share/list",
+          "plugin/share/checkout",
+          "plugin/share/delete",
+          "app/read",
+          "app/list",
+          "app/installed",
+          "fs/readFile",
+          "fs/writeFile",
+          "fs/createDirectory",
+          "fs/getMetadata",
+          "fs/readDirectory",
+          "fs/remove",
+          "fs/copy",
+          "fs/watch",
+          "fs/unwatch",
+          "skills/config/write",
+          "plugin/install",
+          "plugin/uninstall",
+          "turn/start",
+          "turn/steer",
+          "turn/interrupt",
+          "review/start",
+          "model/list",
+          "modelProvider/capabilities/read",
+          "experimentalFeature/list",
+          "permissionProfile/list",
+          "experimentalFeature/enablement/set",
+          "mcpServer/oauth/login",
+          "config/mcpServer/reload",
+          "mcpServerStatus/list",
+          "mcpServer/resource/read",
+          "mcpServer/tool/call",
+          "windowsSandbox/setupStart",
+          "windowsSandbox/readiness",
+          "account/login/start",
+          "account/login/cancel",
+          "account/logout",
+          "account/rateLimits/read",
+          "account/rateLimitResetCredit/consume",
+          "account/usage/read",
+          "account/workspaceMessages/read",
+          "account/sendAddCreditsNudgeEmail",
+          "feedback/upload",
+          "command/exec",
+          "command/exec/write",
+          "command/exec/terminate",
+          "command/exec/resize",
+          "config/read",
+          "externalAgentConfig/detect",
+          "externalAgentConfig/import",
+          "externalAgentConfig/import/recordHistory",
+          "externalAgentConfig/import/readHistories",
+          "config/value/write",
+          "config/batchWrite",
+          "configRequirements/read",
+          "account/read",
+          "fuzzyFileSearch"
+        ]
+      },
+      "ServerRequest": {
+        "count": 10,
+        "sha256": "f339be472737a0003efa25fba2e6e6c9237e621cd065b6d6995c51256e9dc1fb",
+        "methods": [
+          "item/commandExecution/requestApproval",
+          "item/fileChange/requestApproval",
+          "item/tool/requestUserInput",
+          "mcpServer/elicitation/request",
+          "item/permissions/requestApproval",
+          "item/tool/call",
+          "account/chatgptAuthTokens/refresh",
+          "attestation/generate",
+          "applyPatchApproval",
+          "execCommandApproval"
+        ]
+      },
+      "ClientNotification": {
+        "count": 1,
+        "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a",
+        "methods": [
+          "initialized"
+        ]
+      },
+      "ServerNotification": {
+        "count": 81,
+        "sha256": "2a52bea56cd6bd994a9d014e2af60d631446d810bd78181714e4b05375a9a222",
+        "methods": [
+          "error",
+          "thread/started",
+          "thread/status/changed",
+          "thread/archived",
+          "thread/deleted",
+          "thread/unarchived",
+          "thread/closed",
+          "thread/reverted",
+          "skills/changed",
+          "thread/name/updated",
+          "thread/goal/updated",
+          "thread/goal/cleared",
+          "thread/queue/changed",
+          "project/changed",
+          "thread/project/updated",
+          "thread/environment/connected",
+          "thread/environment/disconnected",
+          "thread/settings/updated",
+          "thread/tokenUsage/updated",
+          "turn/started",
+          "hook/started",
+          "turn/completed",
+          "hook/completed",
+          "turn/diff/updated",
+          "turn/plan/updated",
+          "item/started",
+          "item/autoApprovalReview/started",
+          "item/autoApprovalReview/completed",
+          "autoApprovalReview/strictReviewRequired",
+          "item/completed",
+          "item/agentMessage/delta",
+          "item/plan/delta",
+          "command/exec/outputDelta",
+          "process/outputDelta",
+          "process/exited",
+          "item/commandExecution/outputDelta",
+          "item/commandExecution/terminalInteraction",
+          "item/fileChange/outputDelta",
+          "item/fileChange/patchUpdated",
+          "serverRequest/resolved",
+          "item/mcpToolCall/progress",
+          "mcpServer/oauthLogin/completed",
+          "mcpServer/startupStatus/updated",
+          "mcpServer/event/stream/notification",
+          "account/updated",
+          "account/rateLimits/updated",
+          "app/list/updated",
+          "remoteControl/status/changed",
+          "externalAgentConfig/import/progress",
+          "externalAgentConfig/import/completed",
+          "fs/changed",
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+          "thread/compacted",
+          "model/rerouted",
+          "model/verification",
+          "modelProvider/authRecoveryStarted",
+          "modelProvider/authRecoveryCompleted",
+          "turn/moderationMetadata",
+          "model/safetyBuffering/updated",
+          "warning",
+          "guardianWarning",
+          "deprecationNotice",
+          "configWarning",
+          "fuzzyFileSearch/sessionUpdated",
+          "fuzzyFileSearch/sessionCompleted",
+          "thread/realtime/started",
+          "thread/realtime/itemAdded",
+          "thread/realtime/item/started",
+          "thread/realtime/item/transcript/delta",
+          "thread/realtime/item/completed",
+          "thread/realtime/transcript/delta",
+          "thread/realtime/transcript/done",
+          "thread/realtime/outputAudio/delta",
+          "thread/realtime/sdp",
+          "thread/realtime/error",
+          "thread/realtime/closed",
+          "windows/worldWritableWarning",
+          "windowsSandbox/setupCompleted",
+          "account/login/completed"
+        ]
+      }
+    },
+    "experimental": {
+      "ClientRequest": {
+        "count": 159,
+        "sha256": "4b1ea47e8a389402556b23451b5a690944e498dc31557b1bca3525631655f1f4",
+        "methods": [
+          "initialize",
+          "server/diagnostics",
+          "userVerification/status",
+          "userVerification/enroll",
+          "userVerification/delete",
+          "userVerification/verify",
+          "thread/start",
+          "thread/resume",
+          "thread/fork",
+          "thread/archive",
+          "thread/delete",
+          "thread/unsubscribe",
+          "thread/increment_elicitation",
+          "thread/decrement_elicitation",
+          "thread/name/set",
+          "thread/goal/set",
+          "thread/goal/get",
+          "thread/goal/clear",
+          "thread/queue/add",
+          "thread/queue/list",
+          "thread/queue/update",
+          "thread/queue/delete",
+          "thread/queue/reorder",
+          "thread/queue/start",
+          "thread/metadata/update",
+          "thread/section/move",
+          "thread/settings/update",
+          "thread/memoryMode/set",
+          "memory/reset",
+          "thread/unarchive",
+          "thread/compact/start",
+          "thread/shellCommand",
+          "thread/approveGuardianDeniedAction",
+          "thread/backgroundTerminals/clean",
+          "thread/backgroundTerminals/list",
+          "thread/backgroundTerminals/terminate",
+          "thread/rollback",
+          "thread/revert",
+          "thread/list",
+          "project/list",
+          "project/read",
+          "project/create",
+          "project/import",
+          "project/update",
+          "project/move",
+          "project/delete",
+          "threadSection/list",
+          "threadSection/create",
+          "threadSection/update",
+          "threadSection/delete",
+          "thread/search",
+          "thread/searchOccurrences",
+          "thread/loaded/list",
+          "thread/read",
+          "thread/turns/list",
+          "thread/items/list",
+          "thread/inject_items",
+          "skills/list",
+          "skills/extraRoots/set",
+          "hooks/list",
+          "marketplace/add",
+          "marketplace/remove",
+          "marketplace/upgrade",
+          "plugin/list",
+          "plugin/search",
+          "plugin/installed",
+          "plugin/reconcile",
+          "plugin/read",
+          "plugin/skill/read",
+          "plugin/share/save",
+          "plugin/share/updateTargets",
+          "plugin/share/list",
+          "plugin/share/checkout",
+          "plugin/share/delete",
+          "app/read",
+          "app/list",
+          "app/installed",
+          "fs/readFile",
+          "fs/writeFile",
+          "fs/createDirectory",
+          "fs/getMetadata",
+          "fs/readDirectory",
+          "fs/remove",
+          "fs/copy",
+          "fs/watch",
+          "fs/unwatch",
+          "skills/config/write",
+          "plugin/install",
+          "plugin/uninstall",
+          "turn/start",
+          "turn/settings/update",
+          "turn/steer",
+          "turn/interrupt",
+          "thread/realtime/start",
+          "thread/realtime/appendAudio",
+          "thread/realtime/appendText",
+          "thread/realtime/appendSpeech",
+          "thread/realtime/stop",
+          "thread/timeline/list",
+          "thread/realtime/listVoices",
+          "review/start",
+          "model/list",
+          "modelProvider/capabilities/read",
+          "experimentalFeature/list",
+          "permissionProfile/list",
+          "experimentalFeature/enablement/set",
+          "remoteControl/enable",
+          "remoteControl/disable",
+          "remoteControl/status/read",
+          "remoteControl/pairing/start",
+          "remoteControl/pairing/status",
+          "remoteControl/client/list",
+          "remoteControl/client/revoke",
+          "collaborationMode/list",
+          "mock/experimentalMethod",
+          "environment/add",
+          "environment/info",
+          "environment/status",
+          "mcpServer/oauth/login",
+          "config/mcpServer/reload",
+          "mcpServerStatus/list",
+          "mcpServer/resource/read",
+          "mcpServer/event/stream/start",
+          "mcpServer/event/stream/stop",
+          "mcpServer/tool/call",
+          "windowsSandbox/setupStart",
+          "windowsSandbox/readiness",
+          "account/login/start",
+          "account/bedrock/discover",
+          "account/bedrock/setup",
+          "account/login/cancel",
+          "account/logout",
+          "account/rateLimits/read",
+          "account/rateLimitResetCredit/consume",
+          "account/usage/read",
+          "account/workspaceMessages/read",
+          "account/sendAddCreditsNudgeEmail",
+          "feedback/upload",
+          "command/exec",
+          "command/exec/write",
+          "command/exec/terminate",
+          "command/exec/resize",
+          "process/spawn",
+          "process/writeStdin",
+          "process/kill",
+          "process/resizePty",
+          "config/read",
+          "externalAgentConfig/detect",
+          "externalAgentConfig/import",
+          "externalAgentConfig/import/recordHistory",
+          "externalAgentConfig/import/readHistories",
+          "config/value/write",
+          "config/batchWrite",
+          "configRequirements/read",
+          "account/read",
+          "fuzzyFileSearch",
+          "fuzzyFileSearch/sessionStart",
+          "fuzzyFileSearch/sessionUpdate",
+          "fuzzyFileSearch/sessionStop"
+        ]
+      },
+      "ServerRequest": {
+        "count": 11,
+        "sha256": "97149b290b077be5d970e7b1ade1e936d1152520b6c0187ce8745cb3d639b2cb",
+        "methods": [
+          "item/commandExecution/requestApproval",
+          "item/fileChange/requestApproval",
+          "item/tool/requestUserInput",
+          "mcpServer/elicitation/request",
+          "item/permissions/requestApproval",
+          "item/tool/call",
+          "account/chatgptAuthTokens/refresh",
+          "attestation/generate",
+          "currentTime/read",
+          "applyPatchApproval",
+          "execCommandApproval"
+        ]
+      },
+      "ClientNotification": {
+        "count": 1,
+        "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a",
+        "methods": [
+          "initialized"
+        ]
+      },
+      "ServerNotification": {
+        "count": 81,
+        "sha256": "eb4317b57ce7cad32d6ab8a5b7d39eb765c8fb8f67acbc808dd6e55959411c93",
+        "methods": [
+          "error",
+          "thread/started",
+          "thread/status/changed",
+          "thread/archived",
+          "thread/deleted",
+          "thread/unarchived",
+          "thread/closed",
+          "thread/reverted",
+          "skills/changed",
+          "thread/name/updated",
+          "thread/goal/updated",
+          "thread/goal/cleared",
+          "thread/queue/changed",
+          "project/changed",
+          "thread/project/updated",
+          "thread/environment/connected",
+          "thread/environment/disconnected",
+          "thread/settings/updated",
+          "thread/tokenUsage/updated",
+          "turn/started",
+          "hook/started",
+          "turn/completed",
+          "hook/completed",
+          "turn/diff/updated",
+          "turn/plan/updated",
+          "item/started",
+          "item/autoApprovalReview/started",
+          "item/autoApprovalReview/completed",
+          "autoApprovalReview/strictReviewRequired",
+          "item/completed",
+          "item/agentMessage/delta",
+          "item/plan/delta",
+          "command/exec/outputDelta",
+          "process/outputDelta",
+          "process/exited",
+          "item/commandExecution/outputDelta",
+          "item/commandExecution/terminalInteraction",
+          "item/fileChange/outputDelta",
+          "item/fileChange/patchUpdated",
+          "serverRequest/resolved",
+          "item/mcpToolCall/progress",
+          "mcpServer/oauthLogin/completed",
+          "mcpServer/startupStatus/updated",
+          "mcpServer/event/stream/notification",
+          "account/updated",
+          "account/rateLimits/updated",
+          "app/list/updated",
+          "remoteControl/status/changed",
+          "externalAgentConfig/import/progress",
+          "externalAgentConfig/import/completed",
+          "fs/changed",
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/summaryPartAdded",
+          "item/reasoning/textDelta",
+          "thread/compacted",
+          "model/rerouted",
+          "model/verification",
+          "modelProvider/authRecoveryStarted",
+          "modelProvider/authRecoveryCompleted",
+          "turn/moderationMetadata",
+          "model/safetyBuffering/updated",
+          "warning",
+          "guardianWarning",
+          "deprecationNotice",
+          "configWarning",
+          "fuzzyFileSearch/sessionUpdated",
+          "fuzzyFileSearch/sessionCompleted",
+          "thread/realtime/started",
+          "thread/realtime/itemAdded",
+          "thread/realtime/item/started",
+          "thread/realtime/item/transcript/delta",
+          "thread/realtime/item/completed",
+          "thread/realtime/transcript/delta",
+          "thread/realtime/transcript/done",
+          "thread/realtime/outputAudio/delta",
+          "thread/realtime/sdp",
+          "thread/realtime/error",
+          "thread/realtime/closed",
+          "windows/worldWritableWarning",
+          "windowsSandbox/setupCompleted",
+          "account/login/completed"
+        ]
+      }
+    }
+  },
+  "coverageStatus": "仅完成枚举和方案归类；未执行功能验收",
+  "platformScope": {
+    "os": "darwin",
+    "architecture": "arm64",
+    "otherPlatformsRequired": false
+  },
+  "scenarioMapping": {
+    "description": "公共转发契约 RPC-02 覆盖全部分支；以下为请求的主要业务验收归属。通知统一先归 RPC-02，任务状态、用量和 UI 消费另由 SES、OBS、UI 场景验证。归类不表示已有测试。",
+    "requests": [
+      {
+        "messageType": "ClientRequest",
+        "method": "initialize",
+        "scenario": "RPC-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "server/diagnostics",
+        "scenario": "RPC-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "userVerification/status",
+        "scenario": "INT-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "userVerification/enroll",
+        "scenario": "INT-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "userVerification/delete",
+        "scenario": "INT-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "userVerification/verify",
+        "scenario": "INT-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/start",
+        "scenario": "SES-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/resume",
+        "scenario": "SES-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/fork",
+        "scenario": "SES-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/archive",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/delete",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/unsubscribe",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/increment_elicitation",
+        "scenario": "INT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/decrement_elicitation",
+        "scenario": "INT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/name/set",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/goal/set",
+        "scenario": "SES-08"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/goal/get",
+        "scenario": "SES-08"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/goal/clear",
+        "scenario": "SES-08"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/queue/add",
+        "scenario": "SES-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/queue/list",
+        "scenario": "SES-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/queue/update",
+        "scenario": "SES-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/queue/delete",
+        "scenario": "SES-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/queue/reorder",
+        "scenario": "SES-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/queue/start",
+        "scenario": "SES-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/metadata/update",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/section/move",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/settings/update",
+        "scenario": "MOD-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/memoryMode/set",
+        "scenario": "SES-07"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "memory/reset",
+        "scenario": "SES-07"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/unarchive",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/compact/start",
+        "scenario": "SES-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/shellCommand",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/approveGuardianDeniedAction",
+        "scenario": "INT-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/backgroundTerminals/clean",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/backgroundTerminals/list",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/backgroundTerminals/terminate",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/rollback",
+        "scenario": "SES-07"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/revert",
+        "scenario": "SES-07"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/list",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "project/list",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "project/read",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "project/create",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "project/import",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "project/update",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "project/move",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "project/delete",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "threadSection/list",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "threadSection/create",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "threadSection/update",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "threadSection/delete",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/search",
+        "scenario": "ENV-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/searchOccurrences",
+        "scenario": "ENV-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/loaded/list",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/read",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/turns/list",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/items/list",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/inject_items",
+        "scenario": "SES-07"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "skills/list",
+        "scenario": "EXT-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "skills/extraRoots/set",
+        "scenario": "EXT-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "hooks/list",
+        "scenario": "EXT-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "marketplace/add",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "marketplace/remove",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "marketplace/upgrade",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/list",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/search",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/installed",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/reconcile",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/read",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/skill/read",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/share/save",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/share/updateTargets",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/share/list",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/share/checkout",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/share/delete",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "app/read",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "app/list",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "app/installed",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/readFile",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/writeFile",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/createDirectory",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/getMetadata",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/readDirectory",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/remove",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/copy",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/watch",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fs/unwatch",
+        "scenario": "TOOL-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "skills/config/write",
+        "scenario": "EXT-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/install",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "plugin/uninstall",
+        "scenario": "EXT-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "turn/start",
+        "scenario": "SES-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "turn/settings/update",
+        "scenario": "MOD-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "turn/steer",
+        "scenario": "SES-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "turn/interrupt",
+        "scenario": "SES-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/realtime/start",
+        "scenario": "IO-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/realtime/appendAudio",
+        "scenario": "IO-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/realtime/appendText",
+        "scenario": "IO-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/realtime/appendSpeech",
+        "scenario": "IO-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/realtime/stop",
+        "scenario": "IO-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/timeline/list",
+        "scenario": "SES-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "thread/realtime/listVoices",
+        "scenario": "IO-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "review/start",
+        "scenario": "ENV-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "model/list",
+        "scenario": "MOD-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "modelProvider/capabilities/read",
+        "scenario": "MOD-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "experimentalFeature/list",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "permissionProfile/list",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "experimentalFeature/enablement/set",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "remoteControl/enable",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "remoteControl/disable",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "remoteControl/status/read",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "remoteControl/pairing/start",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "remoteControl/pairing/status",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "remoteControl/client/list",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "remoteControl/client/revoke",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "collaborationMode/list",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "mock/experimentalMethod",
+        "scenario": "RPC-01"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "environment/add",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "environment/info",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "environment/status",
+        "scenario": "ENV-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "mcpServer/oauth/login",
+        "scenario": "TOOL-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "config/mcpServer/reload",
+        "scenario": "TOOL-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "mcpServerStatus/list",
+        "scenario": "TOOL-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "mcpServer/resource/read",
+        "scenario": "TOOL-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "mcpServer/event/stream/start",
+        "scenario": "TOOL-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "mcpServer/event/stream/stop",
+        "scenario": "TOOL-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "mcpServer/tool/call",
+        "scenario": "TOOL-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "windowsSandbox/setupStart",
+        "scenario": "LCH-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "windowsSandbox/readiness",
+        "scenario": "LCH-04"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/login/start",
+        "scenario": "ACC-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/bedrock/discover",
+        "scenario": "ACC-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/bedrock/setup",
+        "scenario": "ACC-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/login/cancel",
+        "scenario": "ACC-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/logout",
+        "scenario": "ACC-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/rateLimits/read",
+        "scenario": "ACC-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/rateLimitResetCredit/consume",
+        "scenario": "ACC-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/usage/read",
+        "scenario": "ACC-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/workspaceMessages/read",
+        "scenario": "ACC-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/sendAddCreditsNudgeEmail",
+        "scenario": "ACC-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "feedback/upload",
+        "scenario": "ACC-05"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "command/exec",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "command/exec/write",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "command/exec/terminate",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "command/exec/resize",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "process/spawn",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "process/writeStdin",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "process/kill",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "process/resizePty",
+        "scenario": "TOOL-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "config/read",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "externalAgentConfig/detect",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "externalAgentConfig/import",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "externalAgentConfig/import/recordHistory",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "externalAgentConfig/import/readHistories",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "config/value/write",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "config/batchWrite",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "configRequirements/read",
+        "scenario": "MOD-06"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "account/read",
+        "scenario": "ACC-02"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fuzzyFileSearch",
+        "scenario": "ENV-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fuzzyFileSearch/sessionStart",
+        "scenario": "ENV-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fuzzyFileSearch/sessionUpdate",
+        "scenario": "ENV-03"
+      },
+      {
+        "messageType": "ClientRequest",
+        "method": "fuzzyFileSearch/sessionStop",
+        "scenario": "ENV-03"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "item/commandExecution/requestApproval",
+        "scenario": "INT-01"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "item/fileChange/requestApproval",
+        "scenario": "INT-01"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "item/tool/requestUserInput",
+        "scenario": "INT-02"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "mcpServer/elicitation/request",
+        "scenario": "INT-02"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "item/permissions/requestApproval",
+        "scenario": "INT-01"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "item/tool/call",
+        "scenario": "TOOL-04"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "account/chatgptAuthTokens/refresh",
+        "scenario": "INT-03"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "attestation/generate",
+        "scenario": "INT-03"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "currentTime/read",
+        "scenario": "TOOL-04"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "applyPatchApproval",
+        "scenario": "INT-01"
+      },
+      {
+        "messageType": "ServerRequest",
+        "method": "execCommandApproval",
+        "scenario": "INT-01"
+      },
+      {
+        "messageType": "ClientNotification",
+        "method": "initialized",
+        "scenario": "RPC-01"
+      }
+    ],
+    "allServerNotifications": "RPC-02"
+  }
+}

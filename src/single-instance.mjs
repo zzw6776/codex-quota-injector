@@ -21,15 +21,20 @@ export async function acquireSingleInstance({
   mode = "dev",
   version = "0.0.0",
   explicitStart = false,
+  port = SINGLE_INSTANCE_PORT,
+  runtimeIdentity = null,
   onTakeover,
   onReuse,
+  onReload,
 } = {}) {
   const owner = {
     mode: normalizeMode(mode),
     version: normalizeVersion(version),
     explicitStart: Boolean(explicitStart),
+    runtimeIdentity: normalizeRuntimeIdentity(runtimeIdentity),
   };
   let takeoverStarted = false;
+  let reloadPromise = Promise.resolve();
   const server = createServer((socket) => {
     socket.setEncoding("utf8");
     socket.setTimeout(TAKEOVER_TIMEOUT_MS, () => socket.destroy());
@@ -37,6 +42,20 @@ export async function acquireSingleInstance({
       const request = parseTakeoverRequest(data);
       if (!request) {
         socket.end("invalid\n");
+        return;
+      }
+      if (typeof onReload === "function" && shouldReload(owner, request)) {
+        // Acknowledge retention before disk I/O: a slow UI import must not be
+        // mistaken for an unrecognized legacy owner and forcibly replaced.
+        socket.end("keep\n");
+        reloadPromise = reloadPromise.then(async () => {
+          if (compareVersions(request.version, owner.version) < 0) return;
+          await onReload(request);
+          owner.version = request.version;
+        }).catch((error) => {
+          // A failed UI reload must never turn into a process takeover.
+          console.error(`[single-instance] 页面更新失败，保留现有实例：${error.message}`);
+        });
         return;
       }
       const replace = shouldReplace(owner, request);
@@ -58,7 +77,7 @@ export async function acquireSingleInstance({
   server.unref();
 
   try {
-    await listenServer(server);
+    await listenServer(server, port);
     return server;
   } catch (error) {
     if (error?.code !== "EADDRINUSE") throw error;
@@ -66,7 +85,7 @@ export async function acquireSingleInstance({
 
   let decision;
   try {
-    decision = await requestTakeover(owner);
+    decision = await requestTakeover(owner, port);
   } catch (cause) {
     if (cause?.code !== UNRECOGNIZED_TAKEOVER_CODE) {
       throw new SingleInstanceTakeoverError(cause);
@@ -83,7 +102,7 @@ export async function acquireSingleInstance({
   const deadline = Date.now() + TAKEOVER_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      await listenServer(server);
+      await listenServer(server, port);
       return server;
     } catch (error) {
       if (error?.code !== "EADDRINUSE") throw error;
@@ -119,6 +138,12 @@ function shouldReplace(owner, requester) {
   return compareVersions(requester.version, owner.version) > 0;
 }
 
+function shouldReload(owner, requester) {
+  return requester.explicitStart && owner.mode === "dev" && requester.mode === "dev" &&
+    owner.runtimeIdentity !== null && owner.runtimeIdentity === requester.runtimeIdentity &&
+    compareVersions(requester.version, owner.version) >= 0;
+}
+
 function shouldReuse(owner, requester) {
   return requester.explicitStart &&
     owner.mode === "formal" && requester.mode === "formal";
@@ -134,15 +159,16 @@ function parseTakeoverRequest(data) {
       mode: normalizeMode(value.mode),
       version: normalizeVersion(value.version),
       explicitStart: value.explicitStart === true,
+      runtimeIdentity: normalizeRuntimeIdentity(value.runtimeIdentity),
     };
   } catch {
     return null;
   }
 }
 
-function requestTakeover(owner) {
+function requestTakeover(owner, port = SINGLE_INSTANCE_PORT) {
   return new Promise((resolve, reject) => {
-    const socket = createConnection({ host: "127.0.0.1", port: SINGLE_INSTANCE_PORT });
+    const socket = createConnection({ host: "127.0.0.1", port });
     let response = "";
     let settled = false;
     const finish = (callback, value) => {
@@ -161,6 +187,7 @@ function requestTakeover(owner) {
       mode: owner.mode,
       version: owner.version,
       explicitStart: owner.explicitStart,
+      runtimeIdentity: owner.runtimeIdentity,
     }) + "\n"));
     socket.on("data", (data) => {
       response += data;
@@ -293,7 +320,7 @@ async function terminateProcess(pid) {
   }
 }
 
-function listenServer(server) {
+function listenServer(server, port = SINGLE_INSTANCE_PORT) {
   return new Promise((resolve, reject) => {
     const onListening = () => {
       cleanup();
@@ -309,7 +336,7 @@ function listenServer(server) {
     };
     server.once("listening", onListening);
     server.once("error", onError);
-    server.listen(SINGLE_INSTANCE_PORT, "127.0.0.1");
+    server.listen(port, "127.0.0.1");
   });
 }
 
@@ -325,6 +352,10 @@ function normalizeMode(value) {
 
 function normalizeVersion(value) {
   return String(value ?? "").trim() || "0.0.0";
+}
+
+function normalizeRuntimeIdentity(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
 }
 
 function delay(milliseconds) {
