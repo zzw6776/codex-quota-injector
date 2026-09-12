@@ -63,7 +63,9 @@ test("[A ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存�
   await manager.exportAccounts();
   const path = join(directory, "export", (await readdir(join(directory, "export")))[0]);
   const backup = await readFile(path, "utf8");
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  // Windows exposes synthetic POSIX permission bits; access is governed by the
+  // inherited ACL there. Exact 0600 is an observable contract only on POSIX.
+  if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, 0o600);
   const other = await setup(t);
   await other.manager.importTokenInput(backup);
   assert.deepEqual(other.store.list().map(a => [a.authMode, a.email]).sort(), store.list().map(a => [a.authMode, a.email]).sort());

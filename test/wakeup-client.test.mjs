@@ -3,8 +3,11 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { sendWakeupRequest } from "../src/wakeup-client.mjs";
 import { useTempDir } from "./helpers.mjs";
+
+const wakeupFixturePath = fileURLToPath(new URL("./fixtures/wakeup-process.mjs", import.meta.url));
 
 async function fixture(t, scenario) {
   const directory = await useTempDir(t);
@@ -23,7 +26,7 @@ async function fixture(t, scenario) {
         resolveExecutable: async () => "fixture-cli",
         spawnProcess(executable, args, options) {
           spawned = { executable, args, options };
-          child = spawn(process.execPath, [new URL("./fixtures/wakeup-process.mjs", import.meta.url).pathname, scenario, trace], options);
+          child = spawn(process.execPath, [wakeupFixturePath, scenario, trace], options);
           return child;
         },
       });
