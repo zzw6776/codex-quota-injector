@@ -1,8 +1,8 @@
-# B：真实桌面宿主验收
+# B1/B2：真实桌面宿主验收
 
-这是 B 批次中需要当前 Codex 配合的部分。独立 app-server 能验证后台模型与工具协议，但没有桌面专属的 web.run、computer use 等宿主。自有 `fixture_web` / `fixture_browser` 通过不能替代这些功能。
+这是 B1 或 B2 中需要当前 Codex 配合的部分，归属由当前任务实际选择的模型决定。独立 app-server 能验证后台模型与工具协议，但没有桌面专属的 web.run、computer use 等宿主。自有 `fixture_web` / `fixture_browser` 通过不能替代这些功能。
 
-先完成 `npm run test:offline`，展示 `npm run test:live -- --plan` 并取得当次明确同意。按下面的固定步骤验收，避免每次发生故障后才临时想用例。每项结果写入本次 `.runtime/test-results/desktop-host.md`，包含当前平台、客户端/CLI/注入器实际生效版本、时间、实际工具名、任务/调用 ID、独立结果与限制；不写凭据或真实业务正文。
+先完成 `npm run test:offline`，再根据模型展示 `npm run test:live:official -- --plan` 或 `npm run test:live:deepseek -- --plan` 并取得该批次的当次明确同意。按下面的固定步骤验收。每项结果写入本次 `.runtime/test-results/desktop-host.md`，包含 B1/B2 归属、当前平台、客户端/CLI/注入器实际生效版本、时间、实际工具名、任务/调用 ID、独立结果与限制；不写凭据或真实业务正文。
 
 ## 先确认被测版本和实际可用能力
 

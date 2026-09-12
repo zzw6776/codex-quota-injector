@@ -141,6 +141,7 @@ const report = createLifecycleReport({
     "final-state",
   ],
   metadata: {
+    batch: plan.batch,
     mode: "launchd-one-shot",
     sourceSnapshot: free.snapshot,
     initialHost: plan.host,

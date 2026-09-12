@@ -124,15 +124,16 @@ npm run preview
 npm test
 npm run test:coverage
 npm run test:offline
-npm run test:live -- --plan
+npm run test:live:official -- --plan
+npm run test:live:deepseek -- --plan
 npm run test:lifecycle -- --plan
 ```
 
 `npm test` 运行免费基础回归；`npm run test:offline` 在当前 macOS 或 Windows x64 上追加真实官方运行时和临时 Chrome/Edge 页面操作，不消耗模型 Token。两种平台都使用临时配置、测试凭据和本地模型端点；macOS 额外使用 Seatbelt 限制出站。若请求没有到达本地端点，测试会失败。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI 和浏览器摘要。
 
-`npm run test:live -- --plan` 只查看当前配置的真实测试计划。免费测试通过并获得当次明确同意后，运行 `npm run test:live -- --confirm-token-use`；需要真实唤醒时追加 `--wakeup`。这批测试使用当前账号及启用的供应商，验证实际模型的工具执行、历史、压缩、图片和交互；不切换账号或重启日常 Codex。桌面特有工具按[宿主验收步骤](docs/testing-desktop-host.md)另外核对，不能把后台通过当作整个主入口通过。
+测试固定分为三批。A 为 `npm run test:offline` 免费回归，代码、配置或测试修改完成后默认自动执行。A 通过后应主动展示后续计划并询问用户：B1 用 `npm run test:live:official -- --plan`/`--confirm-token-use` 只测 Codex 官方模型，B2 用 `npm run test:live:deepseek -- --plan`/`--confirm-token-use` 只测 DeepSeek。B1、B2 分别授权、分别报告，不切换账号或重启日常 Codex；桌面特有工具按[宿主验收步骤](docs/testing-desktop-host.md)归入当前模型对应批次。
 
-`npm run test:lifecycle -- --plan` 只读核对正式包、进程、中继协议和账号条件；`--confirm-restart` 才会执行安装、接管、重连、关闭重开和账号往返。测试开始前会在独立浏览器页实时显示步骤，macOS 由 launchd 监督，Windows 由任务计划程序监督，因此 Codex 被关闭后控制程序仍能继续记录和恢复。
+C 为 `npm run test:lifecycle -- --plan`，只读核对正式包、进程、中继协议、账号条件和计划中的一次官方冒烟；单独获得当次同意后，`--confirm-restart` 才会执行安装、接管、重连、关闭重开和账号往返。测试开始前会在独立浏览器页实时显示步骤，macOS 由 launchd 监督，Windows 由任务计划程序监督，因此 Codex 被关闭后控制程序仍能继续记录和恢复。
 
 ## 限制
 

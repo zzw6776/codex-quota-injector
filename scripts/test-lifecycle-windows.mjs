@@ -157,6 +157,7 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
       "final-state",
     ],
     metadata: {
+      batch: plan.batch,
       mode: "windows-task-scheduler-one-shot",
       sourceSnapshot: free.snapshot,
       initialHost: plan.host,

@@ -8,7 +8,7 @@ import {
 import { RESULTS, ROOT, runtimeSnapshot, scenarioCoverage, sourceSnapshot, writeReport } from "./test-support.mjs";
 
 await mkdir(RESULTS, { recursive: true });
-const report = { status: "running", batch: "offline", modelRequests: "scripted loopback service only", platform: process.platform,
+const report = { status: "running", batch: "A-free", modelRequests: "scripted loopback service only", platform: process.platform,
   arch: process.arch, node: process.version, startedAt: new Date().toISOString(), snapshot: await sourceSnapshot(),
   excluded: ["关闭或重启日常 Codex", "切换真实账号", "安装更新与进程接管"], tests: [] };
 const reportPath = join(RESULTS, "offline.json");
@@ -78,4 +78,8 @@ finally {
 report.finishedAt = new Date().toISOString();
 await writeReport(reportPath, report);
 console.log(`\n免费测试：${report.status}；报告：${reportPath}`);
+if (report.status === "passed") {
+  console.log("A 批已通过。下一步应主动向用户分别确认 B1 官方模型、B2 DeepSeek 和 C 生命周期；不得自动执行。");
+  console.log("计划命令：npm run test:live:official -- --plan；npm run test:live:deepseek -- --plan；npm run test:lifecycle -- --plan");
+}
 if (report.status !== "passed") process.exitCode = 1;

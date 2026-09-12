@@ -40,7 +40,7 @@ export async function createMacLifecyclePlan({
 } = {}) {
   const host = await inspectLifecycleHost({ installedApp, expectedProtocol });
   return {
-    batch: "lifecycle",
+    batch: "C-lifecycle",
     mode: "macos-external-supervisor",
     platform: process.platform,
     arch: process.arch,

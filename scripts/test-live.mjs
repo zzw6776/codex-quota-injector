@@ -27,13 +27,20 @@ if (stageFilter && !liveStageFiles.has(stageFilter)) {
 if (stageFilter && args.has("--wakeup")) throw new Error("单场景定向测试不能同时执行账号唤醒");
 const profiles = selectLiveProfiles(await liveProfiles(), profileFilter).map(publicProfile);
 const budget = liveBudget();
+const batch = profileFilter === "official"
+  ? "B1-official"
+  : profileFilter === "deepseek"
+    ? "B2-deepseek"
+    : profileFilter
+      ? "B-provider"
+      : "B-overview";
 const stageDescriptions = new Map([
   ["tools", "独立任务的文件、命令、补丁与 MCP 调用"],
   ["history", "独立短任务的历史恢复与分叉"],
   ["compaction", "独立短任务的显式压缩与压缩后历史恢复"],
   ["host", "独立任务的网页/浏览器宿主适配、用户输入、图片及官方原生搜索"],
 ]);
-const plan = { batch: "live", platform: process.platform, arch: process.arch, profiles,
+const plan = { batch, platform: process.platform, arch: process.arch, profiles,
   profileFilter, stageFilter,
   maxObservedTokensPerStage: budget.maxTokens, maxTurnsPerStage: budget.maxTurns,
   perProfile: stageFilter
@@ -41,11 +48,14 @@ const plan = { batch: "live", platform: process.platform, arch: process.arch, pr
     : [...stageDescriptions.values()],
   desktopHostChecks: "另按 docs/testing-desktop-host.md 由当前 Codex 调用实际 web.run、computer use 等宿主工具；独立 app-server 不具有这些桌面工具",
   wakeup: args.has("--wakeup"),
-  lifecycle: "关闭、重启、接管、安装更新和真实账号切换另由 npm run test:lifecycle 执行，仍属于 B",
+  lifecycle: "关闭、重启、接管、安装更新和真实账号切换另由 C 批 npm run test:lifecycle 执行",
   note: "每个隔离阶段分别应用 Token 与轮次阈值；按返回用量停止时，在途请求可能超出。任一阶段失败后停止后续付费阶段。" };
 console.log(JSON.stringify(plan, null, 2));
 if (args.has("--plan")) process.exit(0);
-if (!args.has("--confirm-token-use")) throw new Error("会消耗真实 Token。取得本次明确同意后，使用 npm run test:live -- --confirm-token-use；查看计划不会发送模型请求。");
+if (!args.has("--confirm-token-use")) throw new Error("会消耗真实 Token。先查看 B1/B2 计划并取得对应批次的本次明确同意；查看计划不会发送模型请求。");
+if (!profileFilter) {
+  throw new Error("付费测试必须分批指定 --profile=official 或 --profile=deepseek；不得一次执行全部供应商");
+}
 const free = await requireFreeResult();
 await mkdir(RESULTS, { recursive: true });
 const report = { ...plan, status: "running", startedAt: new Date().toISOString(), snapshot: free.snapshot, runtimeSnapshot: free.runtimeSnapshot };

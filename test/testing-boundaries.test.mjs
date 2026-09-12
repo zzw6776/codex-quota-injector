@@ -34,10 +34,12 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
   const directory = await useTempDir(t);
   const options = { cwd: ROOT, env: isolatedEnv(directory, { CODEX_TEST_CLI: join(directory, "must-not-start") }), timeout: 10000 };
   const plan = JSON.parse((await exec(process.execPath, ["scripts/test-live.mjs", "--plan"], options)).stdout);
+  assert.equal(plan.batch, "B-overview");
   assert.deepEqual(plan.profiles.map(p => p.id), ["official"]);
   const selectedPlan = JSON.parse((await exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=official"], options)).stdout);
   assert.equal(selectedPlan.profileFilter, "official");
+  assert.equal(selectedPlan.batch, "B1-official");
   assert.deepEqual(selectedPlan.profiles.map(p => p.id), ["official"]);
   assert.deepEqual(selectedPlan.perProfile, [
     "独立任务的文件、命令、补丁与 MCP 调用",
@@ -74,7 +76,11 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
     ...options, env: { ...options.env, CODEX_TEST_LIVE_MAX_TOKENS: "invalid" },
   }), error => { assert.match(error.stderr, /上限必须是正整数/); return true; });
   await assert.rejects(exec(process.execPath, ["scripts/test-live.mjs"], options), error => {
-    assert.match(error.stderr, /取得本次明确同意/); return true;
+    assert.match(error.stderr, /取得对应批次的本次明确同意/); return true;
+  });
+  await assert.rejects(exec(process.execPath,
+    ["scripts/test-live.mjs", "--confirm-token-use"], options), error => {
+    assert.match(error.stderr, /必须分批指定 --profile=official 或 --profile=deepseek/); return true;
   });
   const skipped = await exec(process.execPath, ["--test", "live-tests/tools.test.mjs", "live-tests/current-account-smoke.test.mjs",
     "live-tests/history.test.mjs", "live-tests/compaction.test.mjs", "live-tests/host.test.mjs"], options);

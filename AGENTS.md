@@ -5,10 +5,12 @@
 - 优先使用 CLI 操作。
 - 新增功能或改变既有行为时，必须新增或更新有意义的自动化测试，覆盖新增契约和真实失效机制；修复缺陷时必须补充能复现根因的回归测试。不得为追求数量或覆盖率添加只复述实现、没有业务断言、只覆盖极端低价值场景的测试。
 - 确实无法自动化的页面布局、系统交互或平台行为，应测试可分离的底层契约，并明确说明仍需人工确认的部分；不得用无意义测试代替。
-- 代码修改完成后，自动运行与改动相关且不消耗 Token 的测试。`test/*.test.mjs` 下的默认测试及 `npm test`、`npm run test:coverage` 均不使用真实账号、不消耗 Token，可直接作为日常回归运行；根据改动范围选择相关测试或完整 `npm test`，没有新改动或新疑点时不重复运行。
-- `npm run test:offline` 是当前平台完整的免费入口，包含上述回归、实际官方 app-server/生产 shim/Router 和隔离浏览器的点击、输入、截图测试；使用临时 HOME、测试凭据、本地服务及系统出站隔离，不操作日常 Codex。当前运行时适配器已适配 macOS；其他平台缺少适配时应报阻塞，不能静默跳过后标为通过。
-- 需要当前机器账号并会产生模型用量的测试必须与普通测试分开。`npm run test:live -- --plan` 只列本机配置和计划，不发送模型请求。实际 `npm run test:live -- --confirm-token-use` 会启动隔离的官方 app-server 并产生模型用量；必须先完成不消耗 Token 的自动测试，再询问用户是否执行，得到当次明确同意后才能运行。执行器要求当前代码、平台和运行时的免费通过报告；不得把此类测试加入 `npm test` 或 CI。
-- 真实桌面宿主的 web.run、computer use、Apps、语音、媒体和自动化按 `docs/testing-desktop-host.md` 验收；自有动态工具或后台 app-server 通过不能标为桌面主入口全部通过。关闭、重启、进程接管、安装更新和真实账号切换按用户约定最后处理。
+- 测试固定分为三个顶层批次：A 免费回归；B 消耗 Token 的真实模型验收，其中 B1 只测 Codex 官方模型、B2 只测 DeepSeek；C 涉及关闭或重启 Codex 的生命周期验收。三个批次的报告和通过结论必须分开，旧版本或另一平台的结果不能继承。
+- A 批入口为 `npm run test:offline`，包含 `npm test`、实际官方 app-server、当前平台生产中继/Router、临时浏览器的点击、输入和截图；使用临时 HOME、测试凭据和本地可观测模型端点，不操作日常账号或消耗模型 Token。除纯文档且不改变测试规则或行为的修改外，代码、配置或测试完成后默认自动运行完整 A，不询问用户；定向免费测试只能用于开发中快速定位，不能代替最终 A。当前适配器支持 macOS 与 Windows x64；其他平台缺少适配时必须报告阻塞。
+- A 批通过后，必须主动展示并区分 B1、B2、C 的计划，询问用户分别执行哪些批次，不等待用户追问。计划命令不发送模型请求也不重启：`npm run test:live:official -- --plan`、`npm run test:live:deepseek -- --plan`、`npm run test:lifecycle -- --plan`。可以在同一条消息中并列询问，但用户答复必须能明确区分三个范围；A 失败或报告已过期时先修复并重跑 A，不执行后续批次。
+- B1 使用 `npm run test:live:official -- --confirm-token-use`，B2 使用 `npm run test:live:deepseek -- --confirm-token-use`。两批分别使用当前机器账号或供应商 Key 并产生模型用量，必须分别取得本次明确同意；同意其中一批不代表同意另一批，也不沿用以前对后续付费测试的概括授权。执行器必须拒绝未指定 profile 的付费执行，并要求当前代码、平台和运行时对应的 A 通过报告。TokenHub 或其他供应商不并入 B1/B2，只有用户另行点名后才单独计划。
+- C 使用 `npm run test:lifecycle -- --confirm-restart`，必须最后执行并单独取得本次明确同意。C 会构建或安装正式包、接管进程、关闭重开 Codex、验证单实例和中继重连，并在条件满足时切换/恢复真实账号和发送一次已在计划中披露的官方模型冒烟。调度前必须成功打开独立的实时报告页面；macOS 由 launchd、Windows 由任务计划程序监督，保证 Codex 关闭后仍能继续记录、回滚和显示最终状态。
+- 真实桌面宿主的 web.run、computer use、Apps、语音、媒体和自动化按 `docs/testing-desktop-host.md` 归入其所使用模型对应的 B1 或 B2；自有动态工具或后台 app-server 通过不能标为桌面主入口全部通过。审批允许/拒绝弹窗不属于测试项，项目固定使用 `never` 策略。
 - 禁止轮询、持续等待或使用 watch 命令跟踪 GitHub Actions、Release 或其他 CI/CD 任务；触发任务后应立即向用户提供对应的 GitHub 页面链接，由用户自行查看进度和结果。
 - 每次提交代码、配置或文档改动前都必须升级项目版本号，并同步修改 `package.json` 与 `package-lock.json`；用户未指定版本时默认递增补丁版本。GitHub 安装包文件名、Release 标签和 Release 标题必须以该项目版本号为准。
 

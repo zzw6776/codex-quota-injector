@@ -61,7 +61,7 @@ export async function createWindowsLifecyclePlan({
     ? "ready"
     : "blocked-missing-native-relay";
   return {
-    batch: "lifecycle",
+    batch: "C-lifecycle",
     mode: "windows-task-scheduler-supervisor",
     platform: process.platform,
     arch: process.arch,
