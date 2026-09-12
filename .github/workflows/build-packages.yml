@@ -203,6 +203,15 @@ jobs:
             --node-binary "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/node.exe" `
             --output "build/native/Codex Quota Injector.exe"
 
+      - name: Build dedicated native Windows relay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageVersion = (& node -p "require('./package.json').version").Trim()
+          npm run build:relay:windows -- `
+            --node "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/node.exe" `
+            --output "build/native/codex-quota-relay-windows-$packageVersion.exe"
+
       - name: Install NSIS
         shell: pwsh
         run: |
@@ -251,10 +260,67 @@ jobs:
           $packageVersion = (& node -p "require('./package.json').version").Trim()
           npm run package:windows -- `
             --input-executable "build/native/Codex Quota Injector.exe" `
+            --windows-relay-executable "build/native/codex-quota-relay-windows-$packageVersion.exe" `
             --wsl-relay-executable "build/native/codex-quota-relay-wsl-$packageVersion" `
             --node-license "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/LICENSE" `
             --output-dir "release/windows" `
             --makensis "$env:MAKENSIS_PATH"
+
+      - name: Smoke test Windows install and dedicated relay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageVersion = (& node -p "require('./package.json').version").Trim()
+          $setup = (Resolve-Path "release/windows/Codex-Quota-Injector-$packageVersion-windows-x64-Setup.exe").Path
+          $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Codex Quota Injector"
+          $install = Start-Process -FilePath $setup -ArgumentList "/S" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Windows Setup exited with $($install.ExitCode)" }
+
+          $main = Join-Path $installRoot "Codex Quota Injector.exe"
+          $relay = Join-Path $installRoot "relay\codex-quota-relay-windows-$packageVersion.exe"
+          $wslRelay = Join-Path $installRoot "relay\codex-quota-relay-wsl-$packageVersion"
+          foreach ($path in @($main, $relay, $wslRelay)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing installed artifact: $path" }
+          }
+
+          $configRoot = Join-Path $env:APPDATA "Codex Quota Injector"
+          New-Item -ItemType Directory -Force -Path $configRoot | Out-Null
+          $node = (Get-Command node.exe).Source
+          @{ upstreamExecutable = $node } |
+            ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $configRoot "app-server-relay-config.json") -Encoding utf8
+          $probe = Join-Path $env:RUNNER_TEMP "windows-relay-probe.mjs"
+          @'
+          process.stdout.write(JSON.stringify({
+            args: process.argv.slice(2),
+            cliPath: process.env.CODEX_CLI_PATH ?? null,
+            role: process.env.CODEX_QUOTA_ROLE ?? null,
+            config: process.env.CODEX_QUOTA_RELAY_CONFIG ?? null,
+            native: process.env.CODEX_QUOTA_WINDOWS_NATIVE ?? null,
+          }));
+          '@ | Set-Content -LiteralPath $probe -Encoding utf8
+          $env:CODEX_QUOTA_ROLE = "stale-parent-value"
+          Remove-Item Env:CODEX_QUOTA_RELAY_CONFIG -ErrorAction SilentlyContinue
+          $observed = (& $relay $probe probe | Out-String) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Dedicated relay exited with $LASTEXITCODE" }
+          if (($observed.args -join ',') -ne "probe" -or $observed.cliPath -ne $node -or
+              $observed.role -or $observed.config -or $observed.native) {
+            throw "Dedicated relay did not recover or clear its native configuration"
+          }
+
+          $reinstall = Start-Process -FilePath $setup -ArgumentList "/S" -Wait -PassThru
+          if ($reinstall.ExitCode -ne 0) { throw "Same-version reinstall exited with $($reinstall.ExitCode)" }
+          foreach ($path in @($main, $relay, $wslRelay)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Same-version reinstall removed artifact: $path" }
+          }
+          $uninstaller = Join-Path $installRoot "Uninstall.exe"
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Windows uninstall exited with $($uninstall.ExitCode)" }
+          $uninstallDeadline = [DateTime]::UtcNow.AddSeconds(10)
+          while ((Test-Path -LiteralPath $main) -and [DateTime]::UtcNow -lt $uninstallDeadline) {
+            Start-Sleep -Milliseconds 200
+          }
+          if (Test-Path -LiteralPath $main) { throw "Windows uninstall left the main executable behind" }
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4

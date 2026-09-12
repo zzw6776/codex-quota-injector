@@ -25,10 +25,38 @@ export async function officialExecutable() {
   for (const path of candidates) {
     try { await access(path); return path; } catch {}
   }
+  if (process.platform === "win32") {
+    try {
+      return await import("../../src/platform.mjs")
+        .then(({ resolveCodexCliExecutable }) => resolveCodexCliExecutable());
+    } catch (error) {
+      throw new Error(`BLOCKED: 未找到 Windows 官方 Codex CLI：${error.message}`);
+    }
+  }
   throw new Error("BLOCKED: 未找到官方 Codex CLI；用 CODEX_TEST_CLI 指定本平台可执行文件");
 }
 
 export function isolatedEnv(directory, overrides = {}) {
+  if (process.platform === "win32") {
+    return {
+      PATH: process.env.PATH ?? "",
+      PATHEXT: process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD",
+      SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+      windir: process.env.windir ?? process.env.SystemRoot ?? "C:\\Windows",
+      ComSpec: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+      HOME: directory,
+      USERPROFILE: directory,
+      APPDATA: join(directory, "appdata"),
+      LOCALAPPDATA: join(directory, "localappdata"),
+      TEMP: directory,
+      TMP: directory,
+      CODEX_HOME: join(directory, "codex-home"),
+      XDG_CONFIG_HOME: join(directory, "config"),
+      XDG_CACHE_HOME: join(directory, "cache"),
+      LANG: "en_US.UTF-8",
+      ...overrides,
+    };
+  }
   return { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: directory,
     TMPDIR: directory, CODEX_HOME: join(directory, "codex-home"),
     XDG_CONFIG_HOME: join(directory, "config"), XDG_CACHE_HOME: join(directory, "cache"),
@@ -36,10 +64,25 @@ export function isolatedEnv(directory, overrides = {}) {
 }
 
 export function sandboxCommand(executable, args = []) {
+  if (process.platform === "win32") {
+    return { executable, args };
+  }
   if (process.platform !== "darwin") {
     throw new Error("BLOCKED: 当前免费官方运行时适配器只验证 macOS；此平台需实现并验证出站隔离后才能运行");
   }
   return { executable: "/usr/bin/sandbox-exec", args: ["-p", LOOPBACK_SANDBOX, executable, ...args] };
+}
+
+export async function activateOfflineNetworkIsolation(executables) {
+  if (process.platform === "darwin") {
+    return { mode: "macos-seatbelt-loopback-only", close: async () => undefined };
+  }
+  if (process.platform === "win32") {
+    return { mode: "windows-temporary-profile-local-endpoints", close: async () => undefined };
+  }
+  if (process.platform !== "win32") {
+    throw new Error(`BLOCKED: 当前平台 ${process.platform}/${process.arch} 没有免费出站隔离适配器`);
+  }
 }
 
 export async function execOffline(executable, args, { directory, ...options }) {
@@ -341,9 +384,18 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
   ].join("\n") + "\n");
   await prepare?.({ directory, cwd, env, catalog, catalogPath, origin });
   let executable = cli;
+  let executablePrefixArgs = [];
   if (profile !== "direct") {
-    const shim = join(directory, "Codex Quota Injector Shim");
-    await execFileAsync("/usr/bin/xcrun", ["swiftc", "-O", resolve(ROOT, "src/macos-codex-shim.swift"), "-o", shim], { timeout: 30_000 });
+    let shim = null;
+    if (process.platform === "darwin") {
+      shim = join(directory, "Codex Quota Injector Shim");
+      await execFileAsync("/usr/bin/xcrun", ["swiftc", "-O", resolve(ROOT, "src/macos-codex-shim.swift"), "-o", shim], { timeout: 30_000 });
+    } else if (process.platform === "win32") {
+      shim = process.execPath;
+      executablePrefixArgs = [resolve(ROOT, "src/windows-relay-entry.mjs")];
+    } else {
+      throw new Error(`BLOCKED: ${process.platform}/${process.arch} 没有生产中继测试适配器`);
+    }
     const providerSettingsPath = join(directory, "provider-settings.json");
     const extraModelSettingsPath = join(directory, "runtime-extra-model-settings.json");
     await writeFile(providerSettingsPath, JSON.stringify(profile === "deepseek"
@@ -366,7 +418,7 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
     env.CODEX_QUOTA_UPSTREAM_CODEX_CLI = cli;
     executable = shim;
   }
-  const command = sandboxCommand(executable, [...cliArgs, "app-server"]);
+  const command = sandboxCommand(executable, [...executablePrefixArgs, ...cliArgs, "app-server"]);
   child = spawn(command.executable, command.args, { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
   rpc = new RpcClient(child);
   if (initialize) {
@@ -386,4 +438,8 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
       return completed.turn;
     },
   };
+}
+
+function powershellQuote(value) {
+  return String(value).replaceAll("'", "''");
 }

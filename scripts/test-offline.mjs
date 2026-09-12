@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { sandboxCommand } from "../runtime-tests/support/offline-runtime.mjs";
+import {
+  activateOfflineNetworkIsolation,
+  sandboxCommand,
+} from "../runtime-tests/support/offline-runtime.mjs";
 import { RESULTS, ROOT, runtimeSnapshot, scenarioCoverage, sourceSnapshot, writeReport } from "./test-support.mjs";
 
 await mkdir(RESULTS, { recursive: true });
@@ -10,8 +13,14 @@ const report = { status: "running", batch: "offline", modelRequests: "scripted l
   excluded: ["关闭或重启日常 Codex", "切换真实账号", "安装更新与进程接管"], tests: [] };
 const reportPath = join(RESULTS, "offline.json");
 await writeReport(reportPath, report);
+let networkIsolation = null;
 try {
   report.runtimeSnapshot = await runtimeSnapshot();
+  networkIsolation = await activateOfflineNetworkIsolation([
+    process.execPath,
+    report.runtimeSnapshot.cli?.path,
+    report.runtimeSnapshot.browser?.path,
+  ]);
   const events = [];
   const summaries = [];
   const exits = [];
@@ -51,10 +60,21 @@ try {
   report.status = exits.length === 2 && exits.every(e => e.code === 0) && report.tests.length > 0 && !report.tests.some(t => t.status === "failed") ? "passed" : "failed";
   if (report.status === "passed" && report.tests.some(t => t.status === "skipped")) report.status = "incomplete";
   report.exits = exits;
-  report.isolation = { contracts: "temporary fixtures; no real credentials or models", runtime: "OS loopback network and local Unix IPC only" };
+  report.isolation = {
+    contracts: "temporary fixtures; no real credentials or models",
+    runtime: networkIsolation.mode,
+  };
   if ((await sourceSnapshot()).sha256 !== report.snapshot.sha256) { report.status = "stale"; report.error = "测试期间代码发生变化，不能作为当前代码的通过报告"; }
   if (JSON.stringify(await runtimeSnapshot()) !== JSON.stringify(report.runtimeSnapshot)) { report.status = "stale"; report.error = "测试期间官方 CLI 或浏览器发生变化"; }
 } catch (error) { report.status = "blocked"; report.error = error.message; }
+finally {
+  if (networkIsolation) {
+    await networkIsolation.close().catch((error) => {
+      report.status = "blocked";
+      report.error = `临时出站隔离清理失败：${error.message}`;
+    });
+  }
+}
 report.finishedAt = new Date().toISOString();
 await writeReport(reportPath, report);
 console.log(`\n免费测试：${report.status}；报告：${reportPath}`);

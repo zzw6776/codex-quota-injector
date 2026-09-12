@@ -1,7 +1,7 @@
 {
   "capturedOn": "2026-09-12",
   "purpose": "协议盘点；不是测试通过报告或桌面工具能力清单",
-  "projectVersionAtInspection": "0.1.203",
+  "projectVersionAtInspection": "0.1.204",
   "desktopVersion": "26.908.40834",
   "cliVersion": "0.154.0-alpha.6.2",
   "source": "installed official desktop Resources/codex",
@@ -675,7 +675,7 @@
       {
         "messageType": "ClientRequest",
         "method": "thread/approveGuardianDeniedAction",
-        "scenario": "INT-01"
+        "scenario": "RPC-02"
       },
       {
         "messageType": "ClientRequest",
@@ -1310,12 +1310,12 @@
       {
         "messageType": "ServerRequest",
         "method": "item/commandExecution/requestApproval",
-        "scenario": "INT-01"
+        "scenario": "RPC-02"
       },
       {
         "messageType": "ServerRequest",
         "method": "item/fileChange/requestApproval",
-        "scenario": "INT-01"
+        "scenario": "RPC-02"
       },
       {
         "messageType": "ServerRequest",
@@ -1330,7 +1330,7 @@
       {
         "messageType": "ServerRequest",
         "method": "item/permissions/requestApproval",
-        "scenario": "INT-01"
+        "scenario": "RPC-02"
       },
       {
         "messageType": "ServerRequest",
@@ -1355,12 +1355,12 @@
       {
         "messageType": "ServerRequest",
         "method": "applyPatchApproval",
-        "scenario": "INT-01"
+        "scenario": "RPC-02"
       },
       {
         "messageType": "ServerRequest",
         "method": "execCommandApproval",
-        "scenario": "INT-01"
+        "scenario": "RPC-02"
       },
       {
         "messageType": "ClientNotification",

@@ -7,8 +7,12 @@ import { isSea } from "node:sea";
 // or the SEA packaging format cannot distinguish an app launch from a CLI call.
 const explicitStartRequested = process.argv.length === 3 &&
   process.argv[2] === "--explicit-start";
+const updatePreparationRequested = process.argv.length === 3 &&
+  process.argv[2] === "--prepare-update";
 
-if (process.platform === "darwin" && explicitStartRequested) {
+if (updatePreparationRequested) {
+  void runUpdatePreparation();
+} else if (process.platform === "darwin" && explicitStartRequested) {
   void runLauncher();
 } else if (
   process.env.CODEX_QUOTA_ROLE === "app-server-relay" ||
@@ -22,6 +26,19 @@ if (process.platform === "darwin" && explicitStartRequested) {
     });
 } else {
   void runLauncher();
+}
+
+async function runUpdatePreparation() {
+  try {
+    if (process.platform !== "win32" || !isSea()) {
+      throw new Error("安装接管只能由 Windows 正式包执行");
+    }
+    const { prepareWindowsUpdate } = await import("./windows-update.mjs");
+    await prepareWindowsUpdate({ version: String(packageJson.version ?? "0.0.0") });
+  } catch (error) {
+    console.error(`[windows-update] ${error?.stack ?? error}`);
+    process.exitCode = 1;
+  }
 }
 
 async function runLauncher() {

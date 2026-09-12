@@ -29,6 +29,13 @@ import { requireFreeResult, RESULTS, ROOT, sourceSnapshot } from "./test-support
 const execFileAsync = promisify(execFile);
 const lifecycleRoot = join(RESULTS, "lifecycle");
 const latestPath = join(lifecycleRoot, "latest.json");
+
+if (process.platform === "win32") {
+  const { runWindowsLifecycleCli } = await import("./test-lifecycle-windows.mjs");
+  await runWindowsLifecycleCli(process.argv.slice(2));
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const statusArgument = argv.find((arg) => arg === "--status" || arg.startsWith("--status="));
 const resumeArgument = argv.find((arg) => arg.startsWith("--resume="));

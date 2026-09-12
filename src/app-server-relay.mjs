@@ -3,6 +3,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -46,9 +47,14 @@ const execFileAsync = promisify(execFile);
 
 export async function runAppServerRelay() {
   const wslNative = process.env.CODEX_QUOTA_WSL_NATIVE === "1";
+  const windowsNative = process.env.CODEX_QUOTA_WINDOWS_NATIVE === "1";
   const configuredRelayPath = String(process.env.CODEX_QUOTA_RELAY_CONFIG ?? "").trim();
   const relayConfigPath = await resolveRelayPath(
-    configuredRelayPath || (wslNative ? await resolveNativeWslRelayConfigPath() : ""),
+    configuredRelayPath || (wslNative
+      ? await resolveNativeWslRelayConfigPath()
+      : windowsNative
+        ? resolveNativeWindowsRelayConfigPath()
+        : ""),
   );
   const relayConfig = await readJson(relayConfigPath);
   const nativeWslUpstream = wslNative
@@ -1196,6 +1202,12 @@ async function resolveNativeWslRelayConfigPath() {
   return join(appDataRoot, "Codex Quota Injector", "app-server-relay-config.json");
 }
 
+function resolveNativeWindowsRelayConfigPath() {
+  const appDataRoot = String(process.env.APPDATA ?? "").trim() ||
+    join(homedir(), "AppData", "Roaming");
+  return join(appDataRoot, "Codex Quota Injector", "app-server-relay-config.json");
+}
+
 async function resolveNativeWslCodexCli() {
   try {
     const { stdout } = await execFileAsync("sh", ["-c", "command -v codex"]);
@@ -1298,6 +1310,7 @@ function clearRelayEnvironment(env) {
     "CODEX_QUOTA_BRIDGE_GENERATION",
     "CODEX_QUOTA_WSL_NATIVE",
     "CODEX_QUOTA_WSL_UPSTREAM_CODEX_CLI",
+    "CODEX_QUOTA_WINDOWS_NATIVE",
   ]) {
     delete env[key];
   }

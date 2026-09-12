@@ -34,7 +34,7 @@ test("[A MOD-03 SES-01 SES-02 SES-06] DeepSeek Responses 的恢复、分叉和�
   const r = await startRuntime(t, { profile: "deepseek" });
   r.enqueue(
     [reasoning("FIRST_PRIVATE_REASONING"),
-      customCall("exec", 'text(await tools.exec_command({cmd:"/bin/echo FIRST_TOOL",login:false}));')],
+      customCall("exec", `text(await tools.exec_command({cmd:${JSON.stringify(process.platform === "win32" ? "Write-Output FIRST_TOOL" : "/bin/echo FIRST_TOOL")},login:false}));`)],
     body => {
       assert.match(JSON.stringify(body.input), /FIRST_TOOL/);
       assertDeepSeekReasoningHistory(body);

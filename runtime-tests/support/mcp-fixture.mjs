@@ -8,7 +8,7 @@ const pending = new Map();
 const send = value => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...value })}\n`);
 const reply = (id, result) => send({ id, result });
 const content = text => ({ content: [{ type: "text", text }] });
-const tools = ["record", "fail", "ask"].map(name => ({ name, description: `Offline fixture ${name}`,
+const tools = ["record", "read", "fail", "ask"].map(name => ({ name, description: `Offline fixture ${name}`,
   inputSchema: { type: "object", properties: { text: { type: "string" } } }, annotations: { readOnlyHint: name !== "record", destructiveHint: false } }));
 const lines = createInterface({ input: process.stdin });
 lines.on("line", async line => {
@@ -35,6 +35,7 @@ lines.on("line", async line => {
         send({ method: "notifications/resources/updated", params: { uri: "fixture://marker" } });
         return reply(value.id, content(await readFile(marker, "utf8")));
       }
+      if (name === "read") return reply(value.id, content(await readFile(marker, "utf8")));
       if (name === "fail") return reply(value.id, { ...content("EXPECTED_TOOL_ERROR"), isError: true });
       if (name === "ask") {
         const id = `elicitation-${value.id}`;

@@ -73,7 +73,7 @@ export async function prepareCodexLaunch({
       staticModelCatalog: false,
     };
   }
-  const defaultInjectionMode = resolveInjectionMode();
+  const defaultInjectionMode = await resolveDefaultInjectionMode();
   const statePath = join(defaultAccountDataDir(), "app-server-relay-state.json");
   const tokenUsageEventPath = join(defaultAccountDataDir(), "token-usage-events.jsonl");
   const relayConfigPath = join(defaultAccountDataDir(), "app-server-relay-config.json");
@@ -127,20 +127,29 @@ export async function prepareCodexLaunch({
       deepSeek,
       extraModels: routingExtraModels,
     });
-    if (process.platform === "darwin") {
-      if (!staticModelCatalog) {
-        await modelRouterManager?.disable();
-        return {
-          env: {},
-          relay: { statePath, expectAbsent: true, wslNative: false },
-          injectionMode: null,
-          ...officialCatalog,
-          staticModelCatalog: false,
-        };
-      }
+    const bridgeMode = selectBridgeMode({
+      platform: process.platform,
+      staticModelCatalog,
+      customRoutingRequired,
+    });
+    if (bridgeMode === "direct") {
+      await modelRouterManager?.disable();
+      return {
+        env: {},
+        relay: {
+          statePath,
+          expectAbsent: true,
+          wslNative: defaultInjectionMode === "wsl",
+        },
+        injectionMode: defaultInjectionMode,
+        ...officialCatalog,
+        staticModelCatalog: false,
+      };
+    }
+    if (bridgeMode === "macos-shim" || bridgeMode === "macos-router") {
       relayExecutable = await resolveMacOSCodexShim();
       await access(relayExecutable, fsConstants.X_OK);
-      if (customRoutingRequired) {
+      if (bridgeMode === "macos-router") {
         if (!modelRouterManager) throw new Error("macOS 自定义模型路由器未初始化");
         router = await modelRouterManager.configure({
           deepSeek,
@@ -252,6 +261,15 @@ export async function prepareCodexLaunch({
   };
 }
 
+export function selectBridgeMode({ platform, staticModelCatalog, customRoutingRequired }) {
+  if (platform !== "darwin" && platform !== "win32") return "unsupported";
+  if (!staticModelCatalog) return "direct";
+  if (platform === "darwin") {
+    return customRoutingRequired ? "macos-router" : "macos-shim";
+  }
+  return "windows-relay";
+}
+
 function requiresCustomRouting({ deepSeek, extraModels }) {
   return Boolean(deepSeek?.enabled && deepSeek?.configured && deepSeek?.apiKey) ||
     extraModels?.platforms?.some((platform) =>
@@ -289,6 +307,14 @@ function resolveInjectionMode(relayExecutable = process.env.CODEX_QUOTA_RELAY_EX
   return isWslNativeRelay(relayExecutable) ? "wsl" : "windows";
 }
 
+async function resolveDefaultInjectionMode() {
+  if (process.platform !== "win32") return null;
+  if (process.env.CODEX_QUOTA_RELAY_EXECUTABLE) {
+    return resolveInjectionMode(process.env.CODEX_QUOTA_RELAY_EXECUTABLE);
+  }
+  return await codexRunsInWindowsSubsystemForLinux() ? "wsl" : "windows";
+}
+
 function isWslNativeRelay(relayExecutable) {
   return process.platform === "win32" &&
     /^codex-quota-relay-wsl-\d+\.\d+\.\d+$/i.test(basename(String(relayExecutable ?? "")));
@@ -308,6 +334,13 @@ async function resolveRelayExecutable() {
       );
       // ELF 与 SEA fuse 已在构建及打包阶段校验；运行时只检查安装文件是否存在。
       return bundledWslRelay;
+    }
+    if (process.platform === "win32") {
+      return resolve(
+        dirname(process.execPath),
+        "relay",
+        `codex-quota-relay-windows-${packageJson.version}.exe`,
+      );
     }
     return process.execPath;
   }

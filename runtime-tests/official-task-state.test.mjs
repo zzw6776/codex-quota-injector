@@ -11,7 +11,10 @@ test("[A SES-08 OBS-01] 官方目标实际执行文件任务并完成，完成�
     async () => {
       const { goal } = await r.rpc.request("thread/goal/get", { threadId: thread.id });
       assert.equal(goal.status, "active");
-      return [call("exec_command", { cmd: "printf GOAL_EXECUTED > goal.txt", workdir: r.cwd, login: false })];
+      const command = process.platform === "win32"
+        ? "Set-Content -NoNewline -LiteralPath goal.txt -Value GOAL_EXECUTED"
+        : "printf GOAL_EXECUTED > goal.txt";
+      return [call("exec_command", { cmd: command, workdir: r.cwd, login: false })];
     }, async () => {
       assert.equal(await readFile(join(r.cwd, "goal.txt"), "utf8"), "GOAL_EXECUTED");
       return [call("update_goal", { status: "complete" })];

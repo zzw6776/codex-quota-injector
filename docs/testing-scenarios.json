@@ -12,7 +12,7 @@
         "runtime-tests/desktop-fixture.test.mjs",
         "runtime-tests/official-workflows.test.mjs"
       ],
-      "note": "临时配置、测试凭据、内核出站限制及仅回收自己创建的子进程；日常客户端关闭后的存活另见 HAR-02。"
+      "note": "临时配置、测试凭据、本地测试端点及仅回收自己创建的子进程；请求未到本地端点或出现外网/认证错误时直接失败。日常客户端关闭后的存活另见 HAR-02。"
     },
     {
       "ids": [
@@ -137,7 +137,7 @@
         "test/live-web-search-contract.test.mjs"
       ],
       "live": "backend",
-      "note": "发现、命令/PTY/文件/补丁/MCP/原生网页搜索实际执行、错误和续接；免费回归证明写入型 MCP 在 never 下被拒且无副作用、在隔离审批后执行；真实 MCP 先查就绪并直调预检，再由独立模型轮次调用，审批仅接受精确匹配的测试标记，结果有独立文件、官方事件和服务断言；网页搜索同时要求官方事件和指向 OpenAI 文档站或 openai/codex 仓库的 app-server 链接。"
+      "note": "发现、命令/PTY/文件/补丁/MCP/原生网页搜索实际执行、错误和续接；免费回归证明写入型 MCP 在 never 下被拒且无副作用，并以只读 MCP 分别完成直调和模型驱动调用；真实 MCP 同样先查就绪、直调预检，再由独立模型轮次调用只读工具，结果有独立文件、官方事件和服务断言；网页搜索同时要求官方事件和指向 OpenAI 文档站或 openai/codex 仓库的 app-server 链接。"
     },
     {
       "ids": [
@@ -156,14 +156,13 @@
     },
     {
       "ids": [
-        "INT-01",
         "INT-02"
       ],
       "free": [
         "runtime-tests/official-interactions.test.mjs"
       ],
       "live": "backend+host",
-      "note": "真实命令同意/拒绝、Plan 用户输入、MCP elicitation；桌面实际呈现属于 B。"
+      "note": "Plan 用户输入的请求、回答、取消与续接；MCP elicitation 在 never 策略下直接终结。桌面实际呈现属于 B。"
     },
     {
       "ids": [
@@ -325,7 +324,7 @@
         "test/runtime-contracts.test.mjs"
       ],
       "live": "host",
-      "note": "实际 Chrome/CDP 注入、点击/输入/表单到管理器、尺寸/主题/任务 DOM 变化；macOS 临时浏览器使用模拟钥匙串，不提示或读取日常 Chrome 钥匙串；日常桌面窗口与真实宿主状态仍由 B 核对。"
+      "note": "实际 Chrome/Edge CDP 注入、点击/输入/表单到管理器、尺寸/主题/任务 DOM 变化；浏览器使用临时用户目录，macOS 额外使用模拟钥匙串；日常桌面窗口与真实宿主状态仍由 B 核对。"
     }
   ]
 }

@@ -86,7 +86,7 @@ h1{font-size:24px;margin:0 0 8px}.sub{color:#667085;margin-bottom:24px}.banner{p
 <section class="banner ${tone}"><strong>${escapeHtml(headline)}</strong>${failure ? `<div class="failure">${escapeHtml(failure)}</div>` : ""}</section>
 <div class="summary"><span>已通过 ${passedCount}/${report.steps.length}</span><span>总体状态：${escapeHtml(statusLabel(report.status))}</span>${report.ownerPid ? `<span>监督器 PID：${escapeHtml(report.ownerPid)}</span>` : ""}<span>最近更新：${escapeHtml(report.updatedAt ?? report.createdAt ?? "未知")}</span></div>
 <ol class="steps">${rows}</ol>
-<div class="footer">本页每秒从脱敏报告重新加载。Codex 在测试中会关闭或重启，本页留在 Safari 中继续显示；页面不参与测试判定。</div>
+<div class="footer">本页每秒从脱敏报告重新加载。Codex 在测试中会关闭或重启，本页留在${report.platform === "win32" ? "默认浏览器" : " Safari"}中继续显示；页面不参与测试判定。</div>
 </main></body></html>`;
 }
 

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { customCall, execOffline, officialExecutable, startRuntime } from "./support/offline-runtime.mjs";
 import { useTempDir } from "../test/helpers.mjs";
 const exec = promisify(execFile);
+const gitExecutable = process.platform === "win32" ? "git.exe" : "/usr/bin/git";
 
 test("[A RPC-02 RPC-04 INT-03 IO-04 ENV-02 SES-09] 官方协议升级检查要求重新盘点所有能力分支", { timeout: 30_000 }, async t => {
   const directory = await useTempDir(t);
@@ -38,7 +39,7 @@ test("[A INT-03] 官方用户验证状态通过隔离 shim 明确报告当前平
 test("[A EXT-02 MOD-06] 隔离的本地插件真实发现、安装、技能加载、停用和卸载", { timeout: 30_000 }, async t => {
   let marketplacePath;
   const r = await startRuntime(t, { profile: "shim", prepare: async ({ cwd }) => {
-    await exec("/usr/bin/git", ["init", "-q", cwd]);
+    await exec(gitExecutable, ["init", "-q", cwd]);
     const plugin = join(cwd, "plugins", "offline-fixture");
     await mkdir(join(plugin, ".codex-plugin"), { recursive: true });
     await mkdir(join(plugin, "skills", "plugin-marker"), { recursive: true });
@@ -67,10 +68,10 @@ test("[A EXT-02 MOD-06] 隔离的本地插件真实发现、安装、技能加�
 
 test("[A ENV-01 IO-02] 官方审查在临时 Git 工作树读取真实差异并返回审查结果", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "custom" });
-  await exec("/usr/bin/git", ["init", "-q", r.cwd]);
+  await exec(gitExecutable, ["init", "-q", r.cwd]);
   await writeFile(join(r.cwd, "review.txt"), "BEFORE_REVIEW\n");
-  await exec("/usr/bin/git", ["-C", r.cwd, "add", "review.txt"]);
-  await exec("/usr/bin/git", ["-C", r.cwd, "-c", "user.name=Offline Test", "-c", "user.email=offline@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"]);
+  await exec(gitExecutable, ["-C", r.cwd, "add", "review.txt"]);
+  await exec(gitExecutable, ["-C", r.cwd, "-c", "user.name=Offline Test", "-c", "user.email=offline@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"]);
   await writeFile(join(r.cwd, "review.txt"), "AFTER_REVIEW\n");
   const { thread } = await r.thread();
   r.enqueue([customCall("exec", 'text(await tools.exec_command({cmd:"git diff -- review.txt",login:false}));')], body => {

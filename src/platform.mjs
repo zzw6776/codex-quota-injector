@@ -177,11 +177,19 @@ export async function stopCodex({ timeoutMs = 5_000 } = {}) {
   if (processIds.length === 0) return;
 
   if (process.platform === "win32") {
-    await Promise.all(processIds.map((processId) =>
-      execFileAsync("taskkill.exe", ["/PID", String(processId), "/T", "/F"], {
-        windowsHide: true,
-      }).catch(() => undefined)
-    ));
+    let closeRequested = false;
+    try {
+      closeRequested = await requestWindowsCodexQuit({ processIds });
+    } catch (error) {
+      console.warn(`[platform] Codex 正常退出请求失败，将等待后强制终止：${error.message}`);
+    }
+    if (!closeRequested) {
+      await Promise.all(processIds.map((processId) =>
+        execFileAsync("taskkill.exe", ["/PID", String(processId), "/T"], {
+          windowsHide: true,
+        }).catch(() => undefined)
+      ));
+    }
   } else if (process.platform === "darwin") {
     try {
       await requestMacCodexQuit();
@@ -234,6 +242,32 @@ export async function requestMacCodexQuit({ execFileImpl = execFileAsync } = {})
     "-e",
     `tell application id "${MACOS_CODEX_BUNDLE_ID}" to quit`,
   ], { timeout: 5_000 });
+}
+
+export async function requestWindowsCodexQuit({
+  processIds,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const ids = [...new Set((processIds ?? [])
+    .map(Number)
+    .filter((value) => Number.isInteger(value) && value > 0))];
+  if (ids.length === 0) return false;
+  const script = `
+$requested=$false;
+foreach ($processId in @(${ids.join(",")})) {
+  $target=Get-Process -Id $processId -ErrorAction SilentlyContinue;
+  if ($target -and $target.MainWindowHandle -ne 0 -and $target.CloseMainWindow()) {
+    $requested=$true;
+  }
+}
+if ($requested) { Write-Output 'requested' }
+`;
+  const { stdout = "" } = await execFileImpl(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
+  );
+  return String(stdout).trim() === "requested";
 }
 
 function signalProcesses(processIds, signal) {
@@ -453,8 +487,12 @@ export async function codexRunsInWindowsSubsystemForLinux() {
   if (process.platform !== "win32") return false;
   const configPath = join(homedir(), ".codex", "config.toml");
   const contents = await readFile(configPath, "utf8").catch(() => "");
+  return parseWindowsSubsystemSetting(contents);
+}
+
+export function parseWindowsSubsystemSetting(contents) {
   let inDesktopSection = false;
-  for (const line of contents.split(/\r?\n/)) {
+  for (const line of String(contents ?? "").split(/\r?\n/)) {
     const trimmed = line.trim();
     const section = trimmed.match(/^\[([^\]]+)\]$/);
     if (section) {

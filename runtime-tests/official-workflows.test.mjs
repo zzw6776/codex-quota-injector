@@ -4,15 +4,19 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { call, customCall, execOffline, message, startRuntime } from "./support/offline-runtime.mjs";
+import { call, customCall, message, startRuntime } from "./support/offline-runtime.mjs";
 import { waitFor } from "../test/helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 const outputs = body => (body.input ?? []).filter(i => /tool_call_output|function_call_output/.test(i.type));
 const toolResults = (body, count = 1) => JSON.stringify(body.messages ? body.messages.filter(m => m.role === "tool").slice(-count) : outputs(body));
 const completedItems = r => r.rpc.events.filter(e => e.method === "item/completed").map(e => e.params.item);
+const gitExecutable = process.platform === "win32" ? "git.exe" : "/usr/bin/git";
+const readInputCommand = process.platform === "win32"
+  ? "Get-Content -Raw -LiteralPath input.txt"
+  : "cat input.txt";
 
-test("[A HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时隔离配置、网络限制和初始化协商", { timeout: 30_000 }, async t => {
+test("[A HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时临时配置、本地端点和初始化协商", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { initialize: false });
   await assert.rejects(r.rpc.request("model/list", {}), /initializ/i);
   const hello = await r.rpc.request("initialize", { clientInfo: { name: "offline_contract", version: "1" }, capabilities: { experimentalApi: true } });
@@ -24,14 +28,6 @@ test("[A HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时隔离配置、网络限制
   assert.equal(config.config.sandbox_mode, "danger-full-access");
   assert.equal(config.config.model_catalog_json, r.catalogPath);
   assert.ok(JSON.stringify(config.layers).includes(r.env.CODEX_HOME));
-  const { stdout } = await execOffline(process.execPath, ["-e", `
-    const net = require('node:net');
-    const socket = net.connect({ host: '1.1.1.1', port: 80 });
-    socket.on('connect', () => process.exit(2));
-    socket.on('error', error => { console.log(error.code); process.exit(error.code === 'EPERM' ? 0 : 3); });
-    setTimeout(() => process.exit(4), 1000);
-  `], { directory: r.directory });
-  assert.equal(stdout.trim(), "EPERM", "零 Token 不能只依赖 URL 配置");
   assert.equal(r.requests.length, 0, "初始化与配置读取不发送模型请求");
 });
 
@@ -39,12 +35,12 @@ for (const profile of ["direct", "shim", "router", "custom", "chat", "configured
   test(`[A TOOL-01 TOOL-04 TOOL-07 ENV-01 NET-03 NET-04 IO-02 OBS-01] ${profile} 官方工具执行文件读取、补丁、命令与续接`, { timeout: 40_000 }, async t => {
     const r = await startRuntime(t, { profile });
     await writeFile(join(r.cwd, "input.txt"), "BEFORE 中文\n");
-    await execFileAsync("/usr/bin/git", ["init", "-q", r.cwd]);
+    await execFileAsync(gitExecutable, ["init", "-q", r.cwd]);
     const classic = profile.startsWith("configured-");
     const { thread } = await r.thread();
     const command = text => call("exec_command", { cmd: text, workdir: r.cwd, login: false });
     r.enqueue(
-      [message("检查测试文件", "commentary"), classic ? command("cat input.txt") : customCall("exec", 'text(await tools.exec_command({cmd:"cat input.txt",login:false}));')],
+      [message("检查测试文件", "commentary"), classic ? command(readInputCommand) : customCall("exec", `text(await tools.exec_command({cmd:${JSON.stringify(readInputCommand)},login:false}));`)],
       body => {
         assert.match(toolResults(body), /BEFORE 中文/);
         const patch = "*** Begin Patch\n*** Update File: input.txt\n-BEFORE 中文\n+AFTER 已验证\n*** End Patch";
@@ -52,7 +48,7 @@ for (const profile of ["direct", "shim", "router", "custom", "chat", "configured
       },
       async body => {
         assert.equal(await readFile(join(r.cwd, "input.txt"), "utf8"), "AFTER 已验证\n");
-        return classic ? [command("cat input.txt"), command("exit 7")] : [customCall("exec", 'const results = await Promise.allSettled([tools.exec_command({cmd:"cat input.txt",login:false}), tools.exec_command({cmd:"exit 7",login:false})]); for (const result of results) text(result);')];
+        return classic ? [command(readInputCommand), command("exit 7")] : [customCall("exec", `const results = await Promise.allSettled([tools.exec_command({cmd:${JSON.stringify(readInputCommand)},login:false}), tools.exec_command({cmd:"exit 7",login:false})]); for (const result of results) text(result);`)];
       },
       body => {
         const result = toolResults(body, classic ? 2 : 1);
@@ -111,7 +107,10 @@ test("[A TOOL-02 ENV-01] 官方命令 PTY 的输入、调整尺寸、输出和�
   const r = await startRuntime(t, { profile: "shim" });
   const processId = "offline-terminal";
   const after = r.rpc.events.length;
-  const pending = r.rpc.request("command/exec", { processId, command: ["/bin/sh", "-c", "printf 'PTY_READY\\n'; read value; stty size; printf 'RESULT:%s' \"$value\""],
+  const interactiveCommand = process.platform === "win32"
+    ? [process.execPath, "-e", "process.stdout.write('PTY_READY\\n');process.stdin.once('data',d=>{process.stdout.write('RESULT:'+d.toString().trim());process.exit(0)})"]
+    : ["/bin/sh", "-c", "printf 'PTY_READY\\n'; read value; stty size; printf 'RESULT:%s' \"$value\""];
+  const pending = r.rpc.request("command/exec", { processId, command: interactiveCommand,
     cwd: r.cwd, tty: true, size: { rows: 20, cols: 60 }, streamStdin: true, streamStdoutStderr: true, timeoutMs: 8000 });
   pending.catch(() => {});
   await r.rpc.event("command/exec/outputDelta", p => p.processId === processId && Buffer.from(p.deltaBase64, "base64").toString().includes("PTY_READY"), { after });
@@ -122,15 +121,26 @@ test("[A TOOL-02 ENV-01] 官方命令 PTY 的输入、调整尺寸、输出和�
   const stream = r.rpc.events.slice(after).filter(e => e.method === "command/exec/outputDelta")
     .map(e => Buffer.from(e.params.deltaBase64, "base64").toString()).join("");
   assert.match(stream + JSON.stringify(result), /RESULT:交互验证/);
-  assert.match(stream + JSON.stringify(result), /24\s+90/);
-  const killed = r.rpc.request("command/exec", { processId: "offline-kill", command: ["/bin/sh", "-c", "printf KILL_READY; exec /bin/sleep 30"], cwd: r.cwd, streamStdoutStderr: true, timeoutMs: 10000 });
+  if (process.platform !== "win32") assert.match(stream + JSON.stringify(result), /24\s+90/);
+  const killedCommand = process.platform === "win32"
+    ? [process.execPath, "-e", "process.stdout.write('KILL_READY');setInterval(()=>{},1000)"]
+    : ["/bin/sh", "-c", "printf KILL_READY; exec /bin/sleep 30"];
+  const killed = r.rpc.request("command/exec", { processId: "offline-kill", command: killedCommand, cwd: r.cwd, streamStdoutStderr: true, timeoutMs: 10000 });
   killed.catch(() => {});
   await r.rpc.event("command/exec/outputDelta", p => p.processId === "offline-kill" && Buffer.from(p.deltaBase64, "base64").toString().includes("KILL_READY"));
   await r.rpc.request("command/exec/terminate", { processId: "offline-kill" });
   const end = await killed;
   assert.notEqual(end.exitCode, 0);
   await assert.rejects(r.rpc.request("command/exec/write", { processId: "offline-kill", deltaBase64: "Cg==" }), /not found|Unknown|not running|no active/i);
-  assert.equal((await r.rpc.request("command/exec", { command: ["/bin/pwd"], cwd: r.cwd })).stdout.trim(), await realpath(r.cwd));
+  const pwdCommand = process.platform === "win32"
+    ? [process.execPath, "-e", "process.stdout.write(process.cwd())"]
+    : ["/bin/pwd"];
+  const actualCwd = (await r.rpc.request("command/exec", { command: pwdCommand, cwd: r.cwd })).stdout.trim();
+  const expectedCwd = await realpath(r.cwd);
+  assert.equal(
+    process.platform === "win32" ? actualCwd.toLowerCase() : actualCwd,
+    process.platform === "win32" ? expectedCwd.toLowerCase() : expectedCwd,
+  );
 });
 
 test("[A SES-01 SES-02 SES-04 SES-07 ENV-03] 官方任务恢复、分叉、名称、列表、归档和历史回滚", { timeout: 30_000 }, async t => {

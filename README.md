@@ -34,7 +34,7 @@ macOS 安装包按架构独立构建，不再合并为 Universal DMG。当前自
 
 ### Windows
 
-1. 从 GitHub Actions Artifacts 或 GitHub Releases 下载 `windows-x64-setup.exe`；
+1. 从 GitHub Actions Artifacts 或 GitHub Releases 下载 `Codex-Quota-Injector-版本号-windows-x64-Setup.exe`；
 2. 运行安装程序；
 3. 双击桌面或开始菜单中的 `Codex Quota Injector`；
 4. 程序会直接启动 Microsoft Store 安装的 ChatGPT / Codex，并在后台注入额度面板。
@@ -125,11 +125,14 @@ npm test
 npm run test:coverage
 npm run test:offline
 npm run test:live -- --plan
+npm run test:lifecycle -- --plan
 ```
 
-`npm test` 运行免费基础回归；`npm run test:offline` 在当前 macOS 上追加真实官方运行时和隔离 Chrome/Edge 页面操作，由系统限制仅访问本机服务，不消耗模型 Token。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI 和浏览器摘要。
+`npm test` 运行免费基础回归；`npm run test:offline` 在当前 macOS 或 Windows x64 上追加真实官方运行时和临时 Chrome/Edge 页面操作，不消耗模型 Token。两种平台都使用临时配置、测试凭据和本地模型端点；macOS 额外使用 Seatbelt 限制出站。若请求没有到达本地端点，测试会失败。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI 和浏览器摘要。
 
 `npm run test:live -- --plan` 只查看当前配置的真实测试计划。免费测试通过并获得当次明确同意后，运行 `npm run test:live -- --confirm-token-use`；需要真实唤醒时追加 `--wakeup`。这批测试使用当前账号及启用的供应商，验证实际模型的工具执行、历史、压缩、图片和交互；不切换账号或重启日常 Codex。桌面特有工具按[宿主验收步骤](docs/testing-desktop-host.md)另外核对，不能把后台通过当作整个主入口通过。
+
+`npm run test:lifecycle -- --plan` 只读核对正式包、进程、中继协议和账号条件；`--confirm-restart` 才会执行安装、接管、重连、关闭重开和账号往返。测试开始前会在独立浏览器页实时显示步骤，macOS 由 launchd 监督，Windows 由任务计划程序监督，因此 Codex 被关闭后控制程序仍能继续记录和恢复。
 
 ## 限制
 

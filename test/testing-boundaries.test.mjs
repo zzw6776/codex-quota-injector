@@ -4,7 +4,10 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { isolatedEnv, ROOT } from "../runtime-tests/support/offline-runtime.mjs";
+import {
+  isolatedEnv,
+  ROOT,
+} from "../runtime-tests/support/offline-runtime.mjs";
 import {
   liveProfiles,
   liveRouterConfiguration,

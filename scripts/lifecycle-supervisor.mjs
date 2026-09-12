@@ -24,9 +24,13 @@ const progress = await startLifecycleProgressRenderer({
 });
 await delay(Number(control.startDelayMs) || 0);
 try {
+  const operations = control.platform === "win32"
+    ? await import("./lifecycle-windows.mjs")
+      .then(({ createWindowsLifecycleOperations }) => createWindowsLifecycleOperations(controlPath, control))
+    : createMacLifecycleOperations(controlPath, control);
   const report = await runLifecycleReport({
     reportPath: control.reportPath,
-    operations: createMacLifecycleOperations(controlPath, control),
+    operations,
   });
   console.log(JSON.stringify({ runId: control.runId, status: report.status, reportPath: control.reportPath }));
 } catch (error) {
@@ -36,6 +40,14 @@ try {
   await progress.stop().catch((error) => {
     console.error(`[lifecycle-progress] 最终页面写入失败：${error.message}`);
   });
+  if (control.scheduler?.type === "windows-task-scheduler") {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    await promisify(execFile)("powershell.exe", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+      `Unregister-ScheduledTask -TaskName '${String(control.scheduler.taskName).replaceAll("'", "''")}' -Confirm:$false -ErrorAction SilentlyContinue`,
+    ], { windowsHide: true }).catch(() => undefined);
+  }
 }
 
 function delay(ms) {

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   evaluateLifecycleReadiness,
   lifecycleFingerprint,
+  parsePidLines,
   publicLifecycleHost,
   relayProtocolFromGeneration,
   selectLifecycleAccountPair,
@@ -15,6 +16,15 @@ import {
   selectInstallRollbackAction,
   waitForTargetHost,
 } from "../scripts/lifecycle-macos.mjs";
+import {
+  selectWindowsInstallRollbackAction,
+  verifyWindowsInstallation,
+  verifyWindowsInstaller,
+  windowsScheduledTaskScript,
+} from "../scripts/lifecycle-windows.mjs";
+import { open } from "node:fs/promises";
+import { join } from "node:path";
+import { useTempDir } from "./helpers.mjs";
 
 test("[A LCH-01 LCH-03] 生命周期就绪必须同时满足 Codex、单实例、同代中继和目标协议", () => {
   const base = {
@@ -38,6 +48,8 @@ test("[A LCH-01 LCH-03] 生命周期就绪必须同时满足 Codex、单实例�
     relayState: { ...base.relayState, generation: "older" },
   }).ready, false);
   assert.equal(evaluateLifecycleReadiness({ ...base, expectedProtocol: 53 }).ready, false);
+  assert.equal(evaluateLifecycleReadiness({ ...base, expectedProtocol: null }).ready, true,
+    "回滚到未知旧协议时仍可只验证宿主基础就绪");
 });
 
 test("[A LCH-05 LCH-06] 中继协议只从独立 generation 段读取，不能被相似文本误判", () => {
@@ -45,6 +57,10 @@ test("[A LCH-05 LCH-06] 中继协议只从独立 generation 段读取，不能�
   assert.equal(relayProtocolFromGeneration("a:prefix-usage-events-v52:b"), null);
   assert.equal(relayProtocolFromGeneration("a:usage-events-v52x:b"), null);
   assert.equal(relayProtocolFromGeneration(null), null);
+});
+
+test("[A LCH-03] Windows 监听 PID 输出会去重并过滤无效进程", () => {
+  assert.deepEqual(parsePidLines("42\r\ninvalid\r\n42\r\n73\r\n-1\r\n"), [42, 73]);
 });
 
 test("[A ACC-04] 账号往返只选择当前 OAuth 与另一个 OAuth，公开材料只保留不可逆指纹", () => {
@@ -88,6 +104,58 @@ test("[A HAR-02 LCH-06] launchd 监督器使用参数数组且正确转义路径
   assert.match(plist, /\/private\/&lt;run&gt;\/control\.json/);
   assert.doesNotMatch(plist, /<key>Program<\/key>/);
   assert.doesNotMatch(plist, /sh -c/);
+});
+
+test("[A HAR-02 LCH-06] Windows 监督器由计划任务托管并保留带空格参数", () => {
+  const script = windowsScheduledTaskScript({
+    taskName: "CodexQuotaInjector-Lifecycle-1",
+    nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
+    supervisorScript: "C:\\repo path\\scripts\\lifecycle-supervisor.mjs",
+    controlPath: "C:\\private path\\control.json",
+    workingDirectory: "C:\\repo path",
+  });
+  assert.match(script, /New-ScheduledTaskAction/);
+  assert.match(script, /New-ScheduledTaskPrincipal/);
+  assert.match(script, /-LogonType Interactive -RunLevel Limited/);
+  assert.match(script, /Start-ScheduledTask/);
+  assert.match(script, /"C:\\repo path\\scripts\\lifecycle-supervisor\.mjs" --control "C:\\private path\\control\.json"/);
+});
+
+test("[A LCH-06] Windows Setup 和安装目录必须与同一个版本化中继集合对应", async (t) => {
+  const directory = await useTempDir(t, "codex-windows-lifecycle-");
+  const installer = join(directory, "Codex-Quota-Injector-1.2.3-windows-x64-Setup.exe");
+  const file = await open(installer, "w");
+  await file.truncate(10 * 1024 * 1024);
+  await file.write(Buffer.from("MZ"), 0, 2, 0);
+  await file.close();
+  const candidate = await verifyWindowsInstaller(installer, { projectVersion: "1.2.3" });
+  assert.equal(candidate.version, "1.2.3");
+  assert.equal(candidate.installerSha256.length, 64);
+  await assert.rejects(
+    verifyWindowsInstaller(installer, { projectVersion: "1.2.4" }),
+    /文件名与项目版本不匹配/,
+  );
+
+  const checked = [];
+  const hashed = [];
+  const installDir = join("C:\\", "Installed App");
+  const installation = await verifyWindowsInstallation(installDir, {
+    projectVersion: "1.2.3",
+    assertWindowsExecutable: async (path) => { checked.push(["windows", path]); },
+    assertWslExecutable: async (path) => { checked.push(["wsl", path]); },
+    readVersion: async () => "1.2.3",
+    hashFile: async (path) => {
+      hashed.push(path);
+      return `hash:${path}`;
+    },
+  });
+  assert.deepEqual(checked, [
+    ["windows", join(installDir, "Codex Quota Injector.exe")],
+    ["windows", join(installDir, "relay", "codex-quota-relay-windows-1.2.3.exe")],
+    ["wsl", join(installDir, "relay", "codex-quota-relay-wsl-1.2.3")],
+  ]);
+  assert.equal(hashed.length, 3);
+  assert.equal(installation.installedVersion, "1.2.3");
 });
 
 test("[A LCH-06] 正式包 Node 运行时只接受清单中与归档名精确对应的 SHA-256", () => {
@@ -177,6 +245,45 @@ test("[A LCH-06 HAR-04] 安装未改写目标包时回滚保留原包，未知�
   }), "restore-backup");
   assert.throws(() => selectInstallRollbackAction({
     backupExists: false,
+    initialInstalledVersion: "0.1.202",
+    projectVersion: "0.1.203",
+    installedCandidate: true,
+  }), /备份不存在/);
+});
+
+test("[A LCH-06 HAR-04] Windows 回滚按安装前状态恢复旧包、移除新增包或拒绝未知状态", () => {
+  assert.equal(selectWindowsInstallRollbackAction({
+    backupExists: true,
+    initialInstalledPresent: true,
+    initialInstalledVersion: "0.1.202",
+    projectVersion: "0.1.203",
+    installedCandidate: false,
+  }), "restore-backup");
+  assert.equal(selectWindowsInstallRollbackAction({
+    backupExists: false,
+    initialInstalledPresent: false,
+    initialInstalledVersion: null,
+    projectVersion: "0.1.203",
+    installedCandidate: true,
+  }), "remove-installed");
+  assert.equal(selectWindowsInstallRollbackAction({
+    backupExists: false,
+    initialInstalledPresent: true,
+    initialInstalledVersion: "0.1.203",
+    projectVersion: "0.1.203",
+    installedCandidate: true,
+  }), "leave-installed");
+  assert.equal(selectWindowsInstallRollbackAction({
+    backupExists: false,
+    initialInstalledPresent: true,
+    initialInstalledVersion: "0.1.202",
+    projectVersion: "0.1.203",
+    installedCandidate: false,
+    installStarted: false,
+  }), "leave-original");
+  assert.throws(() => selectWindowsInstallRollbackAction({
+    backupExists: false,
+    initialInstalledPresent: true,
     initialInstalledVersion: "0.1.202",
     projectVersion: "0.1.203",
     installedCandidate: true,

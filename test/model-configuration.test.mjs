@@ -6,6 +6,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { CodexContextManager } from "../src/codex-context.mjs";
+import { selectBridgeMode } from "../src/codex-bridge.mjs";
 import { DeepSeekManager } from "../src/deepseek-manager.mjs";
 import { ExtraModelManager } from "../src/extra-model-manager.mjs";
 import { fetchOfficialModelCatalog } from "../src/official-model-catalog.mjs";
@@ -13,6 +14,36 @@ import { useTempDir } from "./helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 const PLATFORM_ID = "123e4567-e89b-42d3-a456-426614174010";
+
+test("桥接策略只在模型目录需要注入时接管官方 app-server", () => {
+  for (const platform of ["darwin", "win32"]) {
+    assert.equal(selectBridgeMode({
+      platform,
+      staticModelCatalog: false,
+      customRoutingRequired: false,
+    }), "direct");
+  }
+  assert.equal(selectBridgeMode({
+    platform: "darwin",
+    staticModelCatalog: true,
+    customRoutingRequired: false,
+  }), "macos-shim");
+  assert.equal(selectBridgeMode({
+    platform: "darwin",
+    staticModelCatalog: true,
+    customRoutingRequired: true,
+  }), "macos-router");
+  assert.equal(selectBridgeMode({
+    platform: "win32",
+    staticModelCatalog: true,
+    customRoutingRequired: true,
+  }), "windows-relay");
+  assert.equal(selectBridgeMode({
+    platform: "linux",
+    staticModelCatalog: true,
+    customRoutingRequired: true,
+  }), "unsupported");
+});
 
 function baseCatalog() {
   return {

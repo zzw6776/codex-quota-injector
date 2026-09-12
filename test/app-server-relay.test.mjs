@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -73,9 +73,15 @@ for await (const line of lines) {
 }
 `;
 
-function runRelay({ configPath, messages, env = {}, sequential = false }) {
+function runRelay({
+  configPath,
+  messages,
+  env = {},
+  sequential = false,
+  relayArguments = ["app-server"],
+}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["src/launcher.mjs", "app-server"], {
+    const child = spawn(process.execPath, ["src/launcher.mjs", ...relayArguments], {
       cwd: join(import.meta.dirname, ".."),
       env: {
         ...process.env,
@@ -138,18 +144,95 @@ function runRelay({ configPath, messages, env = {}, sequential = false }) {
   });
 }
 
-test("app-server relay 端到端保留原生请求并只改写扩展模型相关契约", {
-  skip: process.platform === "win32" ? "Windows 的测试假 CLI 需要原生 exe" : false,
-}, async (t) => {
+async function createNodeAlias(path) {
+  if (process.platform === "win32") {
+    try {
+      await link(process.execPath, path);
+    } catch {
+      await copyFile(process.execPath, path);
+    }
+  } else {
+    await symlink(process.execPath, path);
+  }
+  await chmod(path, 0o700);
+  return path;
+}
+
+test("Windows 独立中继在桌面端未转发环境变量时从固定配置执行官方 CLI", async (t) => {
+  const directory = await useTempDir(t, "codex-windows-relay-fallback-");
+  const appDataDir = join(directory, "appdata");
+  const configDir = join(appDataDir, "Codex Quota Injector");
+  const configPath = join(configDir, "app-server-relay-config.json");
+  const upstreamExecutable = join(directory, process.platform === "win32" ? "node-upstream.exe" : "node-upstream");
+  const inspectScript = join(directory, "inspect-env.mjs");
+  await mkdir(configDir, { recursive: true });
+  await createNodeAlias(upstreamExecutable);
+  await writeFile(configPath, JSON.stringify({ upstreamExecutable }));
+  await writeFile(inspectScript, `
+process.stdout.write(JSON.stringify({
+  argv: process.argv.slice(2),
+  cliPath: process.env.CODEX_CLI_PATH ?? null,
+  relayRole: process.env.CODEX_QUOTA_ROLE ?? null,
+  relayConfig: process.env.CODEX_QUOTA_RELAY_CONFIG ?? null,
+  windowsNative: process.env.CODEX_QUOTA_WINDOWS_NATIVE ?? null,
+  forceCli: process.env.CODEX_APP_SERVER_FORCE_CLI ?? null,
+}));
+`);
+
+  const env = {
+    ...process.env,
+    APPDATA: appDataDir,
+    CODEX_QUOTA_ROLE: "stale-parent-value",
+    CODEX_QUOTA_WINDOWS_NATIVE: "stale-parent-value",
+    CODEX_APP_SERVER_FORCE_CLI: "1",
+  };
+  delete env.CODEX_QUOTA_RELAY_CONFIG;
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      "src/windows-relay-entry.mjs",
+      inspectScript,
+      "probe",
+    ], {
+      cwd: join(import.meta.dirname, ".."),
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`Windows 独立中继测试失败 code=${code}; stderr=${stderr}`));
+    });
+  });
+
+  const observed = JSON.parse(result.stdout);
+  assert.deepEqual(observed.argv, ["probe"]);
+  assert.equal(observed.cliPath, upstreamExecutable);
+  assert.equal(observed.relayRole, null);
+  assert.equal(observed.relayConfig, null);
+  assert.equal(observed.windowsNative, null);
+  assert.equal(observed.forceCli, null);
+});
+
+test("app-server relay 端到端保留原生请求并只改写扩展模型相关契约", async (t) => {
   const directory = await useTempDir(t, "codex-relay-e2e-");
   const fakeCodexPath = join(directory, "fake-codex.mjs");
+  const upstreamExecutable = join(
+    directory,
+    process.platform === "win32" ? "fake-node.exe" : "fake-node",
+  );
   const extraSettingsPath = join(directory, "extra-models.json");
   const catalogPath = join(directory, "catalog.json");
   const statePath = join(directory, "state.json");
   const usagePath = join(directory, "usage.jsonl");
   const configPath = join(directory, "relay.json");
   await writeFile(fakeCodexPath, FAKE_CODEX);
-  await chmod(fakeCodexPath, 0o700);
+  await createNodeAlias(upstreamExecutable);
   await writeFile(extraSettingsPath, JSON.stringify({
     platforms: [{
       id: "local",
@@ -169,7 +252,7 @@ test("app-server relay 端到端保留原生请求并只改写扩展模型相关
   }));
   await writeFile(catalogPath, JSON.stringify({ models: [{ slug: "official" }] }));
   await writeFile(configPath, JSON.stringify({
-    upstreamExecutable: fakeCodexPath,
+    upstreamExecutable,
     extraModelSettingsPath: extraSettingsPath,
     modelCatalogPath: catalogPath,
     relayStatePath: statePath,
@@ -203,7 +286,11 @@ test("app-server relay 端到端保留原生请求并只改写扩展模型相关
       },
     },
   ];
-  const { stdout } = await runRelay({ configPath, messages });
+  const { stdout } = await runRelay({
+    configPath,
+    messages,
+    relayArguments: [fakeCodexPath, "app-server"],
+  });
   const output = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
 
   const modelList = output.find((message) => message.id === 1);
@@ -236,18 +323,20 @@ test("app-server relay 端到端保留原生请求并只改写扩展模型相关
     event.status === "completed" && event.model === "custom-text"));
 });
 
-test("app-server relay 在 macOS Router 后保持第三方供应商并隔离上游凭据", {
-  skip: process.platform === "win32" ? "Windows 的测试假 CLI 需要原生 exe" : false,
-}, async (t) => {
+test("app-server relay 在 Router 后保持第三方供应商并隔离上游凭据", async (t) => {
   const directory = await useTempDir(t, "codex-relay-router-");
   const fakeCodexPath = join(directory, "fake-codex.mjs");
+  const upstreamExecutable = join(
+    directory,
+    process.platform === "win32" ? "fake-node.exe" : "fake-node",
+  );
   const providerSettingsPath = join(directory, "provider-settings.json");
   const extraSettingsPath = join(directory, "extra-models.json");
   const catalogPath = join(directory, "catalog.json");
   const configPath = join(directory, "relay.json");
   const routerBaseUrl = "http://127.0.0.1:43210/router-token/v1/";
   await writeFile(fakeCodexPath, FAKE_CODEX);
-  await chmod(fakeCodexPath, 0o700);
+  await createNodeAlias(upstreamExecutable);
   await writeFile(providerSettingsPath, JSON.stringify({
     enabled: true,
     apiKey: "deepseek-secret-must-stay-in-router",
@@ -273,7 +362,7 @@ test("app-server relay 在 macOS Router 后保持第三方供应商并隔离上�
     models: [{ slug: "official" }, { slug: "deepseek-v4-flash" }, { slug: "custom-text" }],
   }));
   await writeFile(configPath, JSON.stringify({
-    upstreamExecutable: fakeCodexPath,
+    upstreamExecutable,
     providerSettingsPath,
     extraModelSettingsPath: extraSettingsPath,
     modelCatalogPath: catalogPath,
@@ -296,6 +385,7 @@ test("app-server relay 在 macOS Router 后保持第三方供应商并隔离上�
     messages,
     env: { CODEX_QUOTA_ROUTER_TOKEN: "router-secret" },
     sequential: true,
+    relayArguments: [fakeCodexPath, "app-server"],
   });
   const output = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
   const passthrough = output.find((message) => message.id === 1).result;

@@ -13,7 +13,14 @@ import {
 } from "./platform.mjs";
 
 const execFileAsync = promisify(execFile);
-export const DEFAULT_INSTALLED_APP = "/Applications/Codex Quota Injector.app";
+export const DEFAULT_WINDOWS_INSTALL_DIR = join(
+  process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"),
+  "Programs",
+  "Codex Quota Injector",
+);
+export const DEFAULT_INSTALLED_APP = process.platform === "win32"
+  ? DEFAULT_WINDOWS_INSTALL_DIR
+  : "/Applications/Codex Quota Injector.app";
 export const SINGLE_INSTANCE_PORT = 49_229;
 
 export function lifecycleFingerprint(value) {
@@ -63,13 +70,15 @@ export function evaluateLifecycleReadiness({
     Number.isInteger(relayState?.pid) && relayState.pid > 0;
   const singleInjector = Array.isArray(injectorPids) && injectorPids.length === 1;
   const codexRunning = Array.isArray(codexPids) && codexPids.length > 0;
+  const protocolMatches = expectedProtocol == null || protocol === expectedProtocol;
   return {
-    ready: codexRunning && debugReady && singleInjector && relayReady && protocol === expectedProtocol,
+    ready: codexRunning && debugReady && singleInjector && relayReady && protocolMatches,
     codexRunning,
     debugReady,
     singleInjector,
     relayReady,
     generationMatches,
+    protocolMatches,
     protocol,
     expectedProtocol,
   };
@@ -91,14 +100,15 @@ export async function inspectLifecycleHost({
       readJson(accountIndexPath),
       listCodexProcessIds(),
       findInjectorListenerPids(),
-      readMacAppVersion(installedApp),
+      readInstalledVersion(installedApp),
       isCodexDebugPortReady(cdpPort),
     ]);
   const pair = selectLifecycleAccountPair(accountIndex);
-  const relayPidAlive = isProcessAlive(relayState?.pid);
+  const wslNative = Boolean(relayState?.bootId && relayState?.processStartTicks != null);
   const relayStateCurrent = relayConfig?.generation
-    ? await isRelayStateCurrent(relayStatePath, relayConfig.generation)
+    ? await isRelayStateCurrent(relayStatePath, relayConfig.generation, { wslNative })
     : false;
+  const relayPidAlive = wslNative ? relayStateCurrent : isProcessAlive(relayState?.pid);
   const readiness = evaluateLifecycleReadiness({
     relayConfig,
     relayState,
@@ -123,6 +133,7 @@ export async function inspectLifecycleHost({
       pid: Number.isInteger(relayState?.pid) ? relayState.pid : null,
       pidAlive: relayPidAlive,
       stateCurrent: relayStateCurrent,
+      wslNative,
     },
     readiness,
     accounts: {
@@ -137,6 +148,19 @@ export async function inspectLifecycleHost({
 }
 
 export async function findInjectorListenerPids(port = SINGLE_INSTANCE_PORT) {
+  if (process.platform === "win32") {
+    const script = `
+Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object { Write-Output $_ }
+`;
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+      { windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
+    ).catch(() => ({ stdout: "" }));
+    return parsePidLines(stdout);
+  }
   if (process.platform !== "darwin") return [];
   const { stdout } = await execFileAsync("/usr/sbin/lsof", [
     "-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN",
@@ -144,9 +168,7 @@ export async function findInjectorListenerPids(port = SINGLE_INSTANCE_PORT) {
     if (error?.code === 1) return { stdout: "" };
     throw error;
   });
-  return [...new Set(String(stdout).split(/\r?\n/)
-    .map((value) => Number(value.trim()))
-    .filter((value) => Number.isInteger(value) && value > 0))];
+  return parsePidLines(stdout);
 }
 
 export async function readMacAppVersion(appPath) {
@@ -156,6 +178,26 @@ export async function readMacAppVersion(appPath) {
     "-c", "Print :CFBundleShortVersionString", plist,
   ]).catch(() => ({ stdout: "" }));
   return String(stdout).trim() || null;
+}
+
+export async function readWindowsInstalledVersion() {
+  if (process.platform !== "win32") return null;
+  const script = `
+$value=(Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex Quota Injector' -ErrorAction SilentlyContinue).DisplayVersion;
+if ($value) { Write-Output $value }
+`;
+  const { stdout } = await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
+  ).catch(() => ({ stdout: "" }));
+  return String(stdout).trim() || null;
+}
+
+export async function readInstalledVersion(installedApp = DEFAULT_INSTALLED_APP) {
+  if (process.platform === "darwin") return readMacAppVersion(installedApp);
+  if (process.platform === "win32") return readWindowsInstalledVersion();
+  return null;
 }
 
 export async function readJson(path) {
@@ -179,4 +221,10 @@ export function isProcessAlive(pid) {
 export function publicLifecycleHost(snapshot) {
   const { privateAccountPair: _privateAccountPair, paths: _paths, ...publicSnapshot } = snapshot;
   return publicSnapshot;
+}
+
+export function parsePidLines(stdout) {
+  return [...new Set(String(stdout ?? "").split(/\r?\n/)
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isInteger(value) && value > 0))];
 }

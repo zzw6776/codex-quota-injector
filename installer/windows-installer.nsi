@@ -1,11 +1,15 @@
 Unicode True
 RequestExecutionLevel user
+!include LogicLib.nsh
 
 !ifndef VERSION
   !error "VERSION is required"
 !endif
 !ifndef INPUT_EXE
   !error "INPUT_EXE is required"
+!endif
+!ifndef WINDOWS_RELAY_EXE
+  !error "WINDOWS_RELAY_EXE is required"
 !endif
 !ifndef WSL_RELAY_EXE
   !error "WSL_RELAY_EXE is required"
@@ -35,11 +39,22 @@ UninstPage instfiles
 
 Section "Install"
   SetShellVarContext current
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File "/oname=Codex Quota Injector update.exe" "${INPUT_EXE}"
+  ExecWait '"$PLUGINSDIR\Codex Quota Injector update.exe" --prepare-update' $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "无法安全关闭正在运行的 Codex Quota Injector 或 Codex，安装已取消。" /SD IDOK
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
   SetOutPath "$INSTDIR"
   File "/oname=Codex Quota Injector.exe" "${INPUT_EXE}"
   File "/oname=NODE_LICENSE.txt" "${NODE_LICENSE}"
+  Delete "$INSTDIR\relay\codex-quota-relay-windows-*"
   Delete "$INSTDIR\relay\codex-quota-relay-wsl-*"
   SetOutPath "$INSTDIR\relay"
+  File "/oname=codex-quota-relay-windows-${VERSION}.exe" "${WINDOWS_RELAY_EXE}"
   File "/oname=codex-quota-relay-wsl-${VERSION}" "${WSL_RELAY_EXE}"
   SetOutPath "$INSTDIR"
 
@@ -64,6 +79,7 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\Codex Quota Injector"
   Delete "$INSTDIR\Codex Quota Injector.exe"
   Delete "$INSTDIR\NODE_LICENSE.txt"
+  Delete "$INSTDIR\relay\codex-quota-relay-windows-*"
   Delete "$INSTDIR\relay\codex-quota-relay-wsl-*"
   RMDir "$INSTDIR\relay"
   Delete "$INSTDIR\Uninstall.exe"

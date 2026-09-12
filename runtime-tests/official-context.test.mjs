@@ -58,7 +58,10 @@ test("[A IO-01 IO-03 MOD-04] 官方读取图片附件和动态工具产物，字
     assert.ok(images.length);
     const bytes = Buffer.from(images[0].image_url.split(",")[1], "base64");
     assert.ok(bytes.subarray(1, 4).toString() === "PNG" || bytes.subarray(0, 3).equals(Buffer.from([255, 216, 255])), "官方可压缩图片，但必须保留有效图片输入");
-    return [customCall("exec", `text(await tools.exec_command({cmd:"cp '图片 附件.png' artifact.png",login:false}));`)];
+    const command = process.platform === "win32"
+      ? "Copy-Item -LiteralPath '图片 附件.png' -Destination artifact.png"
+      : "cp '图片 附件.png' artifact.png";
+    return [customCall("exec", `text(await tools.exec_command({cmd:${JSON.stringify(command)},login:false}));`)];
   }, async body => { assert.deepEqual(await readFile(join(r.cwd, "artifact.png")), png, JSON.stringify(body.input.filter(i => /call_output/.test(i.type)))); return [message("产物 artifact.png 已生成")]; });
   await r.turn(thread.id, "读取附件并复制成产物", { input: [{ type: "text", text: "读取附件并复制成产物" }, { type: "localImage", path }] });
   assert.deepEqual(await readFile(join(r.cwd, "artifact.png")), png);
@@ -92,7 +95,10 @@ test("[A EXT-01] 官方 Hooks 从隔离配置加载并执行，真实文件与�
   const r = await startRuntime(t, { profile: "custom", prepare: async ({ env, cwd }) => {
     const script = join(env.CODEX_HOME, "hook.mjs");
     await writeFile(script, `import {appendFileSync} from "node:fs";let input="";for await(const chunk of process.stdin)input+=chunk;appendFileSync(${JSON.stringify(join(cwd,"hook-events.jsonl"))},input+"\\n");console.log("HOOK_CONTEXT_MARKER");`);
-    await writeFile(join(env.CODEX_HOME, "hooks.json"), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: `'${process.execPath}' '${script}'`, timeout: 5 }] }] } }));
+    const hookCommand = process.platform === "win32"
+      ? `& '${process.execPath.replaceAll("'", "''")}' '${script.replaceAll("'", "''")}'`
+      : `'${process.execPath.replaceAll("'", "'\\''")}' '${script.replaceAll("'", "'\\''")}'`;
+    await writeFile(join(env.CODEX_HOME, "hooks.json"), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: hookCommand, timeout: 5 }] }] } }));
   } });
   const hooks = await r.rpc.request("hooks/list", { cwds: [r.cwd] });
   assert.match(JSON.stringify(hooks), /UserPromptSubmit|userPromptSubmit/);

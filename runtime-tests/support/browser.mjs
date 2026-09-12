@@ -40,7 +40,13 @@ export const FIXTURE_HTML = `<!doctype html><html class="electron-dark"><head><m
 export async function browserExecutable() {
   const candidates = [process.env.CODEX_TEST_BROWSER,
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"].filter(Boolean);
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    process.platform === "win32" && join(process.env.PROGRAMFILES ?? "", "Google", "Chrome", "Application", "chrome.exe"),
+    process.platform === "win32" && join(process.env["PROGRAMFILES(X86)"] ?? "", "Google", "Chrome", "Application", "chrome.exe"),
+    process.platform === "win32" && join(process.env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe"),
+    process.platform === "win32" && join(process.env.PROGRAMFILES ?? "", "Microsoft", "Edge", "Application", "msedge.exe"),
+    process.platform === "win32" && join(process.env["PROGRAMFILES(X86)"] ?? "", "Microsoft", "Edge", "Application", "msedge.exe"),
+  ].filter(Boolean);
   let executable;
   for (const path of candidates) { try { await access(path); executable = path; break; } catch {} }
   assert.ok(executable, "BLOCKED: 本平台需要 Chrome/Edge；用 CODEX_TEST_BROWSER 指定测试浏览器");

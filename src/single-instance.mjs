@@ -6,6 +6,7 @@ const SINGLE_INSTANCE_PORT = 49_229;
 const TAKEOVER_TIMEOUT_MS = 3_000;
 const LISTEN_RETRY_DELAY_MS = 50;
 const INSTANCE_MODES = new Set(["dev", "formal"]);
+const UPDATE_PREPARATION_PURPOSE = "install-update";
 const UNRECOGNIZED_TAKEOVER_CODE = "CODEX_QUOTA_TAKEOVER_UNRECOGNIZED";
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +22,7 @@ export async function acquireSingleInstance({
   mode = "dev",
   version = "0.0.0",
   explicitStart = false,
+  purpose = "launch",
   port = SINGLE_INSTANCE_PORT,
   runtimeIdentity = null,
   onTakeover,
@@ -31,6 +33,7 @@ export async function acquireSingleInstance({
     mode: normalizeMode(mode),
     version: normalizeVersion(version),
     explicitStart: Boolean(explicitStart),
+    purpose: normalizePurpose(purpose),
     runtimeIdentity: normalizeRuntimeIdentity(runtimeIdentity),
   };
   let takeoverStarted = false;
@@ -134,6 +137,9 @@ export function compareVersions(left, right) {
 function shouldReplace(owner, requester) {
   if (!requester.explicitStart) return false;
   if (!INSTANCE_MODES.has(owner.mode) || !INSTANCE_MODES.has(requester.mode)) return false;
+  if (requester.mode === "formal" && requester.purpose === UPDATE_PREPARATION_PURPOSE) {
+    return true;
+  }
   if (requester.mode === "formal" && owner.mode === "dev") return true;
   return compareVersions(requester.version, owner.version) > 0;
 }
@@ -159,6 +165,7 @@ function parseTakeoverRequest(data) {
       mode: normalizeMode(value.mode),
       version: normalizeVersion(value.version),
       explicitStart: value.explicitStart === true,
+      purpose: normalizePurpose(value.purpose),
       runtimeIdentity: normalizeRuntimeIdentity(value.runtimeIdentity),
     };
   } catch {
@@ -187,6 +194,7 @@ function requestTakeover(owner, port = SINGLE_INSTANCE_PORT) {
       mode: owner.mode,
       version: owner.version,
       explicitStart: owner.explicitStart,
+      purpose: owner.purpose,
       runtimeIdentity: owner.runtimeIdentity,
     }) + "\n"));
     socket.on("data", (data) => {
@@ -356,6 +364,10 @@ function normalizeVersion(value) {
 
 function normalizeRuntimeIdentity(value) {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+function normalizePurpose(value) {
+  return value === UPDATE_PREPARATION_PURPOSE ? UPDATE_PREPARATION_PURPOSE : "launch";
 }
 
 function delay(milliseconds) {

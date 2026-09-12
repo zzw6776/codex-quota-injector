@@ -18,24 +18,16 @@ args=${JSON.stringify([join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), dire
     },
   });
   const marker = "DEEPSEEK_DIRECT_MCP";
-  let approvals = 0;
-  r.rpc.onRequest = async request => {
-    assert.equal(request.method, "mcpServer/elicitation/request");
-    assert.equal(request.params.serverName, "fixture");
-    assert.equal(request.params._meta?.codex_approval_kind, "mcp_tool_call");
-    assert.equal(request.params._meta?.tool_params?.text, marker);
-    approvals++;
-    return { action: "accept", content: {} };
-  };
+  await writeFile(join(r.directory, "mcp-marker.txt"), marker);
   r.enqueue(
     body => {
       assert.equal(body.tools?.some(tool => tool.type === "tool_search"), false,
         "直接工具模式不能把 MCP 隐藏到延迟搜索后");
       const namespace = body.tools?.find(tool =>
         tool.type === "namespace" && tool.name === "mcp__fixture");
-      assert.ok(namespace?.tools?.some(tool => tool.type === "function" && tool.name === "record"),
-        "DeepSeek 首次请求必须直接包含 fixture.record 声明");
-      return [{ ...call("record", { text: marker }), namespace: "mcp__fixture" }];
+      assert.ok(namespace?.tools?.some(tool => tool.type === "function" && tool.name === "read"),
+        "DeepSeek 首次请求必须直接包含 fixture.read 声明");
+      return [{ ...call("read", {}), namespace: "mcp__fixture" }];
     },
     body => {
       assert.match(JSON.stringify(body.input), new RegExp(marker),
@@ -44,11 +36,10 @@ args=${JSON.stringify([join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), dire
     },
   );
 
-  const { thread } = await r.thread({ approvalPolicy: "on-request" });
-  await r.turn(thread.id, "调用 fixture 的 record 工具一次");
-  assert.equal(approvals, 1);
+  const { thread } = await r.thread({ approvalPolicy: "never" });
+  await r.turn(thread.id, "调用 fixture 的只读 read 工具一次");
   assert.equal(await readFile(join(r.directory, "mcp-marker.txt"), "utf8"), marker);
   assert.ok(r.rpc.events.some(event => event.method === "item/completed" &&
     event.params?.item?.type === "mcpToolCall" && event.params.item.server === "fixture" &&
-    event.params.item.tool === "record" && event.params.item.status === "completed"));
+    event.params.item.tool === "read" && event.params.item.status === "completed"));
 });

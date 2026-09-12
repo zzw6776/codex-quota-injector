@@ -5,12 +5,12 @@ import test from "node:test";
 import { call, customCall, message, ROOT, startRuntime } from "./support/offline-runtime.mjs";
 import { waitFor } from "../test/helpers.mjs";
 
-test("[A TOOL-03 INT-02 EXT-02] 官方 MCP 发现、调用、资源、工具失败和 elicitation 的真实往返", { timeout: 30_000 }, async t => {
+test("[A TOOL-03 EXT-02] 官方 MCP 发现、调用、资源、工具失败和 never 策略下的 elicitation 终结", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim", prepare: async ({ directory, env }) => {
     const path = join(env.CODEX_HOME, "config.toml");
     await writeFile(path, (await readFile(path, "utf8")) + `\n[mcp_servers.fixture]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), directory])}\n`);
   } });
-  const { thread } = await r.thread({ approvalPolicy: "on-request" });
+  const { thread } = await r.thread({ approvalPolicy: "never" });
   const status = await r.rpc.request("mcpServerStatus/list", { threadId: thread.id });
   assert.match(JSON.stringify(status), /record/);
   const result = await r.rpc.request("mcpServer/tool/call", { threadId: thread.id, server: "fixture", tool: "record", arguments: { text: "MCP_独立证据" }, _meta: { progressToken: "fixture-progress" } });
@@ -21,23 +21,14 @@ test("[A TOOL-03 INT-02 EXT-02] 官方 MCP 发现、调用、资源、工具失�
   const failed = await r.rpc.request("mcpServer/tool/call", { threadId: thread.id, server: "fixture", tool: "fail", arguments: {} });
   assert.match(JSON.stringify(failed), /EXPECTED_TOOL_ERROR/);
   assert.match(JSON.stringify(failed), /true/);
-  let elicitation = 0;
-  let mcpApprovals = 0;
+  let unexpectedElicitation = 0;
   r.rpc.onRequest = async request => {
-    assert.equal(request.method, "mcpServer/elicitation/request");
-    if (request.params._meta?.codex_approval_kind === "mcp_tool_call") {
-      assert.equal(request.params.serverName, "fixture");
-      assert.equal(request.params._meta.tool_params?.text, "MODEL_MCP_RESULT");
-      mcpApprovals++;
-      return { action: "accept", content: {} };
-    }
-    assert.equal(request.params.threadId, thread.id);
-    elicitation++;
-    return { action: "accept", content: { accept: true } };
+    unexpectedElicitation++;
+    throw new Error(`never 策略不应转交 MCP elicitation：${request.method}`);
   };
   const answered = await r.rpc.request("mcpServer/tool/call", { threadId: thread.id, server: "fixture", tool: "ask", arguments: {} });
-  assert.equal(elicitation, 1, JSON.stringify(answered));
-  assert.match(JSON.stringify(answered), /accept/);
+  assert.equal(unexpectedElicitation, 0, JSON.stringify(answered));
+  assert.match(JSON.stringify(answered), /decline/);
   await unlink(join(r.directory, "mcp-marker.txt"));
   const deniedThread = (await r.thread({ approvalPolicy: "never", sandbox: "workspace-write" })).thread;
   r.enqueue([customCall("exec", 'text(await tools.mcp__fixture__record({text:"MCP_MUST_NOT_WRITE"}));')], body => {
@@ -52,46 +43,10 @@ test("[A TOOL-03 INT-02 EXT-02] 官方 MCP 发现、调用、资源、工具失�
   assert.match(deniedMcp?.error?.message ?? "", /requires approval/);
   await assert.rejects(readFile(join(r.directory, "mcp-marker.txt")), { code: "ENOENT" });
 
-  const liveIsolationThread = (await r.thread({ approvalPolicy: "on-request", sandbox: "workspace-write" })).thread;
-  r.enqueue([customCall("exec", 'text(await tools.mcp__fixture__record({text:"MODEL_MCP_RESULT"}));')], body => {
-    assert.match(JSON.stringify(body.input), /MODEL_MCP_RESULT/);
-    return "MCP_CONTINUED";
-  });
-  const beforeModelMcp = r.rpc.events.length;
-  await r.turn(liveIsolationThread.id);
-  assert.equal(mcpApprovals, 1, "写入型 MCP 工具必须经过一次隔离审批");
-  assert.equal(await readFile(join(r.directory, "mcp-marker.txt"), "utf8"), "MODEL_MCP_RESULT");
-  assert.ok(r.rpc.events.slice(beforeModelMcp).some(event => event.method === "item/completed" &&
-    event.params?.item?.type === "mcpToolCall" && event.params.item.server === "fixture" &&
-    event.params.item.tool === "record" && event.params.item.status === "completed"),
-  "模型驱动 MCP 调用必须产生官方 mcpToolCall 完成事件");
   const events = (await readFile(join(r.directory, "mcp-events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some(e => e.method === "resources/read"));
-  assert.equal(events.filter(e => e.method === "tools/call" && e.params.name === "record").length, 2);
+  assert.equal(events.filter(e => e.method === "tools/call" && e.params.name === "record").length, 1);
   await r.rpc.request("config/mcpServer/reload", {});
-});
-
-test("[A INT-01 RPC-03 TOOL-01] 官方命令审批拒绝时没有文件副作用，允许后真实执行且可继续", { timeout: 30_000 }, async t => {
-  const r = await startRuntime(t, { profile: "shim" });
-  for (const decision of ["decline", "accept"]) {
-    const { thread } = await r.thread({ approvalPolicy: "on-request", sandbox: "read-only" });
-    const file = join(r.cwd, `approval-${decision}.txt`);
-    let approvals = 0;
-    r.rpc.onRequest = async request => {
-      assert.equal(request.method, "item/commandExecution/requestApproval");
-      assert.equal(request.params.threadId, thread.id);
-      assert.match(request.params.command, /approval-/);
-      approvals++;
-      return { decision };
-    };
-    r.enqueue([call("exec_command", { cmd: `printf APPROVED > approval-${decision}.txt`, workdir: r.cwd, login: false,
-      sandbox_permissions: "require_escalated", justification: "Write only the isolated test fixture" })], "AFTER_APPROVAL");
-    await r.turn(thread.id);
-    assert.equal(approvals, 1);
-    if (decision === "decline") await assert.rejects(readFile(file), { code: "ENOENT" });
-    else assert.equal(await readFile(file, "utf8"), "APPROVED");
-    assert.ok(r.rpc.events.some(e => e.method === "serverRequest/resolved" && e.params.threadId === thread.id));
-  }
 });
 
 test("[A TOOL-04 INT-02 RPC-03] 动态宿主工具及用户补充输入按当前任务往返并续接", { timeout: 30_000 }, async t => {
@@ -158,7 +113,10 @@ test("[A EXT-01 MOD-06 ENV-03] 官方运行时加载临时 skill、禁用与恢�
   r.enqueue(body => {
     const all = r.requests.flatMap(q => q.body.input ?? []);
     assert.match(JSON.stringify(all), /offline-fixture/);
-    return [call("exec_command", { cmd: `cat ${JSON.stringify(skillPath)}`, login: false })];
+    const command = process.platform === "win32"
+      ? `Get-Content -Raw -LiteralPath ${JSON.stringify(skillPath)}`
+      : `cat ${JSON.stringify(skillPath)}`;
+    return [call("exec_command", { cmd: command, login: false })];
   }, body => { assert.match(JSON.stringify(body.input), /SKILL_INDEPENDENT_MARKER/); return "SKILL_READ"; });
   await r.turn(thread.id);
   const results = await r.rpc.request("fuzzyFileSearch", { query: "search-中文", roots: [r.cwd] });

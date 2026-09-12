@@ -10,7 +10,14 @@ import { DeepSeekManager } from "../src/deepseek-manager.mjs";
 import { ExtraModelManager } from "../src/extra-model-manager.mjs";
 import { ModelRouterManager } from "../src/model-router.mjs";
 import { getOpenAIShortContextRates } from "../src/token-pricing.mjs";
-import { execOffline, isolatedEnv, officialExecutable, RpcClient, ROOT, stopChild } from "../runtime-tests/support/offline-runtime.mjs";
+import {
+  execOffline,
+  isolatedEnv,
+  officialExecutable,
+  RpcClient,
+  ROOT,
+  stopChild,
+} from "../runtime-tests/support/offline-runtime.mjs";
 const exec = promisify(execFile);
 export const approved = process.env.CODEX_TEST_LIVE_APPROVED === "current-run";
 
@@ -142,7 +149,12 @@ export async function startLiveRuntime(t, profile, budget) {
   const requestShapes = [];
   t.after(async () => { await stopChild(child); await router?.close(); await rm(directory, { recursive: true, force: true }); });
   const cli = await officialExecutable();
-  const { stdout } = await execOffline(cli, ["debug", "models"], { directory, env: { ...env, OPENAI_API_KEY: "sk-catalog-only" }, cwd });
+  const catalogResult = await execOffline(cli, ["debug", "models"], {
+    directory,
+    env: { ...env, OPENAI_API_KEY: "sk-catalog-only" },
+    cwd,
+  });
+  const { stdout } = catalogResult;
   let catalog = JSON.parse(stdout);
   const extra = new ExtraModelManager({ dataDir: directory });
   extra.settings = { generation: 1, platforms: profile.extraModels?.platforms ?? [] };
@@ -169,25 +181,55 @@ export async function startLiveRuntime(t, profile, budget) {
     generation: profile.extraModels?.generation ?? 0,
     platforms: profile.extraModels?.platforms ?? [],
   }));
-  router = new ModelRouterManager({
-    onRequestShape(shape) {
-      requestShapes.push(shape);
-      if (requestShapes.length > 10) requestShapes.shift();
-    },
+  if (process.platform === "darwin") {
+    router = new ModelRouterManager({
+      onRequestShape(shape) {
+        requestShapes.push(shape);
+        if (requestShapes.length > 10) requestShapes.shift();
+      },
+    });
+  }
+  const route = await router?.configure({
+    officialAuthMode: credentials.type === "apiKey" ? "apiKey" : "oauth",
+    extraModels: profile.extraModels,
+    deepSeek: profile.deepSeek,
+    usageEventPath: join(directory, "usage.jsonl"),
   });
-  const route = await router.configure({ officialAuthMode: credentials.type === "apiKey" ? "apiKey" : "oauth",
-    extraModels: profile.extraModels, deepSeek: profile.deepSeek, usageEventPath: join(directory, "usage.jsonl") });
   if (profile.model) {
-    assert.ok(route?.routedModels.includes(profile.model),
-      `真实配置 ${profile.id} 的模型 ${profile.model} 未注册到隔离 Router；已在发送模型请求前停止`);
+    if (process.platform === "darwin") {
+      assert.ok(route?.routedModels.includes(profile.model),
+        `真实配置 ${profile.id} 的模型 ${profile.model} 未注册到隔离 Router；已在发送模型请求前停止`);
+    } else {
+      assert.ok(catalog.models.some((model) => model.slug === profile.model),
+        `真实配置 ${profile.id} 的模型 ${profile.model} 未写入 Windows 中继目录；已在发送模型请求前停止`);
+    }
   }
   if (route) env[route.tokenEnv] = route.token;
-  const shim = join(directory, "test-shim");
-  assert.equal(process.platform, "darwin", "真实入口适配器只声明本机 macOS 已适配");
-  await exec("/usr/bin/xcrun", ["swiftc", "-O", join(ROOT, "src/macos-codex-shim.swift"), "-o", shim], { timeout: 30000 });
+  let relayExecutable;
+  let relayArguments = [];
+  if (process.platform === "darwin") {
+    relayExecutable = join(directory, "test-shim");
+    await exec("/usr/bin/xcrun", [
+      "swiftc",
+      "-O",
+      join(ROOT, "src/macos-codex-shim.swift"),
+      "-o",
+      relayExecutable,
+    ], { timeout: 30000 });
+  } else if (process.platform === "win32") {
+    relayExecutable = process.execPath;
+    relayArguments = [join(ROOT, "src/windows-relay-entry.mjs")];
+  } else {
+    throw new Error(`当前平台 ${process.platform}/${process.arch} 没有真实中继测试适配器`);
+  }
   const config = join(directory, "relay.json");
-  await writeFile(config, JSON.stringify({ version: 4, upstreamExecutable: cli,
-    relayExecutable: process.execPath, relayArguments: [join(ROOT, "src/launcher.mjs")],
+  await writeFile(config, JSON.stringify({
+    version: process.platform === "darwin" ? 4 : 1,
+    upstreamExecutable: cli,
+    ...(process.platform === "darwin" ? {
+      relayExecutable: process.execPath,
+      relayArguments: [join(ROOT, "src", "launcher.mjs")],
+    } : {}),
     providerSettingsPath, extraModelSettingsPath, modelCatalogPath: catalogPath,
     relayStatePath: join(directory, "relay-state.json"),
     tokenUsageEventsPath: join(directory, "relay-usage.jsonl"), generation: randomUUID(),
@@ -201,7 +243,12 @@ export async function startLiveRuntime(t, profile, budget) {
     'features.multi_agent_v2=false', 'features.shell_snapshot=false', 'web_search="disabled"',
     '[mcp_servers.fixture]', `command=${JSON.stringify(process.execPath)}`, `args=${JSON.stringify([mcp, cwd])}`,
   ].join("\n"));
-  child = spawn(shim, ["app-server"], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
+  child = spawn(relayExecutable, [...relayArguments, "app-server"], {
+    env,
+    cwd,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: process.platform === "win32",
+  });
   const rpc = new RpcClient(child, { sanitize });
   let requests = 0;
   const totals = new Map();

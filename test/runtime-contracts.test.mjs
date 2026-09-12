@@ -9,14 +9,17 @@ import { CdpClient, findCodexTarget, isCodexDebugPortReady } from "../src/cdp-cl
 import {
   isRelayConfigCurrent,
   isRelayStateCurrent,
+  parseWindowsSubsystemSetting,
   parseProcessList,
   requestMacCodexQuit,
+  requestWindowsCodexQuit,
 } from "../src/platform.mjs";
 import {
   acquireSingleInstance,
   closeSingleInstance,
   compareVersions,
 } from "../src/single-instance.mjs";
+import { prepareWindowsUpdate } from "../src/windows-update.mjs";
 import {
   WIDGET_RUNTIME_VERSION,
   averageGenerationNetworkLatency,
@@ -53,6 +56,47 @@ test("[A LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送�
     args: ["-e", "tell application id \"com.openai.codex\" to quit"],
     options: { timeout: 5_000 },
   });
+});
+
+test("[A LCH-05] Windows 关闭 Codex 先请求主窗口正常退出", async () => {
+  let invocation = null;
+  const requested = await requestWindowsCodexQuit({
+    processIds: [42, 42, -1, 73],
+    execFileImpl: async (command, args, options) => {
+      invocation = { command, args, options };
+      return { stdout: "requested\r\n" };
+    },
+  });
+  assert.equal(requested, true);
+  assert.equal(invocation.command, "powershell.exe");
+  assert.deepEqual(invocation.args.slice(0, 4), [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+  ]);
+  assert.match(invocation.args.at(-1), /foreach \(\$processId in @\(42,73\)\)/);
+  assert.match(invocation.args.at(-1), /CloseMainWindow\(\)/);
+  assert.doesNotMatch(invocation.args.at(-1), /Stop-Process|taskkill|\/F/);
+  assert.deepEqual(invocation.options, {
+    windowsHide: true,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+});
+
+test("[A LCH-02 LCH-06] Windows relay 模式只读取 desktop 段的 WSL 设置", () => {
+  assert.equal(parseWindowsSubsystemSetting(`
+runCodexInWindowsSubsystemForLinux = true
+[desktop]
+runCodexInWindowsSubsystemForLinux = false
+`), false);
+  assert.equal(parseWindowsSubsystemSetting(`
+[features]
+runCodexInWindowsSubsystemForLinux = false
+[desktop]
+runCodexInWindowsSubsystemForLinux = true # desktop runtime
+`), true);
+  assert.equal(parseWindowsSubsystemSetting(`
+[desktop.extra]
+runCodexInWindowsSubsystemForLinux = true
+`), false);
 });
 
 test("CDP 客户端按请求 ID 配对结果，并传播协议错误和 evaluate 异常", async (t) => {
@@ -200,6 +244,62 @@ test("单实例协议会保留普通重复启动，并允许显式正式版接�
   assert.ok(replacement?.listening);
   assert.equal(takeoverRequest.mode, "formal");
   assert.equal(takeoverRequest.explicitStart, true);
+});
+
+test("Windows 安装接管允许同版本正式包退出，并在持锁期间关闭 Codex", async (t) => {
+  const reservation = createTcpServer();
+  await new Promise((resolve, reject) => {
+    reservation.once("error", reject);
+    reservation.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = reservation.address();
+  await new Promise((resolve) => reservation.close(resolve));
+  let takeoverRequest = null;
+  const owner = await acquireSingleInstance({
+    port,
+    mode: "formal",
+    version: "1.2.3",
+    explicitStart: true,
+    onTakeover: async (request) => {
+      takeoverRequest = request;
+      await closeSingleInstance(owner);
+    },
+  });
+  const replacement = await acquireSingleInstance({
+    port,
+    mode: "formal",
+    version: "1.2.3",
+    explicitStart: true,
+    purpose: "install-update",
+  });
+  t.after(async () => {
+    await closeSingleInstance(replacement);
+    await closeSingleInstance(owner);
+  });
+  assert.ok(replacement?.listening);
+  assert.equal(takeoverRequest.purpose, "install-update");
+
+  const calls = [];
+  const lock = { listening: true };
+  await prepareWindowsUpdate({
+    version: "1.2.3",
+    acquireSingleInstanceImpl: async (options) => {
+      calls.push(["acquire", options]);
+      return lock;
+    },
+    stopCodexImpl: async (options) => { calls.push(["stop", options]); },
+    closeSingleInstanceImpl: async (value) => { calls.push(["close", value]); },
+  });
+  assert.deepEqual(calls, [
+    ["acquire", {
+      mode: "formal",
+      version: "1.2.3",
+      explicitStart: true,
+      purpose: "install-update",
+    }],
+    ["stop", { timeoutMs: 10_000 }],
+    ["close", lock],
+  ]);
 });
 
 test("Widget 桥接表达式安全传输完整数据、revision 和增量，不依赖页面操作", () => {
