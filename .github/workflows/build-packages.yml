@@ -156,9 +156,7 @@ jobs:
 
   windows:
     name: Windows x64 Setup
-    needs:
-      - test
-      - wsl-relay
+    needs: wsl-relay
     runs-on: windows-latest
     steps:
       - name: Checkout
