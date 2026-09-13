@@ -18,8 +18,22 @@ import {
 } from "../live-tests/runtime.mjs";
 import { ModelRouterManager } from "../src/model-router.mjs";
 import { scenarioCoverage } from "../scripts/test-support.mjs";
+import { selectedRuntime } from "../scripts/test-desktop-host.mjs";
 import { useTempDir } from "./helpers.mjs";
 const exec = promisify(execFile);
+
+test("[A HAR-01 HAR-04] 桌面付费计划在无支持运行环境的平台只报告 unsupported", async () => {
+  assert.equal(await selectedRuntime("current", {
+    platform: "linux",
+    allowUnsupportedCurrent: true,
+  }), "unsupported");
+  await assert.rejects(selectedRuntime("current", { platform: "linux" }),
+    /没有完整测试运行环境/);
+  await assert.rejects(selectedRuntime("all", {
+    platform: "linux",
+    allowUnsupportedCurrent: true,
+  }), /没有完整测试运行环境/);
+});
 
 test("[A RPC-02 HAR-04] 完整场景清单绑定证据文件，未执行与真实宿主不能自动变成通过", async () => {
   const coverage = await scenarioCoverage();

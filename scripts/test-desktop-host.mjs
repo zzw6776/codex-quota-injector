@@ -168,7 +168,9 @@ async function main() {
     return;
   }
   if (!options.profile) throw new Error("必须指定 --profile=official 或 --profile=deepseek");
-  const runtimeTarget = await selectedRuntime(options.runtime);
+  const runtimeTarget = await selectedRuntime(options.runtime, {
+    allowUnsupportedCurrent: options.plan,
+  });
   const plan = await desktopPlan(options.profile, runtimeTarget, options.triggerMode);
   if (options.plan) {
     console.log(JSON.stringify(plan, null, 2));
@@ -623,10 +625,22 @@ function publicRolloutEvidence(rollout) {
   };
 }
 
-async function selectedRuntime(requested) {
-  const available = runtimeTargetsForPlatform();
-  const current = available.length ? await currentRuntimeTarget() : null;
-  return resolveRuntimeSelection(requested ?? "current", { currentTarget: current, allowAll: false })[0];
+export async function selectedRuntime(requested, {
+  platform = process.platform,
+  allowUnsupportedCurrent = false,
+  currentTarget,
+} = {}) {
+  const value = requested ?? "current";
+  const available = runtimeTargetsForPlatform(platform);
+  if (!available.length && allowUnsupportedCurrent && value === "current") return "unsupported";
+  const current = available.length
+    ? currentTarget ?? await currentRuntimeTarget({ platform })
+    : null;
+  return resolveRuntimeSelection(value, {
+    platform,
+    currentTarget: current,
+    allowAll: false,
+  })[0];
 }
 
 function parseArguments(argumentsList) {
