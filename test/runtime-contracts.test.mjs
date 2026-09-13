@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { createServer as createTcpServer } from "node:net";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,6 +23,7 @@ import {
   compareVersions,
 } from "../src/single-instance.mjs";
 import { prepareWindowsUpdate } from "../src/windows-update.mjs";
+import { stopChild } from "../runtime-tests/support/offline-runtime.mjs";
 import {
   WIDGET_RUNTIME_VERSION,
   averageGenerationNetworkLatency,
@@ -44,6 +47,22 @@ import {
   widgetUpdateExpressionJson,
 } from "../src/widget.mjs";
 import { json, startHttpServer, useTempDir } from "./helpers.mjs";
+
+test("[A HAR-04 LCH-04] 测试进程回收等待 sidecar 释放继承的 stdio", async () => {
+  const child = spawn(process.execPath, ["-e", `
+    const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 150)"], {
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    process.stdout.write("ready\\n");
+    setInterval(() => {}, 1_000);
+  `], { stdio: ["pipe", "pipe", "pipe"] });
+  await once(child.stdout, "data");
+  let closed = false;
+  child.once("close", () => { closed = true; });
+  await stopChild(child);
+  assert.equal(closed, true, "父进程退出但 sidecar 仍持有 stdio 时不能提前回收目录");
+});
 
 test("[A LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送终止信号", async () => {
   let invocation = null;

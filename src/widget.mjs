@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 124;
+export const WIDGET_RUNTIME_VERSION = 127;
 
 export function paginateGenerationDetails(details, visibleCount = 20) {
   const ordered = Array.isArray(details)
@@ -438,6 +438,7 @@ export function installQuotaWidget(
       deepSeek: { enabled: false, apiKey: "", balance: null },
       extraModels: { platforms: [] },
       tokenUsage: { status: "ready", turns: [] },
+      hostHealth: { required: false, status: "direct" },
     },
     dataJson: "",
     dataRevision: null,
@@ -497,6 +498,11 @@ export function installQuotaWidget(
     }
     .quota-divider { opacity: .42; font-weight: 400; }
     .quota-chip-item { display: inline-flex; align-items: baseline; }
+    .host-health-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 999px; background: #d97706; box-shadow: 0 0 0 2px rgba(217,119,6,.13); }
+    .host-health-dot.ready { background: #43a665; box-shadow: 0 0 0 2px rgba(67,166,101,.13); }
+    .host-health-dot.degraded { background: #dc4c3f; box-shadow: 0 0 0 2px rgba(220,76,63,.14); }
+    .host-health-dot.direct { background: #5b8fc9; box-shadow: 0 0 0 2px rgba(91,143,201,.13); }
+    .host-health-dot.unknown { background: #8a8a95; box-shadow: 0 0 0 2px rgba(138,138,149,.13); }
     .is-warning { color: #d97706 !important; }
     .is-critical { color: #dc4c3f !important; }
     .quota-popover {
@@ -527,6 +533,14 @@ export function installQuotaWidget(
     .panel-title-wrap { display: flex; align-items: baseline; min-width: 0; gap: 7px; }
     .panel-subtitle { margin-top: 3px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
     .panel-count { margin-left: 6px; color: var(--token-text-secondary, #aaaab5); font-size: 12px; font-weight: 500; }
+    .panel-controls { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+    .host-health-status {
+      appearance: none; display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; padding: 0; border: 0; border-radius: 7px; cursor: default;
+      color: inherit; background: transparent;
+    }
+    .host-health-status:hover, .host-health-status:focus-visible { background: rgba(255,255,255,.075); outline: none; }
+    .host-health-status .host-health-dot { width: 8px; height: 8px; flex-basis: 8px; box-shadow: none; }
     .icon-btn { appearance: none; width: 26px; height: 26px; border: 0; border-radius: 8px; cursor: pointer; color: inherit; background: transparent; }
     .icon-btn:hover { background: rgba(255,255,255,.07); }
     .provider-icon-btn {
@@ -588,6 +602,13 @@ export function installQuotaWidget(
     .operation .oauth-cancel { flex: 0 0 auto; padding: 3px 7px; }
     .operation.success { color: #7ecb9b; background: rgba(52,168,92,.09); }
     .operation.error { color: #ef8e86; background: rgba(220,76,63,.09); }
+    .host-health-banner { display: grid; gap: 7px; margin-bottom: 11px; padding: 10px 11px; border: 1px solid rgba(229,184,106,.28); border-radius: 11px; color: #f2cf8e; background: rgba(229,184,106,.09); font-size: 10.5px; line-height: 15px; }
+    .host-health-banner.degraded { border-color: rgba(220,76,63,.3); color: #f3a49e; background: rgba(220,76,63,.09); }
+    .host-health-title { font-size: 11.5px; font-weight: 700; }
+    .host-health-detail { color: var(--token-text-secondary, #b5b5bf); overflow-wrap: anywhere; }
+    .host-health-missing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .host-health-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .host-health-actions .btn { padding: 4px 8px; }
     .panel-version { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.07); color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
     .panel-version-text { margin-left: auto; color: var(--token-text-secondary, #aaaab5); white-space: nowrap; }
     .panel-balance { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -710,6 +731,10 @@ export function installQuotaWidget(
     .quota-wrap.is-light .btn { color: #2f3035; border-color: rgba(0,0,0,.12); background: rgba(0,0,0,.025); }
     .quota-wrap.is-light .btn:hover { background: rgba(0,0,0,.065); }
     .quota-wrap.is-light .btn.primary { color: #71438e; border-color: rgba(116,69,143,.28); background: rgba(116,69,143,.08); }
+    .quota-wrap.is-light .host-health-banner { color: #8a5b00; border-color: rgba(154,101,0,.25); background: rgba(154,101,0,.07); }
+    .quota-wrap.is-light .host-health-banner.degraded { color: #a7352e; border-color: rgba(181,61,53,.24); background: rgba(181,61,53,.06); }
+    .quota-wrap.is-light .host-health-detail { color: #6f6f79; }
+    .quota-wrap.is-light .host-health-status:hover, .quota-wrap.is-light .host-health-status:focus-visible { background: rgba(0,0,0,.065); }
     .quota-wrap.is-light .account-remove { color: #b53d35; border-color: rgba(181,61,53,.2); background: rgba(181,61,53,.045); }
     .quota-wrap.is-light .account-remove:hover { background: rgba(181,61,53,.09); }
     .quota-wrap.is-light .account-tooltip { color: #202124; background: #fff; border-color: rgba(0,0,0,.12); box-shadow: 0 6px 20px rgba(0,0,0,.12); }
@@ -827,7 +852,14 @@ export function installQuotaWidget(
     if (chipBalanceText) {
       chipItems.push(`<span class="quota-chip-item quota-chip-balance">${escapeHtml(chipBalanceText)}</span>`);
     }
-    const chip = chipItems.join('<span class="quota-divider">·</span>');
+    const hostHealth = state.data.hostHealth ?? { required: false, status: "direct" };
+    const healthIndicator = hostHealth.status === "degraded"
+      ? '<span class="host-health-dot degraded" aria-hidden="true"></span>'
+      : hostHealth.status === "starting"
+        ? '<span class="host-health-dot" aria-hidden="true"></span>'
+        : "";
+    const chip = `${healthIndicator}${chipItems.join('<span class="quota-divider">·</span>')}`;
+    const hostHealthBanner = renderHostHealthBanner(hostHealth);
     const accountHtml = accounts.length
       ? accounts.map(renderAccount).join("")
       : '<div class="empty">暂无账号，点击下方按钮添加</div>';
@@ -900,7 +932,7 @@ export function installQuotaWidget(
             <button class="icon-btn provider-icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.3 2.2h3.4l.5 2.6 3 1.7 2.5-.9 1.7 2.9-2 1.8v3.4l2 1.8-1.7 2.9-2.5-.9-3 1.7-.5 2.6h-3.4l-.5-2.6-3-1.7-2.5.9-1.7-2.9 2-1.8v-3.4l-2-1.8 1.7-2.9 2.5.9 3-1.7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
             <button class="icon-btn provider-icon-btn wakeup-open" type="button" aria-label="定时任务" title="定时任务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h6"/></svg></button>
           </div>
-          <button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button>
+          ${renderPanelControls(hostHealth)}
         </header>
         <div class="account-list">${accountHtml}</div>
         ${operation}
@@ -921,8 +953,8 @@ export function installQuotaWidget(
       ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text"${footerTitle}>${footerMeta}</span></div>`
       : "";
     wrap.innerHTML = `
-      <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : providerPage ? "DeepSeek 设置" : extraModelsPage ? "额外模型管理" : "Codex 账号与额度"}">${popoverContent}${versionFooter}</section>`;
+      <button class="quota-chip" type="button" aria-label="${hostHealth.status === "degraded" ? "Codex 任务工具异常；查看账号额度与诊断" : "查看账号额度"}">${chip}</button>
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : providerPage ? "DeepSeek 设置" : extraModelsPage ? "额外模型管理" : "Codex 账号与额度"}">${hostHealthBanner}${popoverContent}${versionFooter}</section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       nextPopover.showPopover();
@@ -933,6 +965,83 @@ export function installQuotaWidget(
     bindEvents(wrap);
     if (wakeupFocus) state.shadow.getElementById(wakeupFocus)?.focus({ preventScroll: true });
     scheduleConversationTokenUsageRender();
+  }
+
+  function renderHostHealthBanner(health) {
+    if (!health?.required || !["starting", "degraded"].includes(health.status)) return "";
+    const degraded = health.status === "degraded";
+    const title = degraded ? "Codex 任务工具不可用" : "正在确认 Codex 任务工具";
+    const detail = health.actionError || health.detail;
+    const missing = Array.isArray(health.missingTools) && health.missingTools.length
+      ? `<div class="host-health-missing">缺少：${health.missingTools.map(escapeHtml).join("、")}</div>`
+      : "";
+    const restart = health.canRestart
+      ? '<button class="btn host-health-restart" type="button">重启 Codex</button>'
+      : "";
+    const logs = health.canOpenLogs
+      ? '<button class="btn host-health-open-logs" type="button">打开日志</button>'
+      : "";
+    return `<aside class="host-health-banner ${degraded ? "degraded" : "starting"}" role="${degraded ? "alert" : "status"}" aria-live="polite">
+      <div class="host-health-title">${title}</div>
+      <div>${escapeHtml(health.message ?? title)}</div>
+      ${detail ? `<div class="host-health-detail">${escapeHtml(detail)}</div>` : ""}
+      ${missing}
+      <div class="host-health-actions"><button class="btn host-health-recheck" type="button">重新检查</button>${restart}${logs}</div>
+    </aside>`;
+  }
+
+  function renderPanelControls(health = state.data.hostHealth) {
+    return `<div class="panel-controls">${renderHostHealthStatus(health)}<button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
+  }
+
+  function renderHostHealthStatus(health) {
+    const status = String(health?.status ?? "unknown");
+    const view = {
+      ready: { className: "ready" },
+      starting: { className: "starting" },
+      degraded: { className: "degraded" },
+      direct: { className: "direct" },
+    }[status] ?? { className: "unknown" };
+    const requiredTools = Array.isArray(health?.requiredTools) ? health.requiredTools : [];
+    const missingTools = Array.isArray(health?.missingTools) ? health.missingTools : [];
+    const details = [];
+    if (status === "ready") {
+      details.push("任务功能正常");
+      details.push(`${requiredTools.length} 项常用功能已加载`);
+      details.push(...requiredTools.map((name) => `✓ ${hostToolLabel(name)}`));
+    } else if (status === "starting") {
+      details.push("正在检查任务功能");
+      details.push("正在读取可用功能列表…");
+    } else if (status === "direct") {
+      details.push("官方直连");
+      details.push("任务功能由 Codex 直接提供");
+    } else {
+      details.push(status === "degraded" ? "任务功能异常" : "任务功能状态未知");
+      if (missingTools.length) {
+        details.push(`缺少 ${missingTools.length} 项功能`);
+        details.push(...missingTools.map((name) => `✕ ${hostToolLabel(name)}`));
+      } else if (health?.message) {
+        details.push(String(health.message));
+      }
+      details.push("建议：先重新检查，仍异常则重启 Codex");
+      if (missingTools.length) details.push(`诊断：${missingTools.join("、")} 未注册`);
+      if (health?.detail) details.push(`详情：${health.detail}`);
+      if (health?.actionError) details.push(`操作失败：${health.actionError}`);
+      details.push(`状态码：${health?.code || status}`);
+      if (health?.updatedAt) details.push(`状态更新：${formatUpdatedAt(health.updatedAt)}`);
+    }
+    const tooltip = escapeHtml(details.join("\n"));
+    return `<button class="host-health-status status-${view.className}" type="button" data-account-tooltip="${tooltip}" aria-label="${escapeHtml(details.join("；"))}"><span class="host-health-dot ${view.className}" aria-hidden="true"></span></button>`;
+  }
+
+  function hostToolLabel(name) {
+    const value = String(name ?? "");
+    return {
+      list_threads: "查看任务列表",
+      read_thread: "读取会话内容",
+      list_projects: "查看项目列表",
+      get_usage_limits: "查看用量额度",
+    }[value] ?? value;
   }
 
   function scheduleConversationTokenUsageRender() {
@@ -1689,7 +1798,7 @@ export function installQuotaWidget(
       ? models.map(renderContextModel).join("")
       : '<div class="context-empty">没有可展示的模型目录</div>';
     return `
-      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn context-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">模型上下文</div><div class="panel-subtitle">${models.length} 个模型 · 已覆盖 ${Number(context.overriddenCount) || 0} 个${orphanedCount ? ` · ${orphanedCount} 个模型已不存在` : ""}</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn context-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">模型上下文</div><div class="panel-subtitle">${models.length} 个模型 · 已覆盖 ${Number(context.overriddenCount) || 0} 个${orphanedCount ? ` · ${orphanedCount} 个模型已不存在` : ""}</div></div></div>${renderPanelControls()}</header>
       <section class="context-summary"><div class="context-status ${escapeHtml(status)}">${statusText}</div><div class="context-note">${contextNote}</div></section>
       <div class="context-toolbar"><span>系统默认值与当前配置值</span><span class="context-toolbar-actions"><button class="btn context-refresh" type="button" ${busy ? "disabled" : ""}>刷新</button><button class="btn context-reset-all" type="button" ${busy || !Number(context.overriddenCount) ? "disabled" : ""}>恢复全部默认</button></span></div>
       <div class="model-list">${modelHtml}</div>
@@ -1714,7 +1823,7 @@ export function installQuotaWidget(
       ? `<div class="quota-error">${escapeHtml(provider.balanceError)}（保留上次成功余额）</div>`
       : "";
     return `
-      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn provider-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">DeepSeek 模型</div><div class="panel-subtitle">${escapeHtml(provider.model?.displayName ?? "DeepSeek V4 Flash")} · 推理深度 low / high / max</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn provider-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">DeepSeek 模型</div><div class="panel-subtitle">${escapeHtml(provider.model?.displayName ?? "DeepSeek V4 Flash")} · 推理深度 low / high / max</div></div></div>${renderPanelControls()}</header>
       <section class="provider-summary"><div class="provider-status"><span class="${provider.enabled ? "enabled" : "disabled"}">${provider.enabled ? "已启用" : "未启用"}</span><span class="badge">${escapeHtml(provider.model?.slug ?? "deepseek-v4-flash")}</span></div><div class="provider-note">启用后，OpenAI 官方模型和 DeepSeek 会同时出现在模型列表。供应商在新建任务时确定，同一任务不能中途切换。</div></section>
       <form class="provider-form deepseek-form">
         <label class="provider-toggle"><input name="enabled" type="checkbox" ${enabled ? "checked" : ""} ${supported && !pendingRestart ? "" : "disabled"}>在模型列表中启用 DeepSeek</label>
@@ -1750,7 +1859,7 @@ export function installQuotaWidget(
             </article>`).join("")
           : '<div class="context-empty">尚未添加额外模型平台</div>'}</div>`;
     return `
-      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn extra-models-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">额外模型管理</div><div class="panel-subtitle">Responses API · 平台与模型分层管理</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn extra-models-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">额外模型管理</div><div class="panel-subtitle">Responses API · 平台与模型分层管理</div></div></div>${renderPanelControls()}</header>
       <section class="provider-summary"><div class="provider-status"><span class="${platforms.some((platform) => platform.enabled) ? "enabled" : "disabled"}">${platforms.some((platform) => platform.enabled) ? "已配置启用平台" : "暂无启用平台"}</span><span class="badge">${platforms.length} 个平台</span></div><div class="provider-note">默认使用原生 Responses，并关闭服务端响应存储以兼容无状态平台；仅为有工具调用续传兼容问题的模型勾选 Chat 兼容。每个模型可声明支持的推理强度，留空则由平台决定。只统计 Token，不计算费用。保存、停用或删除平台后会重启 Codex。</div></section>
       ${content}
       ${catalogConflictMessage}
@@ -1903,7 +2012,7 @@ export function installQuotaWidget(
       ? "导出前会主动刷新所选 OAuth 账号，把新的 access token 和 refresh token 都写回本机加密账户库；若包含当前账号，也同步写回 Codex 登录。迁移文件只包含 access token，新设备只能使用到它过期。"
       : "导出前会主动刷新所选 OAuth 账号，把新的 access token 和 refresh token 都写回本机加密账户库供恢复验证。迁移文件包含完整凭据；生成后本机账号标记为“已转出”，停止刷新、切换和唤醒。";
     const submitText = mode === "handoff" ? "确认完整转移" : "生成临时迁移文件";
-    return `<header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn migration-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">账号迁移</div><div class="panel-subtitle">导入继续使用账号管理中的 Token / JSON</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+    return `<header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn migration-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">账号迁移</div><div class="panel-subtitle">导入继续使用账号管理中的 Token / JSON</div></div></div>${renderPanelControls()}</header>
       <form class="migration-form">
         <div class="migration-options">
           <label class="migration-option ${mode === "temporary" ? "selected" : ""}"><input class="migration-mode" type="radio" name="migrationMode" value="temporary" ${mode === "temporary" ? "checked" : ""} ${busy ? "disabled" : ""}><span><span class="migration-option-title">临时使用</span><span class="migration-option-note">不导出 refresh token，本机账号不停止。</span></span></label>
@@ -1922,7 +2031,7 @@ export function installQuotaWidget(
     const accounts = (state.data.accounts ?? []).filter((item) =>
       item.authMode === "oauth" && item.authStatus === "active"
     );
-    const header = `<header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn wakeup-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">每日唤醒</div><div class="panel-subtitle">${accounts.length} 个账号 · 已开启 ${accounts.filter((item) => item.wakeup?.enabled).length} 个</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>`;
+    const header = `<header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn wakeup-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">每日唤醒</div><div class="panel-subtitle">${accounts.length} 个账号 · 已开启 ${accounts.filter((item) => item.wakeup?.enabled).length} 个</div></div></div>${renderPanelControls()}</header>`;
     if (!accounts.length) return `${header}<div class="empty">添加 OAuth 账号后可配置每日唤醒；API Key 账号不支持此功能</div>`;
     return `${header}
       <section class="provider-summary">
@@ -2079,6 +2188,18 @@ export function installQuotaWidget(
   }
 
   function bindEvents(wrap) {
+    wrap.querySelector(".host-health-recheck")?.addEventListener("click", (event) => {
+      event.currentTarget.disabled = true;
+      enqueue({ type: "host-health-recheck" });
+    });
+    wrap.querySelector(".host-health-restart")?.addEventListener("click", (event) => {
+      event.currentTarget.disabled = true;
+      enqueue({ type: "host-health-restart" });
+    });
+    wrap.querySelector(".host-health-open-logs")?.addEventListener("click", (event) => {
+      event.currentTarget.disabled = true;
+      enqueue({ type: "host-health-open-logs" });
+    });
     wrap.querySelectorAll("[data-account-tooltip]").forEach((button) => {
       button.addEventListener("pointerenter", () => scheduleAccountTooltip(button));
       button.addEventListener("focus", () => scheduleAccountTooltip(button));

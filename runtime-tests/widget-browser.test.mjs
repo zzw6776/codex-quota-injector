@@ -16,6 +16,10 @@ test("[A UI-01 UI-03 TOOL-06] 真实浏览器挂载、重复注入、换节点�
   assert.equal(await count(), 1);
   await b.click(".quota-chip");
   assert.match(await b.value(".quota-wrap", "className"), /is-open/);
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-status.status-direct') != null`), true);
+  assert.equal(await b.client.evaluate(`getComputedStyle(${SHADOW}.querySelector('.host-health-status .host-health-dot')).backgroundColor`), "rgb(91, 143, 201)");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.panel-controls .host-health-status + .close-panel') != null`), true,
+    "宿主状态必须固定显示在关闭按钮左侧");
   await b.fill("#composer", "原生消息 中文", { shadow: false });
   await b.click("#send", { shadow: false });
   assert.deepEqual(await b.client.evaluate("nativeMessages"), ["原生消息 中文"]);
@@ -93,6 +97,88 @@ test("[A UI-02 ACC-01 ACC-02 ACC-05] 页面刷新、迁移、恢复、导入和�
   assert.equal(await b.value(".refresh-all", "disabled"), true);
   await b.click(".oauth-cancel");
   assert.equal((await b.drain())[0].type, "oauth-cancel");
+});
+
+test("[A LCH-04 UI-02] codex_app 降级会显示常驻入口、诊断与恢复动作", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.update(fixtureData({
+    hostHealth: {
+      required: true,
+      status: "degraded",
+      code: "required-tool-missing",
+      message: "Codex 任务工具不完整",
+      detail: "fixture <unsafe>",
+      missingTools: ["read_thread"],
+      updatedAt: Date.UTC(2026, 8, 13, 12, 0, 0),
+      canRestart: true,
+      canOpenLogs: true,
+    },
+  }));
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-dot.degraded') != null`), true);
+  await b.click(".quota-chip");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-status.status-degraded') != null`), true);
+  assert.equal(await b.client.evaluate(`getComputedStyle(${SHADOW}.querySelector('.host-health-status .host-health-dot')).backgroundColor`), "rgb(220, 76, 63)");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.panel-controls .host-health-status + .close-panel') != null`), true);
+  const statusRect = await b.client.evaluate(`(() => {const r=${SHADOW}.querySelector('.host-health-status').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+  await b.client.request("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: statusRect.x,
+    y: statusRect.y,
+  });
+  await b.client.evaluate("new Promise(resolve => setTimeout(resolve, 350))");
+  assert.match(await b.value(".account-tooltip"), /任务功能异常/);
+  assert.match(await b.value(".account-tooltip"), /缺少 1 项功能/);
+  assert.match(await b.value(".account-tooltip"), /✕ 读取会话内容/);
+  assert.match(await b.value(".account-tooltip"), /建议：先重新检查，仍异常则重启 Codex/);
+  assert.match(await b.value(".account-tooltip"), /诊断：read_thread 未注册/);
+  assert.match(await b.value(".account-tooltip"), /状态码：required-tool-missing/);
+  assert.match(await b.value(".account-tooltip"), /详情：fixture <unsafe>/);
+  assert.match(await b.value(".account-tooltip"), /状态更新：/);
+  assert.match(await b.value(".host-health-banner"), /Codex 任务工具不可用/);
+  assert.match(await b.value(".host-health-banner"), /read_thread/);
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-banner unsafe')`), null,
+    "诊断文本不能作为 HTML 注入");
+  await b.click(".host-health-recheck");
+  await b.click(".host-health-restart");
+  await b.click(".host-health-open-logs");
+  assert.deepEqual((await b.drain()).map((action) => action.type), [
+    "host-health-recheck",
+    "host-health-restart",
+    "host-health-open-logs",
+  ]);
+  await b.update(fixtureData({
+    hostHealth: {
+      required: true,
+      status: "ready",
+      message: "Codex 任务工具已就绪",
+      requiredTools: ["list_threads", "read_thread", "list_projects", "get_usage_limits"],
+      missingTools: [],
+      toolsVerified: true,
+      canRestart: true,
+      canOpenLogs: true,
+    },
+  }));
+  assert.equal(await b.value(".host-health-banner"), null);
+  assert.equal(await b.value(".quota-chip > .host-health-dot"), null);
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-status.status-ready') != null`), true);
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-status .host-health-dot.ready') != null`), true);
+  assert.equal(await b.client.evaluate(`getComputedStyle(${SHADOW}.querySelector('.host-health-status .host-health-dot.ready')).backgroundColor`), "rgb(67, 166, 101)");
+  const readyStatusRect = await b.client.evaluate(`(() => {const r=${SHADOW}.querySelector('.host-health-status').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+  await b.client.request("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
+  await b.client.request("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: readyStatusRect.x,
+    y: readyStatusRect.y,
+  });
+  await b.client.evaluate("new Promise(resolve => setTimeout(resolve, 350))");
+  const readyTooltip = await b.value(".account-tooltip");
+  assert.match(readyTooltip, /任务功能正常/);
+  assert.match(readyTooltip, /4 项常用功能已加载/);
+  assert.match(readyTooltip, /✓ 查看任务列表/);
+  assert.match(readyTooltip, /✓ 读取会话内容/);
+  assert.match(readyTooltip, /✓ 查看项目列表/);
+  assert.match(readyTooltip, /✓ 查看用量额度/);
+  assert.doesNotMatch(readyTooltip, /状态码：|list_threads|read_thread|list_projects|get_usage_limits/);
 });
 
 test("[A UI-02 MOD-02 MOD-04] 页面上下文保存和重置的动作交给实际管理器后正确持久化", { timeout: 30_000 }, async t => {

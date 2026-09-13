@@ -958,6 +958,7 @@ export class ModelRouterManager {
       model,
       generates,
       input: body?.input,
+      toolInventory: requestToolInventory(body?.tools),
       followsToolResult: containsCallReference(body?.input),
       rolloutUsageFallback,
       requestStartedAt: effectiveRequestStartedAt,
@@ -987,6 +988,14 @@ export class ModelRouterManager {
         networkLatency,
       } = context;
       if (turnId) {
+        this.usageWriter?.write({
+          type: "request-tool-inventory",
+          threadId,
+          turnId,
+          model,
+          modelSource: "turn-request",
+          tools: context.toolInventory,
+        });
         this.usageWriter?.write({
           type: "thread-active",
           threadId,
@@ -1426,6 +1435,7 @@ function prepareCustomRequest(body, target) {
     throw httpError(400, `${target.displayName} 未配置图片输入能力`);
   }
   const next = structuredClone(body);
+  next.input = normalizeCodexDelegationInput(next.input);
   stripCodexInternalInputMetadata(next.input);
   if (target.routeKey === DEEPSEEK_PROVIDER) stripUnsupportedDeepSeekReasoningFields(next.input);
   next.store = false;
@@ -1446,6 +1456,34 @@ function prepareCustomRequest(body, target) {
     if (Object.keys(next.reasoning).length === 0) delete next.reasoning;
   }
   return next;
+}
+
+function normalizeCodexDelegationInput(input) {
+  if (!Array.isArray(input)) return input;
+  return input.map((item) => {
+    if (
+      !item
+      || typeof item !== "object"
+      || Array.isArray(item)
+      || item.type !== "function_call_output"
+      || nonEmptyString(item.call_id)
+      || item.name !== "send_message_to_thread"
+      || item.namespace !== "codex_app"
+    ) {
+      return item;
+    }
+    const output = nonEmptyString(item.output);
+    if (!output) return item;
+    const delegation = output.match(
+      /^\s*<codex_delegation>\s*<source_thread_id>[^<]+<\/source_thread_id>\s*<input>([\s\S]*)<\/input>\s*<\/codex_delegation>\s*$/,
+    );
+    if (!delegation) return item;
+    return {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: delegation[1] }],
+    };
+  });
 }
 
 function stripCodexInternalInputMetadata(input) {
@@ -1487,6 +1525,23 @@ function customRequestShape(body) {
         : typeof item?.content,
     })) ?? typeof body?.input,
   };
+}
+
+function requestToolInventory(tools) {
+  if (!Array.isArray(tools)) return [];
+  const unique = new Map();
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
+    const type = nonEmptyString(tool.type);
+    const name = nonEmptyString(tool.name ?? tool.function?.name);
+    const namespace = nonEmptyString(tool.namespace);
+    const serverLabel = nonEmptyString(tool.server_label);
+    if (!type && !name && !namespace && !serverLabel) continue;
+    const item = { type, name, namespace, serverLabel };
+    const key = JSON.stringify(item);
+    if (!unique.has(key)) unique.set(key, item);
+  }
+  return [...unique.values()];
 }
 
 function prepareCustomWebSocketRequest(body, target) {

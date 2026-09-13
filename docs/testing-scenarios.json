@@ -9,6 +9,7 @@
       ],
       "free": [
         "test/testing-boundaries.test.mjs",
+        "test/desktop-host-evidence.test.mjs",
         "runtime-tests/desktop-fixture.test.mjs",
         "runtime-tests/official-workflows.test.mjs"
       ],
@@ -52,9 +53,13 @@
       ],
       "free": [
         "test/runtime-contracts.test.mjs",
-        "test/model-configuration.test.mjs"
+        "test/model-configuration.test.mjs",
+        "test/host-health.test.mjs",
+        "test/app-server-relay.test.mjs",
+        "test/lifecycle-host.test.mjs",
+        "runtime-tests/widget-browser.test.mjs"
       ],
-      "note": "就绪、失效状态与参数契约；实际客户端启动恢复随 LCH-01 处理。"
+      "note": "就绪、失效状态与参数契约；codex_app 启动通知、状态列表、超时、必需工具、状态所有权和 UI 降级均有免费回归，实际客户端启动恢复随 LCH-01 处理。"
     },
     {
       "ids": [
@@ -146,19 +151,22 @@
         "TOOL-06"
       ],
       "free": [
+        "test/desktop-host-evidence.test.mjs",
+        "test/host-health.test.mjs",
         "runtime-tests/browser-host.test.mjs",
         "runtime-tests/desktop-fixture.test.mjs",
         "runtime-tests/official-interactions.test.mjs",
         "test/chat-protocol-tools.test.mjs"
       ],
       "live": "host",
-      "note": "A 执行自有网页/浏览器适配器与动态工具共享契约；实际 functions.exec、web.run、computer use 必须在 B 桌面宿主单独验收，computer use 材料通过仅绑定本机的 HTTP 地址提供。"
+      "note": "A 执行自有网页/浏览器适配器、动态工具共享契约及 codex_app 健康状态机，并覆盖状态文件原子替换事件、防抖、正常/异常自适应兜底与监听错误回退；实际 codex_app list_threads/read_thread/list_projects/get_usage_limits、functions.exec、web.run、computer use 必须在 B 桌面宿主单独验收，computer use 材料通过仅绑定本机的 HTTP 地址提供。"
     },
     {
       "ids": [
         "INT-02"
       ],
       "free": [
+        "test/desktop-host-evidence.test.mjs",
         "runtime-tests/official-interactions.test.mjs"
       ],
       "live": "backend+host",
@@ -301,6 +309,7 @@
         "OBS-03"
       ],
       "free": [
+        "test/desktop-host-evidence.test.mjs",
         "test/token-usage.test.mjs",
         "test/tool-executions.test.mjs",
         "test/token-pricing.test.mjs",
@@ -325,7 +334,7 @@
         "test/runtime-contracts.test.mjs"
       ],
       "live": "host",
-      "note": "实际 Chrome/Edge CDP 注入、点击/输入/表单到管理器、尺寸/主题/任务 DOM 变化；浏览器使用临时用户目录，macOS 额外使用模拟钥匙串；日常桌面窗口与真实宿主状态仍由 B 核对。"
+      "note": "实际 Chrome/Edge CDP 注入、点击/输入/表单到管理器、尺寸/主题/任务 DOM 变化；宿主状态以无文字彩色状态点固定显示在所有面板关闭按钮左侧，正常悬浮仅展示易读功能名，异常悬浮展示缺失项和技术诊断；仅健康检查时间变化不得重绘或打断悬浮；浏览器使用临时用户目录，macOS 额外使用模拟钥匙串；日常桌面窗口与真实宿主状态仍由 B 核对。"
     }
   ]
 }

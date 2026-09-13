@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { isCodexDebugPortReady } from "./cdp-client.mjs";
+import { evaluateHostHealth } from "./host-health.mjs";
 import {
   defaultAccountDataDir,
   isRelayStateCurrent,
@@ -61,6 +62,8 @@ export function evaluateLifecycleReadiness({
   injectorPids,
   debugReady = true,
   expectedProtocol,
+  healthState = null,
+  now = Date.now(),
 } = {}) {
   const protocol = relayProtocolFromGeneration(relayConfig?.generation);
   const generationMatches = Boolean(
@@ -71,8 +74,20 @@ export function evaluateLifecycleReadiness({
   const singleInjector = Array.isArray(injectorPids) && injectorPids.length === 1;
   const codexRunning = Array.isArray(codexPids) && codexPids.length > 0;
   const protocolMatches = expectedProtocol == null || protocol === expectedProtocol;
+  const hostHealth = evaluateHostHealth({
+    binding: {
+      hostToolsRequired: relayConfig?.hostToolsRequired === true,
+      generation: relayConfig?.generation,
+    },
+    relayState,
+    healthState,
+    relayCurrent: relayStateCurrent === true,
+    now,
+  });
+  const hostToolsReady = hostHealth.required !== true || hostHealth.status === "ready";
   return {
-    ready: codexRunning && debugReady && singleInjector && relayReady && protocolMatches,
+    ready: codexRunning && debugReady && singleInjector && relayReady && protocolMatches &&
+      hostToolsReady,
     codexRunning,
     debugReady,
     singleInjector,
@@ -81,6 +96,8 @@ export function evaluateLifecycleReadiness({
     protocolMatches,
     protocol,
     expectedProtocol,
+    hostToolsReady,
+    hostHealth,
   };
 }
 
@@ -92,11 +109,17 @@ export async function inspectLifecycleHost({
 } = {}) {
   const relayConfigPath = join(dataDir, "app-server-relay-config.json");
   const relayStatePath = join(dataDir, "app-server-relay-state.json");
+  const defaultHostHealthPath = join(dataDir, "app-server-health.json");
   const accountIndexPath = join(dataDir, "accounts.json");
-  const [relayConfig, relayState, accountIndex, codexPids, injectorPids, installedVersion, debugReady] =
+  const relayConfig = await readJson(relayConfigPath);
+  const hostHealthPath = typeof relayConfig?.hostHealthPath === "string" &&
+      relayConfig.hostHealthPath.trim()
+    ? relayConfig.hostHealthPath
+    : defaultHostHealthPath;
+  const [relayState, healthState, accountIndex, codexPids, injectorPids, installedVersion, debugReady] =
     await Promise.all([
-      readJson(relayConfigPath),
       readJson(relayStatePath),
+      readJson(hostHealthPath),
       readJson(accountIndexPath),
       listCodexProcessIds(),
       findInjectorListenerPids(),
@@ -118,6 +141,7 @@ export async function inspectLifecycleHost({
     injectorPids,
     debugReady,
     expectedProtocol,
+    healthState,
   });
   return {
     platform: process.platform,
@@ -135,6 +159,7 @@ export async function inspectLifecycleHost({
       stateCurrent: relayStateCurrent,
       wslNative,
     },
+    hostHealth: readiness.hostHealth,
     readiness,
     accounts: {
       count: Array.isArray(accountIndex?.accounts) ? accountIndex.accounts.length : 0,
@@ -143,7 +168,7 @@ export async function inspectLifecycleHost({
       target: lifecycleFingerprint(pair.targetAccountId),
     },
     privateAccountPair: pair,
-    paths: { relayConfigPath, relayStatePath, accountIndexPath },
+    paths: { relayConfigPath, relayStatePath, hostHealthPath, accountIndexPath },
   };
 }
 

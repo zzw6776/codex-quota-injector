@@ -1,6 +1,6 @@
 # Codex 兼容性测试方案与覆盖矩阵
 
-状态：免费契约、实际官方运行时、生产模型目录与中继、隔离浏览器、B 执行入口和独立 C 生命周期监督器已实现。A 已按公共、Windows 原生 Relay、WSL 原生 Relay 拆分；Windows C 会自动切换两套运行环境并恢复原配置。当前结果见[测试说明](testing.md)及本次运行报告；真实模型、桌面宿主和 Windows 真机生命周期仍必须分别执行验收。本文不是整套测试通过报告。
+状态：免费契约、实际官方运行时、生产模型目录与中继、隔离浏览器、分离的 B 后台/桌面执行器和独立 C 生命周期监督器已实现。A 已按公共、Windows 原生 Relay、WSL 原生 Relay 拆分；Windows C 会自动切换两套运行环境并恢复原配置。当前结果见[测试说明](testing.md)及本次运行报告；真实模型、真实桌面任务和 Windows 真机生命周期仍必须分别执行验收。本文不是整套测试通过报告。
 
 ## 1. 验收目标与平台范围
 
@@ -57,7 +57,7 @@
 | 观察与诊断 | [token-usage.mjs](../src/token-usage.mjs)、[tool-executions.mjs](../src/tool-executions.mjs)、[token-pricing.mjs](../src/token-pricing.mjs)、[file-logger.mjs](../src/file-logger.mjs)；[cli.mjs](../src/cli.mjs) 与 [preview-server.mjs](../src/preview-server.mjs) |
 | 产物 | [scripts](../scripts)、[Windows 安装器](../installer/windows-installer.nsi)、[relay-artifact.mjs](../src/relay-artifact.mjs)、[relay-contract.mjs](../src/relay-contract.mjs)、[打包工作流](../.github/workflows/build-packages.yml) |
 
-macOS 在无模型扩展/上下文覆盖时可以走官方直接路径；需要静态目录时使用原生 shim；需要自定义路由时由 shim 先进入 RPC relay，再由 Router 转发模型网络请求。RPC relay 负责让新建、恢复和分叉持续携带模型供应商，Router 负责目标选择、凭据隔离和协议兼容。Windows 原生模式使用版本化的 Windows SEA relay，WSL 模式使用版本化的 Linux SEA relay，自定义供应商由 relay 内置路由处理。必须按这些实际分支组织配置，不能用一个平台的通过结果替代另一个平台，也不能把独立唤醒链当作桌面主链。
+macOS 在无模型扩展/上下文覆盖时可以走官方直接路径；需要静态目录时使用原生 shim；需要自定义路由时，shim 先建立 RPC sidecar 管道，再原位 `exec` 官方 app-server。RPC sidecar 只改写标准流，不进入官方 app-server 的祖先链，从而保持 `ChatGPT → 官方 codex → 官方工具进程` 的签名链；Router 再负责模型网络请求的目标选择、凭据隔离和协议兼容。RPC relay 仍负责让新建、恢复和分叉持续携带模型供应商。Windows 原生模式使用版本化的 Windows SEA relay，WSL 模式使用版本化的 Linux SEA relay，自定义供应商由 relay 内置路由处理。必须按这些实际分支组织配置，不能用一个平台的通过结果替代另一个平台，也不能把独立唤醒链当作桌面主链。
 
 ### 2.3 后续落地的公共链路回归
 
@@ -70,8 +70,9 @@ macOS 在无模型扩展/上下文覆盖时可以走官方直接路径；需要�
 | E15 | [model-router-recovery.test.mjs](../test/model-router-recovery.test.mjs)，5 组 | NET-04/05、MOD-03、OBS-02 的生产 Router/Chat 组合、并发凭据隔离、取消与错误恢复、观察故障和用量；上游全部为本地服务 |
 | E16 | [deepseek-history.test.mjs](../runtime-tests/deepseek-history.test.mjs)，1 组 | MOD-03、SES-01/02/06 的实际官方 app-server → 当前原生生产中继入口 → 本地 Responses 服务；macOS 经过 shim/Router，Windows 与 WSL 分别经过实际 PE/ELF SEA Relay，使用各自 Node.js、依赖、官方 CLI 与临时目录。用 `reasoning_text` 流复现 Codex 推理历史，验证恢复和分叉继承 DeepSeek 供应商、工具历史保持关联、第三方供应商采用本地摘要压缩并在压缩后续接，同时剥离私有消息元数据及 DeepSeek 不支持的 `summary`/`encrypted_content` |
 | E17 | [deepseek-tools.test.mjs](../runtime-tests/deepseek-tools.test.mjs)，1 组 | MOD-03、TOOL-03、INT-02 的实际官方 app-server → 当前原生生产中继入口 → 本地 Responses/MCP 服务；Windows 与 WSL 各自执行，结果不能互相继承。固定 DeepSeek 直接工具模式必须在首次请求暴露 MCP 命名空间，并在 `never` 下通过只读 MCP 验证直调、模型调用、结果回灌和独立事件，防止错误启用延迟搜索后工具失效或模型循环 |
+| E18 | [desktop-host-evidence.test.mjs](../test/desktop-host-evidence.test.mjs) 与 [desktop-fixture.test.mjs](../runtime-tests/desktop-fixture.test.mjs) | 固定 B1/B2 后台与桌面组件不互相继承；桌面报告只从匹配随机标记的真实 rollout、模型/调用 ID、失败退出码后的续接、运行时绑定和本机 HTTP 服务记录判定，不采信模型自述。这里只验证执行器契约，不能代替真实桌面任务运行 |
 
-E13–E15 进入 `npm test`，E16–E17 进入 `npm run test:offline`。完整证据索引见[场景索引](testing-scenarios.json)及[测试说明](testing.md)。方法名回放仅验证消息外壳和未改写数据，不声称符合每个方法的完整参数 Schema，也不代替对应业务功能验收。
+E13–E15 与 E18 的纯逻辑部分进入 `npm test`，E16–E17 及 E18 的临时浏览器材料进入 `npm run test:offline`。完整证据索引见[场景索引](testing-scenarios.json)及[测试说明](testing.md)。方法名回放仅验证消息外壳和未改写数据，不声称符合每个方法的完整参数 Schema，也不代替对应业务功能验收。
 
 ## 3. 三批测试及公共验收规则
 
@@ -88,7 +89,7 @@ A 套件必须用临时工作区、临时配置、测试凭据和可记录请求
 
 ### B：消耗 Token 的真实验收
 
-在 A 通过后主动展示计划并询问。B1 只运行 Codex 官方模型，B2 只运行 DeepSeek；两批分别授权、分别生成报告，一批的同意和结果不能覆盖另一批。每次 B 还必须绑定一个运行环境，默认读取当前桌面设置，也可显式指定本平台环境；脚本不修改桌面运行方式，且所选环境对应的 A 组件必须通过。复用同一场景材料和断言，让实际主入口、真实工具宿主、官方 app-server、实际生效的 Router/兼容代理与模型服务共同参与。后台真实测试拆成工具、历史、压缩、宿主适配四个隔离阶段，每段新建运行时和短任务，分别应用 Token/轮次阈值；任一阶段失败即停止该批后续付费阶段。保留独立唤醒冒烟，但不给它主入口验收资格。
+在 A 通过后主动展示计划并询问。B1 只运行 Codex 官方模型，B2 只运行 DeepSeek；两批分别授权、分别生成报告，一批的同意和结果不能覆盖另一批。每次 B 还必须绑定一个运行环境，默认读取当前桌面设置，也可显式指定本平台环境；脚本不修改桌面运行方式，且所选环境对应的 A 组件必须通过。每个 B 固定拆成后台和桌面两个组件：后台真实测试按工具、历史、压缩、app-server 回调四个隔离阶段运行；桌面组件让目标模型的真实 Codex 桌面任务执行 functions.exec、web.run、computer use 和用户补充输入，并由独立执行器读取 rollout、当前运行时和 HTTP 材料记录。只有两个组件属于同一源码、平台、运行环境和供应商且都通过，整批才通过。保留独立唤醒冒烟，但不给它桌面入口验收资格。
 
 每项 B 用例必须留下输入条件、实际工具/接口、关联任务/轮次/请求 ID、终态和独立结果。比较原生与注入模式的功能结果，不要求两次模型文字逐字相同。基线复用仅限 Codex/工具/配置版本未变且有有效证据；失败或升级时重新运行对照。
 
@@ -159,10 +160,10 @@ flowchart LR
 
 | 编号 | 场景与触点 | 现有证据/缺口 | A：免费验证 | B：真实判据 |
 | --- | --- | --- | --- | --- |
-| LCH-01 | 主入口首次启动；launcher、platform、bridge | E08 仅局部就绪 | 临时配置启动主入口，核对实际执行文件、cwd、配置、就绪和错误退出；doctor/read-quota/inject --once 分别验证职责 | 从该入口完成任务，证据显示走了期望进程和路由 |
+| LCH-01 | 主入口首次启动；launcher、platform、bridge | E08 仅局部就绪 | 临时配置启动主入口，核对实际执行文件、cwd、配置、就绪和错误退出；macOS/Windows 原生入口在 Worker 硬失败时显示通用错误和日志路径；doctor/read-quota/inject --once 分别验证职责 | 从该入口完成任务，证据显示走了期望进程和路由 |
 | LCH-02 | 辅助 CLI、参数与环境；shim、relay | E04/E06 假 CLI | app-server 与普通子命令、子命令前后 -c、空格/中文路径、完整/精简继承环境、缺损配置；由官方 CLI 解析，并验证子进程不会递归启动注入器 | 实际依赖辅助 CLI 的功能完成；辅助调用不接管或重启主任务 |
 | LCH-03 | 重复启动、正式/开发接管、升级复用；single-instance、launcher | E08 仅协议 | 空闲与任务运行时的重复打开、旧协议、版本变化、端口占用；核对启动次数、PID 和 Router 身份 | 接管后原任务可继续；需要重启的情况按声明恢复 |
-| LCH-04 | 配置、进程及平台就绪异常；platform、bridge | E08 generation/PID 局部检查 | 过期状态、目标缺失、目录准备失败、启动失败、CDP/relay 部分就绪；本平台沙箱准备与 readiness | 问题纠正后主入口能执行任务；不把“有进程”当作可用 |
+| LCH-04 | 配置、进程及平台就绪异常；platform、bridge、codex_app | E08 generation/PID 局部检查 | 过期状态、目标缺失、目录准备失败、启动失败、CDP/relay 部分就绪；观察 `mcpServer/startupStatus/updated` 与 `mcpServerStatus/list`，按 generation、PID 和会话所有权持久化 `codex_app` 状态；状态文件原子替换经目录监听和 100 毫秒防抖及时刷新，正常状态每 30 秒兜底，启动中/异常或监听失败时每 3 秒检查；超时、启动失败及缺少 `list_threads`、`read_thread`、`list_projects`、`get_usage_limits` 任一常用只读入口均不得就绪 | 问题纠正后主入口能执行任务；不把“有进程”或仅有 MCP 名称当作可用 |
 | LCH-05 | 退出、信号和资源清理；原生入口、relay、injector | E06 正常结束局部覆盖 | SIGINT/SIGTERM、stdin 结束、子进程失败、最后一段输出；确认退出码、输出、锁/监听端口/进程清理 | 中断或关闭后再次启动可完成任务；无旧任务后台继续生成 |
 | LCH-06 | 正式产物与安装/更新；scripts、installer | 有构建期结构检查，无完整运行验收 | 只测试当前 OS/架构的正式产物；资源/权限/SEA、安装路径、无开发 Node 环境、更新和卸载数据策略 | 正式入口执行与开发入口相同的适用验收集；源码模式通过不能替代 |
 
@@ -200,7 +201,7 @@ flowchart LR
 | TOOL-01 | 文件、命令、补丁与结果续接；全链、官方工具 | E05/E07 字段；E09/E10 计量 | 模拟模型驱动官方运行时操作临时项目，核对读取、执行、补丁内容和再次读取；fs RPC 同样纳入 | 主入口读文件→执行命令→修改→独立核对→根据结果回答 |
 | TOOL-02 | 长命令、PTY 与后台终端；启动环境、官方进程接口 | E10 仅识别 write_stdin | 启动→yield→stdin→输出→resize→终止，验证 session ID、cwd、退出码和孤儿进程 | 主入口可续接运行中的命令，终止后不再运行 |
 | TOOL-03 | MCP 发现、资源、调用、事件与认证；工具宿主、配置、RPC | E05 字段；E10 解析 | 本地 MCP 提供成功/错误/进度/资源/事件/elicitation，覆盖启动失败与 reload；写入型工具在 `never` 下必须拒绝且无副作用，只读工具完成直调和模型驱动调用；不伪造同名工具当作 MCP | 先用状态接口确认实际 MCP 就绪并直调只读工具，再用独立模型轮次驱动同一工具；核对两次调用、官方完成事件、独立材料和当前任务回复 |
-| TOOL-04 | 动态工具、桌面工具、exec 编排与宿主回调；RPC、辅助进程 | E10 仅账本 | item/tool/call、currentTime/read 等宿主请求、命名空间、嵌套调用、结果类型与错误；记录实际注册源 | 本机暴露的各类宿主工具完成真实操作；宿主调用未发生时不能算通过 |
+| TOOL-04 | 动态工具、桌面工具、exec 编排与宿主回调；RPC、辅助进程 | E10 仅账本 | item/tool/call、currentTime/read 等宿主请求、命名空间、嵌套调用、结果类型与错误；记录实际注册源；解析桌面证据时验证 `codex_app` 四个常用只读入口的调用结果、会话读取顺序、当前任务 ID 和随机标记 | 主入口先用 `list_threads` 找到当前任务，再以返回 ID 调用 `read_thread` 并读回随机标记；`list_projects` 与 `get_usage_limits` 正常返回；本机其他宿主工具完成真实操作；调用未发生时不能算通过 |
 | TOOL-05 | 网页搜索、打开、查找；实际 web 工具及其路径 | 没有 web.run 完整执行验收 | 测试搜索/页面适配器与请求回传；本地网页提供确定内容；记录服务实现差异 | 调用当前主入口实际暴露的 web 工具搜索、打开和读取信息，核对执行证据及原页面；不预设它等同于 web_search |
 | TOOL-06 | 浏览器/桌面 computer use；辅助 CLI、工具宿主、页面 | 没有完整执行验收 | 连接、页面/画面读取、输入和点击隔离页面、切换/断开；核对独立页面状态和清理 | 主入口调用真实 computer use，打开仅绑定本机回环地址的 HTTP 材料并输入/操作后读取新状态；截图、结果和任务续接齐全，URL 策略拒绝不能算注入故障 |
 | TOOL-07 | 并行工具、工具失败与恢复；RPC、Router、历史 | E05/E07/E10 局部 | 同名不同 ID、结果乱序、部分失败、工具取消、较大返回；每条结果保持关联 | 并行任务得到各自结果；一次工具失败后其他结果仍可使用 |
@@ -256,7 +257,7 @@ flowchart LR
 | 编号 | 场景与触点 | 现有证据/缺口 | A：免费验证 | B：真实判据 |
 | --- | --- | --- | --- | --- |
 | UI-01 | 注入、重新挂载、版本替换和销毁；widget、injector、CDP | E08 数据桥/语法 | 实际 DOM 挂载、旧版本替换、主节点变化、destroy、监听器和样式清理；不拦截原生输入 | 注入/重连后仍能发消息、使用工具、切换任务 |
-| UI-02 | 面板全部动作；widget→动作队列→manager | E08 drain 表达式；各 manager 局部 | 实际点击/输入/保存/取消，覆盖账号迁移与恢复、刷新、上下文、DeepSeek、额外平台、唤醒动作；断言事件恰好执行一次和持久化结果 | 需要模型的动作按对应 B 场景验证；不能仅验证按钮存在 |
+| UI-02 | 面板全部动作；widget→动作队列→manager | E08 drain 表达式；各 manager 局部 | 实际点击/输入/保存/取消，覆盖账号迁移与恢复、刷新、上下文、DeepSeek、额外平台、唤醒动作；所有面板在关闭按钮左侧固定显示 `codex_app` 彩色状态点（绿/黄/红/蓝对应正常/启动中/异常/直连），不显示状态文字且使用普通指针；正常 Tooltip 只显示易读功能名，异常时显示缺失项、建议和技术诊断；轮询时间变化不得触发面板重绘或打断悬浮；降级时验证常驻诊断及重新检查/重启/打开日志动作；断言事件恰好执行一次和持久化结果 | 需要模型的动作按对应 B 场景验证；真实工具缺失必须在 UI 可见，不能仅验证按钮存在 |
 | UI-03 | 布局、滚动、焦点和原生控件；widget | E08 计算函数 | 不同窗口尺寸、长账号/工具列表、浮层打开关闭、键盘、焦点和命中测试；截图配合 DOM/状态断言 | 实际任务输出增长时原生输入/滚动/工具结果仍可操作 |
 | UI-04 | 页面/任务切换、多窗口与连接恢复；CDP 目标、injector | E08 仅目标选择 | 设置页/主页面/新窗口、任务切换、关闭重开、revision 乱序；旧连接数据不能写到新任务 | 正确窗口与任务显示自己的结果和统计，继续操作正常 |
 
@@ -280,15 +281,15 @@ A 通过测试配置覆盖当前平台所有可达生产分支。B 验证本次�
 
 ## 6. 实施结构与每次执行流程
 
-当前入口为 A 的 `npm run test:offline`、B1 的 `npm run test:live:official -- --plan`、B2 的 `npm run test:live:deepseek -- --plan` 和 C 的 `npm run test:lifecycle -- --plan`。B1/B2 分别取得当次授权后追加 `--confirm-token-use`，C 单独取得当次授权后使用 `--confirm-restart`；原有 `npm test` 保留为免费基础回归。
+当前入口为 A 的 `npm run test:offline`、B1/B2 后台的 `npm run test:live:official -- --plan` / `npm run test:live:deepseek -- --plan`、B1/B2 桌面的 `npm run test:desktop -- --profile=<official|deepseek> --plan` 和 C 的 `npm run test:lifecycle -- --plan`。B1/B2 分别取得当次授权后追加 `--confirm-token-use`，C 单独取得当次授权后使用 `--confirm-restart`；原有 `npm test` 保留为免费基础回归。
 
 | 部件 | 职责与边界 |
 | --- | --- |
 | 场景清单 | `docs/testing-scenarios.json` 对应全部 69 个 ID、证据文件、真实宿主要求与限制；缺失/重复 ID 会使测试失败 |
-| Node 运行器 | `scripts/test-offline.mjs` 汇总公共与原生 Relay 组件；Windows 通过 `scripts/wsl-test-guest.mjs` 在独立 Linux 工作区执行 WSL 链。`scripts/test-live.mjs` 每次绑定一个供应商和一个运行环境。`scripts/test-lifecycle.mjs` 构建正式包并打开独立进度页，macOS 将监督任务交给 launchd，Windows 交给可重启的任务计划程序，关闭整个 Codex 后仍按检查点继续 |
+| Node 运行器 | `scripts/test-offline.mjs` 汇总公共与原生 Relay 组件；Windows 通过 `scripts/wsl-test-guest.mjs` 在独立 Linux 工作区执行 WSL 链。`scripts/test-live.mjs` 每次绑定一个供应商和一个后台运行环境；`scripts/test-desktop-host.mjs` 绑定同一供应商和运行环境，打开实时页面并从真实桌面任务留证。`scripts/test-lifecycle.mjs` 构建正式包并打开独立进度页，macOS 将监督任务交给 launchd，Windows 交给可重启的任务计划程序，关闭整个 Codex 后仍按检查点继续 |
 | 本地服务与材料 | 临时 Git 项目、确定内容网页、可观察 MCP/动态工具、本地模型 HTTP/SSE/WS 响应、可控时钟和故障开关 |
 | 官方程序适配器 | 使用实际官方 CLI、shim/relay/Router 组合，验证版本匹配；复用生产配置生成逻辑，避免复制一份“测试实现” |
-| 浏览器与桌面宿主 | A 使用真实 Chrome/CDP 和生产 Widget；B 按 `docs/testing-desktop-host.md` 调用实际桌面工具，`scripts/test-desktop-host.mjs --serve` 只在验收期间提供本机 HTTP 结果材料 |
+| 浏览器与桌面宿主 | A 使用真实 Chrome/CDP 和生产 Widget；B 按 `docs/testing-desktop-host.md` 运行 `npm run test:desktop`，在操作前打开实时报告，并只在验收期间提供本机 HTTP 材料；页面不驱动测试，判定来自 rollout、当前运行时和材料服务 |
 | 结果汇总 | 记录代码/产物 hash、各运行版本、平台、profile、实际路径、场景 ID、断言、证据和用量 |
 
 按用户最新确认的顺序实施，不缩减最终清单：
@@ -296,9 +297,9 @@ A 通过测试配置覆盖当前平台所有可达生产分支。B 验证本次�
 1. 先把公共 RPC、网络、工具续接、任务状态、配置、观察与页面底层契约补进现有免费测试，优先覆盖共享失效机制。无需先建设完整运行器。
 2. 接入不影响日常实例的官方运行时组合、工具执行和当前平台页面验证，逐域补齐 A；Windows 原生与 WSL 原生分别使用实际运行时、依赖、CLI 和 Relay，没有本环境执行证据时不标记该组件通过。
 3. 完整 A 通过后，主动展示 B1、B2、C 的计划并询问用户分别执行哪些批次；不等待用户再次提出测试要求。
-4. 经各自当次授权，先在当前或明确指定的单个运行环境执行不关闭客户端、不重启、不切换账号的 B1 官方模型和 B2 DeepSeek，保留各自工具、任务、输入输出及结果证据。
+4. 经各自当次授权，先在当前或明确指定的单个运行环境执行 B1/B2 后台组件，再运行同一供应商的桌面组件；两份报告绑定一致且都通过后才标记该 B 批通过。此阶段不关闭客户端、不重启、不切换账号。
 5. 最后执行 C。入口先在浏览器打开由脱敏报告生成的只读进度页，打开失败就不调度重启；macOS 的 launchd 或 Windows 的任务计划程序让监督器独立落盘和刷新页面。Windows 自动切换两套原生 Relay 并恢复原配置，未知的模型请求结果不重放，失败时回切原账号并恢复安装前状态。
-6. 除纯文档且不改变规则或行为外，每次改动最终自动运行完整 `npm run test:offline`。B1、B2、C 始终与免费回归分开。
+6. 每次改动先判断是否影响 A 覆盖的业务契约、执行器、被测逻辑、测试场景或平台行为；确实影响时才自动运行当前平台完整 `npm run test:offline`，无关改动不因文件变化重跑。B1、B2、C 始终与免费回归分开。
 
 首次建立 B 时实际测量各场景输入/输出、工具费用与耗时，形成每次运行可审查的预算。不要承诺未经测量的固定 Token 成本。设定调用次数、时间及用量停止条件；不通过重复重试消耗预算来掩盖失败。超出预算的剩余场景记未执行，不能输出全通过。
 
@@ -314,6 +315,8 @@ A 通过测试配置覆盖当前平台所有可达生产分支。B 验证本次�
 - `NOT_RUN`：用例未实现、未授权运行、预算终止或本次未执行。
 - `INTERRUPTED`：控制程序意外退出，某项动作的结果尚未核实；重启后先核对，不直接重放或判通过。
 - `OUT_OF_SCOPE`：明确属于其他平台/架构，或本次未声明的配置能力；必须写出依据。
+
+B1/B2 报告还必须给出 `backendStatus`、`desktopHostStatus` 和 `overallStatus`。后台通过但桌面未运行时为 `incomplete`；不同平台、运行环境、供应商、源码摘要或历史版本的桌面证据不能合并。桌面执行器固定核对的核心链通过，也不会把未配置或未执行的 Apps、媒体、自动化、远程和语音场景自动改为通过。
 
 通过结论示例：`macOS arm64 / Codex 26.903.71938 / CLI 0.153.4 / C1+C2+C3 / 正式入口：适用 A、B 场景通过`。如果只完成 A，结论必须注明“免费回归通过，真实验收未完成”。范围内的 FAIL、BLOCKED、NOT_RUN、INTERRUPTED 不能被总成功数遮住。基线也失败时保留“上游/环境待定位”，不自动认定注入器无问题。
 
@@ -335,4 +338,4 @@ A 通过测试配置覆盖当前平台所有可达生产分支。B 验证本次�
 
 已实现原有基础回归、E13–E17 公共链路回归、实际官方运行时/生产目录/shim/relay/Router/Chat 组合、任务状态、交互、插件/Hooks、实际浏览器、账号异常回归及 macOS/Windows 生命周期监督器，并提供免费与真实测试入口、代码/运行时摘要门禁、独立可视进度页和逐场景证据报告。Windows A 已拆成公共、Windows 原生和 WSL 原生组件；B 绑定单个运行环境；Windows C 自动切换、验证并恢复两套正式入口。macOS 已有实际执行报告；Windows 适配器和安装包检查仍须在 Windows 真机运行，不能由 macOS 结果代替。详见[测试说明](testing.md)。本轮源码版本、中继协议及其实际加载状态以当前包和 lifecycle 报告为准。
 
-真实 Token 测试按当前授权和停止阈值通过独立工具、历史、压缩、宿主适配或完整 profile 入口执行，结果以 `.runtime/test-results` 中绑定当前源码与运行时的报告为准。实际桌面宿主按单独步骤验证，不能把独立后台或自有动态工具标为整个主入口通过；生命周期结果单独写入 `.runtime/test-results/lifecycle/<run-id>/report.json`。所有未执行项保持可见。
+真实 Token 测试按当前授权和停止阈值通过独立工具、历史、压缩、app-server 回调和桌面入口组件执行，结果以 `.runtime/test-results` 中绑定当前源码与运行时的报告为准。实际桌面任务由 `test:desktop` 单独留证，不能把独立后台或自有动态工具标为整个主入口通过；生命周期结果单独写入 `.runtime/test-results/lifecycle/<run-id>/report.json`。所有未执行项保持可见。

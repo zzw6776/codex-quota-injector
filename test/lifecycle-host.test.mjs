@@ -10,6 +10,11 @@ import {
   selectLifecycleAccountPair,
 } from "../src/lifecycle-host.mjs";
 import {
+  HOST_HEALTH_STATE_VERSION,
+  REQUIRED_CODEX_APP_TOOLS,
+} from "../src/host-health.mjs";
+import { RELAY_PROTOCOL_VERSION } from "../src/relay-contract.mjs";
+import {
   checksumForArchive,
   launchdPlist,
   lsofContainsFileIdentity,
@@ -57,6 +62,39 @@ test("[A LCH-01 LCH-03] 生命周期就绪必须同时满足 Codex、单实例�
   assert.equal(evaluateLifecycleReadiness({ ...base, expectedProtocol: 53 }).ready, false);
   assert.equal(evaluateLifecycleReadiness({ ...base, expectedProtocol: null }).ready, true,
     "回滚到未知旧协议时仍可只验证宿主基础就绪");
+});
+
+test("[A LCH-03 LCH-04] 接管 app-server 后 codex_app 健康状态是生命周期硬门禁", () => {
+  const now = 1_800_000_000_000;
+  const generation = `catalog:usage-events-v${RELAY_PROTOCOL_VERSION}:router`;
+  const base = {
+    relayConfig: { generation, hostToolsRequired: true },
+    relayState: { generation, pid: 44, startedAt: now - 1_000 },
+    relayPidAlive: true,
+    relayStateCurrent: true,
+    codexPids: [12],
+    injectorPids: [13],
+    debugReady: true,
+    expectedProtocol: RELAY_PROTOCOL_VERSION,
+    now,
+  };
+  const ready = {
+    version: HOST_HEALTH_STATE_VERSION,
+    generation,
+    pid: 44,
+    status: "ready",
+    message: "Codex 任务工具已就绪",
+    requiredTools: [...REQUIRED_CODEX_APP_TOOLS],
+    missingTools: [],
+    toolsVerified: true,
+  };
+  assert.equal(evaluateLifecycleReadiness({ ...base, healthState: ready }).ready, true);
+  const degraded = { ...ready, status: "degraded", code: "codex-app-startup-failed" };
+  const failed = evaluateLifecycleReadiness({ ...base, healthState: degraded });
+  assert.equal(failed.ready, false);
+  assert.equal(failed.hostToolsReady, false);
+  assert.equal(failed.hostHealth.code, "codex-app-startup-failed");
+  assert.equal(evaluateLifecycleReadiness({ ...base, healthState: null }).ready, false);
 });
 
 test("[A LCH-05 LCH-06] 中继协议只从独立 generation 段读取，不能被相似文本误判", () => {

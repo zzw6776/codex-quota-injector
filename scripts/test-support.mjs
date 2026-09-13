@@ -30,7 +30,14 @@ export async function runtimeSnapshot() {
 }
 
 export async function sourceSnapshot() {
-  const files = ["package.json", "package-lock.json", "docs/testing-protocol-inventory.json", "docs/testing-scenarios.json", "docs/codex-compatibility-test-plan.md"];
+  const files = [
+    "package.json",
+    "package-lock.json",
+    "docs/testing-protocol-inventory.json",
+    "docs/testing-scenarios.json",
+    "docs/codex-compatibility-test-plan.md",
+    "docs/testing-desktop-host.md",
+  ];
   async function walk(directory) {
     for (const entry of await readdir(join(ROOT, directory), { withFileTypes: true })) {
       const path = `${directory}/${entry.name}`;

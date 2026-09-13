@@ -1,51 +1,83 @@
-# B1/B2：真实桌面宿主验收
+# B1/B2：真实桌面入口验收
 
-这是 B1 或 B2 中需要当前 Codex 配合的部分，归属由当前任务实际选择的模型决定。独立 app-server 能验证后台模型与工具协议，但没有桌面专属的 web.run、computer use 等宿主。自有 `fixture_web` / `fixture_browser` 通过不能替代这些功能。
+B1 和 B2 各自由两个必须分开保存的组件组成：
 
-先完成 `npm run test:offline`，再根据模型展示 `npm run test:live:official -- --plan` 或 `npm run test:live:deepseek -- --plan` 并取得该批次的当次明确同意。按下面的固定步骤验收。每项结果写入本次 `.runtime/test-results/desktop-host.md`，包含 B1/B2 归属、当前平台、客户端/CLI/注入器实际生效版本、时间、实际工具名、任务/调用 ID、独立结果与限制；不写凭据或真实业务正文。
-
-## 先确认被测版本和实际可用能力
-
-1. 对照 A 报告核对源码和实际 CLI 版本；从注入器状态/日志及页面核对本轮 Widget/中继版本是否生效。无法证明新版已加载时标记“旧版基线”或“版本未确认”，不能宣称当前源码在主入口通过。需要重启才能加载的改动，随最后阶段处理。
-2. 使用当前会话实际工具清单盘点工具来源：内建、桌面宿主、MCP、插件、Apps、媒体、自动化、远程和语音。只记录已经暴露的接口；未安装且不在本次配置范围的能力写明范围外，已配置但失效的能力记失败或阻塞。
-3. 只操作独立测试目录、当前验收材料和明确创建的临时测试任务。需要创建任务、子智能体、日程或收费媒体产物时，将具体动作纳入当次 B 计划再取得授权。读账号/额度可以核对；不兑换额度、购买、发消息、切换账号、关闭/重启 Codex。
-
-## 核心宿主链
-
-| 场景 | 固定操作 | 独立通过条件 |
+| 组件 | 运行位置 | 固定验证范围 |
 | --- | --- | --- |
-| TOOL-04 动态/代码工具 | 在当前主入口用实际 functions.exec 执行临时文件读取和一个失败命令，并组合一个本次可用的只读宿主工具 | 核对真实文件内容、失败退出码、实际工具名与结果继续返回；同一调用只完成一次 |
-| TOOL-05 web.run | 用实际 web.run 搜索官方 Codex app-server 文档，再 open 命中的官方页面，并 find 一个页面中存在的协议方法 | 三种操作均有实际工具结果；页面标题/URL/方法正文匹配，不能用 fetch 或模拟网页代替 web.run |
-| TOOL-06 computer use | 启动下方仅绑定 `127.0.0.1` 的临时 HTTP 材料，由实际 computer use 打开输出的 URL、读取随机标记、输入并点击“发送”，截图 | 独立读取页面“操作记录”的 JSON，submissions 恰好一条且值与标记一致；模型说“点好了”不算通过 |
-| INT-02 用户输入 | 在明确创建的临时测试任务中触发用户补充输入 | 问题回答回到对应任务并继续；取消后退出等待，日常任务无挂起交互 |
-| INT-03 认证交互 | 只在实际账号自然触发刷新/attestation 时，关联宿主请求、回答和后续请求 | 未触发就记未验证，不通过破坏真实凭据强行触发 |
+| `B1-official-backend/<runtime>` / `B2-deepseek-backend/<runtime>` | 隔离的官方 app-server | 真实模型路由、文件/命令/MCP、历史、分叉、压缩及 app-server 回调 |
+| `B1-official-desktop/<runtime>` / `B2-deepseek-desktop/<runtime>` | 当前 Codex 桌面任务 | 实际模型、codex_app 会话读取、functions.exec、web.run、computer use、用户补充输入、当前 Widget/中继/运行环境 |
 
-启动 computer use 材料（免费，只在命令运行期间监听本机回环地址）：
+只有同一源码摘要、平台、运行环境和供应商的两个组件都为 `passed`，对应 B1 或 B2 才是 `passed`。后台通过而桌面组件未运行时，总状态是 `incomplete`；不再使用容易被误解为整批通过的后台结果代替桌面结论。
+
+## 执行顺序
+
+计划命令不会发送模型请求：
 
 ```sh
-node scripts/test-desktop-host.mjs --serve
+npm run test:live:official -- --plan
+npm run test:desktop -- --profile=official --plan
+
+npm run test:live:deepseek -- --plan
+npm run test:desktop -- --profile=deepseek --plan
 ```
 
-命令输出 HTTP URL、HTML 路径和清单路径，并保持运行。由实际 computer use 浏览该 URL；完成后通过浏览器的实际 DOM/辅助功能结果读取 `#evidence` 中的 JSON，核对 `submissions.length === 1`、`submissions[0].value === marker`。点击“下载测试产物”后必须观察到真实下载事件，并独立读取 `/artifact` 的响应，核对内容为 `ARTIFACT_` 加同一 marker 和换行；宿主若能提供本次下载的隔离路径，再额外读取下载文件。验收结束后按 Ctrl-C 停止该回环服务，只清理本次测试标签页和文件，不把日常浏览器窗口纳入清理。
+取得对应 B 批的本次明确同意后，先运行后台组件：
 
-Browser Use 的自动 URL 策略会在页面加载前拒绝 `file://`，因此不得再用文件 URL 的失败判断注入器或 computer use 是否失效。官方文档推荐用正在运行的本地 HTTP 页面；本材料按该方式提供。若回环 HTTP 仍被本次宿主策略拒绝，应记为 `BLOCKED` 并保留原始策略结果，不能改用另一种 URL 绕过。离线 Chrome 的 data URL 操作仅验证底层页面契约，不替代这里的实际宿主验收，也不替代 web.run 的真实网络验收。
+```sh
+npm run test:live:official -- --confirm-token-use
+# 或
+npm run test:live:deepseek -- --confirm-token-use
+```
 
-## 按当前配置执行其余宿主场景
+后台组件通过后，从独立终端启动同一供应商的桌面组件：
 
-| 场景 | 验收步骤和证据 |
-| --- | --- |
-| SES-01～08 任务与状态 | 后台 B 已验证恢复、分叉和压缩语义；在明确创建的临时桌面任务核对命名/列表/分页/分组、队列两条只执行一次、steer/中断后继续、目标完成，以及适用的子智能体实际写入并回报文件。子任务不能用已有计量记录代替。 |
-| ENV-01/03 项目与搜索 | 在临时 Git 项目选择文件/任务，读取对应材料；需要测试工作树时只创建测试工作树，核对实际 cwd 和差异不落入其他项目。 |
-| EXT-01/02 Skills/Hooks/插件/Apps | 使用 A 已验证的临时材料；真实宿主中调用每类已启用来源的一项安全只读操作，核对独特的结果格式/资源回传。仅发现工具不算调用成功，未连通的账号不算通过。 |
-| UI-01～04/OBS 注入与展示 | 在真实任务有文本、工具、图片和错误结果时核对输入、滚动、工具展开和统计；切换现有测试任务/页面、主题、窗口尺寸，确认显示属于当前任务。需要重启才能生效的配置不在这里操作。 |
-| IO-01/02/03 输入与媒体 | 识图由支持图片的后台 profile 验证；实际宿主有图像/音频生成能力且本次授权包含费用时，生成一份小型测试产物，打开并验证内容/格式。仅回传一个文件名不算成功。 |
-| SES-09 自动化 | 当前平台有实际调度入口且本次授权包含临时日程时，创建一次受控执行，核对独立标记、执行次数和清理结果。仅创建/读取日程不等于调度执行成功；未完成执行就保留未验证。 |
-| ENV-02 远程 | 仅测试已配置并纳入本次范围的远程环境；核对远程 cwd、实际文件操作、交接和断连错误归属。没有远程配置时注明范围外，不强行要求另一平台通过。 |
-| IO-04 实时语音 | 仅在用户实际进入语音且本次包含该场景时验证转录/音频往返和文本追加。普通文本会话不能调用仅限语音的屏幕捕获或结束语音工具；设备/权限未准备时保留阻塞。 |
-| ACC/WK 账号与唤醒 | 真实 B 登录当前账号的临时进程，读取额度和已授权的一次唤醒；核对当前账号身份和日常任务保持。OAuth 浏览器异常和存储损坏由免费材料复现；真实账号切换及回切由 lifecycle 监督器执行。 |
+```sh
+npm run test:desktop -- --profile=official --confirm-token-use
+# 或
+npm run test:desktop -- --profile=deepseek --confirm-token-use
+```
 
-## 结果不能合并成虚假的绿灯
+由另一个 Codex 任务通过任务工具发送验收文本时，追加 `--trigger-mode=delegated`；人工直接在目标任务中粘贴或输入时保持默认 `direct`。这个参数只改变 `read_thread` 的证据判定，不改变模型、运行环境或其他工具步骤。
 
-为每项写 `PASS`、`FAIL`、`BLOCKED`、`NOT_RUN` 或有依据的 `OUT_OF_SCOPE`。未触发的认证刷新、未开放的宿主、语音未进入、未执行的调度都不能算通过。保留首次失败，不连续重试收费请求。
+桌面执行器会先创建报告、启动只监听 `127.0.0.1` 的随机材料服务，并打开可见的 `progress.html`，然后输出一段带验收编号和随机标记的任务文本。把这段文本发送到已经选择目标模型、能够使用 `request_user_input` 的真实 Codex 桌面测试任务中；当前客户端仅在 Plan 模式开放该工具时，就用 Plan 模式创建本次临时任务。不启动第二个 Codex，也不让一个 Codex 通过 UI 控制另一个 Codex。用户补充输入是固定验收步骤，收到问题后正常回答即可。审批允许/拒绝弹窗不属于测试项，项目继续使用 `never`。
 
-后台 B 的报告保持 `desktop-host-not-verified`，本页步骤另有实际证据后才能形成当前平台的完整主入口结论。当前对话异常导致后续宿主步骤未执行时，保留已落盘证据并标记剩余项未执行；关闭/重启、接管、断线恢复、正式包更新和账号往返以 `.runtime/test-results/lifecycle/<run-id>/report.json` 为准。生命周期入口在调度重启前自动打开相邻的 `progress.html`，macOS 使用 Safari，Windows 使用默认浏览器；Codex 关闭期间页面继续显示当前步骤、PID、协议、失败和回滚状态。页面只展示报告，不作为测试驱动或断言来源。
+执行器每两秒从本机证据刷新报告，完成后自动退出。也可读取已有任务状态：
+
+```sh
+npm run test:desktop -- --status=<run-id>
+```
+
+## 固定判据
+
+桌面组件逐项核对：
+
+1. `package.json` 源码摘要在测试期间未变化；实际 Widget 显示当前项目版本，实际中继协议与源码一致；接管 app-server 时，`codex_app` 健康状态必须为 `ready`。
+2. 当前桌面运行环境与报告一致。macOS、Windows 原生 Relay、WSL 原生 Relay 的结果不能互相继承。
+3. rollout 中任务实际使用 B1 的官方模型或 B2 的 `deepseek-v4-flash`，并记录任务 ID、轮次 ID 和各工具调用 ID。
+4. `functions.exec` 的成功命令返回随机标记；另一命令返回随机标记和退出码 23，且同一任务随后继续调用其他工具。
+5. 实际 `codex_app.list_threads` 返回当前任务，再以该任务 ID 调用 `codex_app.read_thread`。直接触发时，read_thread 输出必须包含本次随机标记；跨任务委托时，read_thread 只要求成功读取正确任务，因为当前活动输入可能尚未进入摘要，随机标记继续由 rollout 独立绑定。随后实际调用 `codex_app.list_projects` 与 `codex_app.get_usage_limits` 并正常返回。四个调用分别记录调用 ID，本地读取 rollout 不能代替。
+6. 执行器从中继收到的真实模型请求记录脱敏工具清单，只保留工具类型、名称、命名空间和 MCP server label，不保存提示词、参数、Schema、工具输出或凭据。实际 `web.run` 完成 `search_query`、`open`、`find`，结果来自 OpenAI 官方 Codex 文档或 `openai/codex` 仓库并包含 `thread/fork`。B1 可使用独立 `web.run` 或官方 Hosted Search；B2 只有独立 `web.run` 才视为可调用，DeepSeek Responses 请求中存在但供应商忽略的 Hosted `web_search` 描述单独记录并判为 `unsupported`，阻断完整桌面组件且不继续无效重试。已支持但任务结束仍未调用记为 `not-executed`，调用后返回错误记为 `failed`。
+7. 实际 computer use 打开本机 HTTP 材料、读取随机标记、输入并只提交一次、截图并下载产物。材料服务独立记录提交和下载；模型文字说明不参与判定。
+8. 实际 `request_user_input` 的回答回到同一任务，任务继续并正常结束。
+
+`file://` 会在 Browser Use 页面加载前被 URL 安全策略拒绝，这是正常边界。桌面材料固定使用本机 HTTP；如果当前宿主仍拒绝回环地址，报告保留原始结果并标记未通过，不修改系统网络策略或加入防火墙规则。
+
+## 平台和运行环境
+
+默认 `--runtime=current` 只读取当前桌面设置，不修改它。也可显式指定本平台的一个环境：
+
+```sh
+npm run test:desktop -- --profile=official --runtime=macos-native --plan
+npm run test:desktop -- --profile=official --runtime=windows-native --plan
+npm run test:desktop -- --profile=official --runtime=wsl-native --plan
+```
+
+付费执行拒绝 `--runtime=all`。Windows 桌面若当前使用 WSL，执行器会从 WSL 的 Codex 会话目录读取本次随机标记所在的 rollout；Windows 和 WSL 的 Node.js、依赖、CLI、Relay、`codex_app` 健康状态及报告仍各自独立。测试脚本不会为了 B 批自动切换桌面运行方式，自动切换和逐字节恢复只属于最后执行的 C 批。
+
+## 报告与其他桌面能力
+
+每次结果写入 `.runtime/test-results/desktop-host/<run-id>/report.json`，相邻 `progress.html` 只显示脱敏步骤和状态，不驱动测试，也不参与断言。后台报告同步记录桌面报告路径、两个组件状态和 B 总状态。固定检查逐项使用 `passed`、`unsupported`、`not-executed`、`failed` 或执行中的 `not-run`；存在 `unsupported` 或 `not-executed` 时桌面组件为 `blocked`。报告不保存提示正文之外的真实业务内容、工具输出正文或凭据。
+
+兼容入口 `node scripts/test-desktop-host.mjs --serve` 仍可只启动免费材料服务，但它不选择模型、不读取 rollout，也不能生成 B 桌面组件通过结论。
+
+Apps、插件独特能力、媒体生成、自动化、远程环境和实时语音取决于当次桌面实际开放与配置，继续按[场景矩阵](codex-compatibility-test-plan.md)逐项记录 `PASS`、`FAIL`、`BLOCKED`、`NOT_RUN` 或有依据的 `OUT_OF_SCOPE`。固定桌面组件通过不会把这些条件场景自动标绿。关闭/重启、接管、单实例、断线恢复、正式包更新和真实账号往返以 C 批 `.runtime/test-results/lifecycle/<run-id>/report.json` 为准。

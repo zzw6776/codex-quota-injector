@@ -16,8 +16,8 @@ import { findOfficialAppServerUrl } from "./web-search-contract.mjs";
 const profiles = approved ? selectLiveProfiles(await liveProfiles()) : [];
 let failed = false;
 
-if (!approved) test("真实宿主适配定向测试未获授权，不读取当前账号或发送模型请求", { skip: true }, () => {});
-for (const profile of profiles) test(`[B TOOL-04 IO-01 IO-03 INT-02] ${profile.id} 真实宿主适配与用户输入`, { timeout: 240_000 }, async t => {
+if (!approved) test("真实 app-server 回调定向测试未获授权，不读取当前账号或发送模型请求", { skip: true }, () => {});
+for (const profile of profiles) test(`[B TOOL-04 IO-01 IO-03 INT-02] ${profile.id} 真实 app-server 回调与用户输入`, { timeout: 240_000 }, async t => {
   if (failed) { t.skip("前一配置失败；停止付费用例，保留尚未执行状态"); return; }
   const budget = liveBudget();
   let r;
@@ -93,6 +93,6 @@ for (const profile of profiles) test(`[B TOOL-04 IO-01 IO-03 INT-02] ${profile.i
     failed = true;
     throw error;
   } finally {
-    if (r) t.diagnostic(`真实宿主适配证据 ${JSON.stringify(await r.diagnostics(stage))}；在途请求可能超过停止阈值。`);
+    if (r) t.diagnostic(`真实 app-server 回调证据 ${JSON.stringify(await r.diagnostics(stage))}；在途请求可能超过停止阈值。`);
   }
 });

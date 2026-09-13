@@ -183,9 +183,18 @@ async function runLauncher() {
         }
       },
       registerWidgetReload: (handler) => { reloadWidget = handler; },
+      getLaunchOptions: () => launchOptions,
+      openLogs: async () => {
+        const { openInjectorLog } = await import("./desktop-feedback.mjs");
+        await openInjectorLog(logPath);
+      },
     });
   } catch (error) {
     console.error(`[launcher] ${error?.stack ?? error}`);
+    const { showWindowsStartupFailure } = await import("./desktop-feedback.mjs");
+    await showWindowsStartupFailure(logPath).catch((alertError) => {
+      console.error(`[launcher] Windows 启动失败提示无法显示：${alertError.message}`);
+    });
     process.exitCode = 1;
   } finally {
     await modelRouterManager.close().catch((error) => {

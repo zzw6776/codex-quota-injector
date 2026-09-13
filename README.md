@@ -17,6 +17,7 @@
 - OpenAI OAuth 等待状态提供“取消授权”，取消后立即关闭本地回调服务并恢复面板操作；
 - OpenAI OAuth 使用客户端登记的固定回调地址 `http://localhost:1455/auth/callback`；
 - macOS 和 Windows 的 Codex 客户端均支持 DeepSeek V4 Flash 与官方模型共存；
+- 接管 app-server 时持续检查 `codex_app` 任务工具；悬浮面板关闭按钮左侧始终显示彩色状态点（绿色正常、黄色启动中、红色异常、蓝色直连），不显示状态文字且使用普通鼠标指针。悬停时正常状态展示四项常用功能的易读名称，不显示状态码和 API 名；异常状态只列缺失功能，并补充处理建议、诊断、状态码和状态更新时间。状态文件变化会在 100 毫秒防抖后刷新；正常时仅每 30 秒兜底检查，启动中或异常时每 3 秒自愈检查，监听不可用时自动回退快速轮询。检查本身不重绘页面，Tooltip 可稳定保持；启动失败或缺少常用只读入口 `list_threads`、`read_thread`、`list_projects`、`get_usage_limits` 时还会显示常驻诊断，并提供重新检查、重启 Codex 和打开日志；
 - macOS 使用原生无界面启动器接收 Finder 的重复打开事件；重复双击会接管旧注入器，Codex 已开放调试端口时保留当前客户端；
 - 退出 Codex 后，后台注入工作进程与 macOS 原生入口都会同步退出，不残留后台进程；
 - 不修改官方客户端，不依赖 Cockpit，不要求用户安装 Node.js。
@@ -48,14 +49,14 @@ Windows 安装包同时内置原生 Windows relay 和原生 WSL relay；安装�
 1. macOS 原生启动器接收首次启动和重复双击事件，并唤起后台注入器；
 2. 后台注入器获取本机单实例锁；重复启动时由旧实例交接并只重启注入器；如果旧版本返回无法识别的接管协议，确认端口占用者属于本项目后终止旧实例再接管，无法确认时退出；
 3. 查找官方 Codex 安装位置；
-4. Codex 的本地 CDP 调试端口与所需模型中继均就绪时复用当前进程；缺少调试端口或中继配置、协议尚未生效时重启并重新加载；
+4. Codex 的本地 CDP 调试端口、所需模型中继和 `codex_app` 任务工具均就绪时复用当前进程；缺少调试端口或中继配置、协议尚未生效时重启并重新加载；
 5. 只在 `127.0.0.1:9229` 开启 Chromium 调试端口；
 6. 连接 Codex 页面并注入额度组件；
 7. 监听 Codex `auth.json` 变化，将当前账号轮换后的最新 Token 同步回独立账户库；
 8. 在连接成功后停止目标查找轮询；
 9. 在 Codex 退出前最后同步一次当前账号凭证，再结束后台注入工作进程；macOS 原生入口会在工作进程结束后同步退出。
 
-macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。Windows 支持 Microsoft Store 的 `OpenAI.ChatGPT`、`OpenAI.Codex`、`ChatGPT.exe` 和 `Codex.exe`。
+macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。使用静态模型目录时，原生 shim 会先建立 RPC sidecar 管道，再原位启动官方 app-server；无论是否启用自定义模型 Router，sidecar 都只观察/改写标准流，不进入官方工具进程的签名祖先链。Windows 原生与 WSL Relay 使用相同的 `codex_app` 健康契约；Windows 支持 Microsoft Store 的 `OpenAI.ChatGPT`、`OpenAI.Codex`、`ChatGPT.exe` 和 `Codex.exe`。
 
 定时刷新官方模型目录只更新缓存，不重启 Codex。手动刷新在需要重新加载模型中继时会重启；修改模型注入配置、上下文覆盖或切换账号也会重启。
 
@@ -126,12 +127,14 @@ npm run test:coverage
 npm run test:offline
 npm run test:live:official -- --plan
 npm run test:live:deepseek -- --plan
+npm run test:desktop -- --profile=official --plan
+npm run test:desktop -- --profile=deepseek --plan
 npm run test:lifecycle -- --plan
 ```
 
 `npm test` 运行免费基础回归；`npm run test:offline` 运行当前平台完整 A，不消耗模型 Token。A 由只跑一次的公共组件和原生 Relay 组件组成：macOS 执行 `A-common + A-macos-native-relay`，Windows 分别执行 `A-common + A-windows-native-relay + A-wsl-native-relay`。Windows 与 WSL 使用各自的 Node.js、依赖、官方 CLI、实际 PE/ELF SEA Relay 和临时目录，结果不能互相继承；报告同时记录当前桌面运行环境与本平台全部支持环境的状态。各平台使用临时配置、测试凭据和本地模型端点，macOS 额外使用 Seatbelt 限制出站。若请求没有到达本地端点，测试会失败。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI、浏览器和 Relay 摘要。
 
-测试固定分为三批。A 为 `npm run test:offline` 免费回归，代码、配置或测试修改完成后默认自动执行。A 通过后应主动展示后续计划并询问用户：B1 用 `npm run test:live:official -- --plan`/`--confirm-token-use` 只测 Codex 官方模型，B2 用 `npm run test:live:deepseek -- --plan`/`--confirm-token-use` 只测 DeepSeek。B1、B2 分别授权、分别报告，每次默认读取当前桌面运行环境，也可追加 `--runtime=macos-native|windows-native|wsl-native` 选择一个环境；脚本不切换桌面设置。桌面特有工具按[宿主验收步骤](docs/testing-desktop-host.md)归入当前模型对应批次。
+测试固定分为三批。A 为 `npm run test:offline` 免费回归，代码、配置或测试修改完成后默认自动执行。A 通过后应主动展示后续计划并询问用户：B1 只测 Codex 官方模型，B2 只测 DeepSeek。每个 B 都拆成 `test:live:*` 后台组件和 `test:desktop` 真实桌面组件；两者必须绑定同一源码、平台、运行环境和供应商并全部通过，整批才通过。B1、B2 分别授权、分别报告，每次默认读取当前桌面运行环境，也可追加 `--runtime=macos-native|windows-native|wsl-native` 选择一个环境；脚本不切换桌面设置。桌面执行器会先打开实时报告页，再由目标模型的真实 Codex 任务调用 codex_app 的 `list_threads`/`read_thread`、functions.exec、web.run、computer use 和用户补充输入，细节见[桌面入口验收](docs/testing-desktop-host.md)。
 
 C 为 `npm run test:lifecycle -- --plan`，只读核对正式包、进程、中继协议、账号条件和计划中的一次官方冒烟；单独获得当次同意后，`--confirm-restart` 才会执行安装、接管、重连、关闭重开和账号往返。Windows 会自动保存原设置，依次切换并验证 Windows 原生 Relay 与 WSL 原生 Relay，随后精确恢复，用户无需手动切换。测试开始前会在独立浏览器页实时显示步骤，macOS 由 launchd 监督，Windows 由带恢复策略的任务计划程序监督，因此 Codex 被关闭后控制程序仍能继续记录和恢复。
 

@@ -2,15 +2,15 @@
 
 固定分三批：**A 免费回归；B 消耗 Token 的真实模型和桌面宿主验收；C 涉及关闭或重启 Codex 的生命周期验收**。B 再分为只测 Codex 官方模型的 B1 和只测 DeepSeek 的 B2，分别计划、分别确认、分别报告。测试当前平台，不要求其他平台同时通过；Windows 原生与 WSL 原生属于同一平台内两套独立运行环境，也不能互相继承结果。
 
-最近一次完整 A：2026-09-13，macOS arm64，`codex-cli 0.154.0-alpha.6.2`、Chrome `153.0.8010.36`、Node `26.7.0`，**271 项通过，0 失败、0 跳过**；`A-common` 241 项、`A-macos-native-relay` 30 项，汇总测试时长约 69.3 秒。代码摘要为 `e75f6cbdb1314b715a020ab0cadd47db2f84be6ef6cfa16608e90492166a08f5`。本次选择、当前运行环境与 macOS 全部支持环境均为 `passed`。全部 69 项索引都有通过的免费证据，其中 66 项仍按各自适用条件保留真实 B/C 验收要求；免费证据不等于真实宿主、模型或生命周期验收完成。
+最近一次完整 A：2026-09-13，macOS arm64，`codex-cli 0.154.0-alpha.6.2`、Chrome `153.0.8010.36`、Node `26.7.0`，**301 项通过，0 失败、0 跳过**；`A-common` 271 项、`A-macos-native-relay` 30 项，汇总测试时长约 77.7 秒。代码摘要为 `9cae108f67b627f9b15c3a891622e1c6737f7365bac5d2cc8158d1a5242c010a`，属于当前 `0.1.216` 源码；本次选择、当前运行环境与 macOS 全部支持环境均为 `passed`。全部 69 项索引仍按各自适用条件保留真实 B/C 验收要求；免费证据不等于真实桌面任务、模型或生命周期验收完成。
 
-此前绑定 `0.1.203` 源码的 B 后台按四个独立阶段完成真实测试。官方配置各阶段起始选择 `gpt-5.6-luna`，文件/命令/补丁与 MCP、历史恢复与分叉、显式压缩与压缩后续接、动态网页/浏览器适配、识图、原生 `webSearch` 和用户输入回调均通过，共观测 337,757 Token、11 个常规轮次。历史阶段的最小 `thread/fork` RPC 未携带模型参数，分叉首轮由 app-server 选择当时的官方默认 `gpt-6-astra`；因此该项证明官方分叉和历史保留可用，不把它表述为 Luna 精确继承。DeepSeek `deepseek-v4-flash` 的同类适用场景均通过，共观测 639,731 Token、9 个常规轮次，恢复、分叉和压缩后请求均继续路由到 DeepSeek；该模型不声明图片能力，也不运行官方专属 `webSearch`。TokenHub Responses、TokenHub Chat 按本机环境限制未运行，结果保持 `NOT_RUN`，既不计为通过也不计为失败。这些 B 结果不自动继承为 `0.1.210`、Windows 原生或 WSL 原生的通过结论。
+此前绑定 `0.1.203` 源码的 B 后台按四个独立阶段完成真实测试。官方配置各阶段起始选择 `gpt-5.6-luna`，文件/命令/补丁与 MCP、历史恢复与分叉、显式压缩与压缩后续接、动态网页/浏览器适配、识图、原生 `webSearch` 和用户输入回调均通过，共观测 337,757 Token、11 个常规轮次。历史阶段的最小 `thread/fork` RPC 未携带模型参数，分叉首轮由 app-server 选择当时的官方默认 `gpt-6-astra`；因此该项证明官方分叉和历史保留可用，不把它表述为 Luna 精确继承。DeepSeek `deepseek-v4-flash` 的同类适用场景均通过，共观测 639,731 Token、9 个常规轮次，恢复、分叉和压缩后请求均继续路由到 DeepSeek；该模型不声明图片能力，也不运行官方专属 `webSearch`。TokenHub Responses、TokenHub Chat 按本机环境限制未运行，结果保持 `NOT_RUN`，既不计为通过也不计为失败。这些 B 结果不自动继承为 `0.1.216`、Windows 原生或 WSL 原生的通过结论。
 
 真实 OAuth 账号还通过隔离的官方 app-server 完成一次最小唤醒请求并取得预期回复。该辅助链不切换账号、不写入日常配置，也不替代主入口验收。
 
 此前的 macOS 桌面主入口还实际完成了 `web.run` 的 search/open/find、Codex App 的项目与额度只读调用、一次不占用当前任务的独立自动化调度、真实图片生成，以及 computer use 对回环 HTTP 材料的读取、输入、单次提交、截图和下载事件；自动化与服务端产物的随机标记均由独立文件核对，图片产物也已直接查看。临时自动化在首次成功后已经暂停并删除，没有重复运行。该宿主证据确认当时相应工具可调用，但不能据此宣称当前源码或 Windows 桌面主入口全部通过。详见 `.runtime/test-results/desktop-host.md`。
 
-首次生命周期实测把正式包 `0.1.202` 和中继协议 `52` 加载进日常 Codex；正式包验签与更新、进程接管、重复启动单实例、中继自动重连、关闭后重开均通过。切换到第二个 OAuth 账号后，唯一一次最小模型冒烟收到该账号的用量上限错误，因此整批保留为失败；监督器随后成功回切原账号、恢复安装前 `0.1.167`，并从当时源码重新启动。当前源码为 `0.1.210`、中继协议为 `54`；本轮 Windows 改动必须由 Windows 真机 lifecycle 报告分别验证正式包中的 Windows 原生与 WSL 原生链路、目标协议、自动切换恢复和第二账号冒烟。
+首次生命周期实测把正式包 `0.1.202` 和中继协议 `52` 加载进日常 Codex；正式包验签与更新、进程接管、重复启动单实例、中继自动重连、关闭后重开均通过。切换到第二个 OAuth 账号后，唯一一次最小模型冒烟收到该账号的用量上限错误，因此整批保留为失败；监督器随后成功回切原账号、恢复安装前 `0.1.167`，并从当时源码重新启动。当前源码为 `0.1.216`、中继协议为 `57`；macOS sidecar、宿主健康门禁和 Windows/WSL 改动仍必须由各平台 lifecycle 报告验证正式包实际加载、目标协议及完整重连链路。
 
 ## 日常怎么运行
 
@@ -19,20 +19,22 @@
 | `npm test` | 免费基础契约、状态机和故障回归；可以在 CI 运行 |
 | `npm run test:offline` | 当前平台完整 A：`A-common` + 本平台全部原生 Relay 组件；Windows 会分别执行 Windows 原生和 WSL 原生链路 |
 | `npm run test:offline -- --runtime=current\|windows-native\|wsl-native` | 开发定位时只执行所选 Relay 组件及 `A-common`；不能作为 Windows 完整 A 结论 |
-| `npm run test:live:official -- --plan` | 免费列出 B1 Codex 官方模型的协议、场景和停止阈值；不发模型请求 |
-| `npm run test:live:official -- --confirm-token-use` | 当前代码、当前桌面运行环境对应的 A 组件通过并获得 B1 当次明确同意后，只执行 Codex 官方真实测试 |
-| `npm run test:live:deepseek -- --plan` | 免费列出 B2 DeepSeek 的模型、协议、场景和停止阈值；不发模型请求 |
-| `npm run test:live:deepseek -- --confirm-token-use` | 当前代码、当前桌面运行环境对应的 A 组件通过并获得 B2 当次明确同意后，只执行 DeepSeek 真实测试 |
+| `npm run test:live:official -- --plan` | 免费列出 B1 Codex 官方模型后台组件、桌面组件、场景和停止阈值；不发模型请求 |
+| `npm run test:live:official -- --confirm-token-use` | 当前代码和运行环境的 A 组件通过并获得 B1 当次同意后，执行 `B1-official-backend` |
+| `npm run test:live:deepseek -- --plan` | 免费列出 B2 DeepSeek 后台组件、桌面组件、场景和停止阈值；不发模型请求 |
+| `npm run test:live:deepseek -- --confirm-token-use` | 当前代码和运行环境的 A 组件通过并获得 B2 当次同意后，执行 `B2-deepseek-backend` |
 | `npm run test:live -- --plan` | 只读列出当前可用真实 profile 的总览；付费执行必须显式指定单个 profile，不能用该入口一次运行全部供应商 |
-| B1/B2 命令追加 `--stage=tools\|history\|compaction\|host` | 只运行一个隔离阶段；四阶段各自启动 app-server 并单独应用停止阈值 |
+| B1/B2 后台命令追加 `--stage=tools\|history\|compaction\|callbacks` | 只运行一个隔离阶段；四阶段各自启动 app-server 并单独应用停止阈值；旧参数 `host` 仅作为 `callbacks` 的兼容别名 |
 | B1/B2 命令追加 `--runtime=macos-native\|windows-native\|wsl-native` | 明确选择本平台一个运行环境；默认 `current`，不修改桌面设置，禁止 `all` |
 | B1/B2 命令追加 `--wakeup` | 后台链路通过后，再执行一次独立的真实账号唤醒 |
-| [桌面宿主步骤](testing-desktop-host.md) | 按当前所选模型归入 B1 或 B2：当前 Codex 实际调用 web.run、computer use 等宿主能力 |
+| `npm run test:desktop -- --profile=official\|deepseek --plan` | 免费列出对应 B1/B2 桌面组件、证据绑定和实际操作；不发模型请求 |
+| `npm run test:desktop -- --profile=official\|deepseek --confirm-token-use` | 后台组件通过后打开实时报告，并由目标模型的真实 Codex 桌面任务调用 functions.exec、web.run、computer use 和用户输入；跨任务委托驱动时追加 `--trigger-mode=delegated` |
+| `npm run test:desktop -- --status=<run-id>` | 读取并刷新一次已有桌面报告 |
 | `npm run test:lifecycle -- --plan` | 只读列出 C 批的本机 Codex、注入器、正式包、中继协议、账号条件和预计一次官方冒烟；不重启、不切换、不发模型请求 |
 | `npm run test:lifecycle -- --confirm-restart` | 完整 A 属于当前源码并获得 C 当次明确同意后，构建并验证正式包；Windows 自动切到 Windows 原生、再切到 WSL 原生，逐套执行重启、接管、单实例与断线恢复，最后精确恢复原设置并执行账号往返 |
 | `npm run test:lifecycle -- --status` | 读取最近一次持久化报告；也可追加 `=<run-id>` 指定报告。监督器中断后用 `--resume=<run-id>` 按检查点恢复，并重新打开进度页 |
 
-除纯文档且不改变测试规则或行为的修改外，代码、配置或测试完成后自动执行完整 A；局部免费用例只用于开发中快速定位。A 通过后必须主动展示 B1、B2、C 三份计划并询问用户分别执行哪些批次。B1、B2 或 C 失败后保留首次证据，不自动重试收费或重启场景。
+代码、配置、测试或规则改动完成后先判断是否影响 A 覆盖的业务契约、执行器、被测逻辑、测试场景或平台行为；只有确实影响时才自动执行对应平台完整 A。局部免费用例只用于开发中快速定位。A 通过后必须主动展示 B1、B2、C 三份计划并询问用户分别执行哪些批次。B1、B2 或 C 失败后保留首次证据，不自动重试收费或重启场景。
 
 ## A 实际执行了什么
 
@@ -80,13 +82,14 @@ B1 只选择 Codex 官方模型，B2 只选择已配置的 DeepSeek 模型；两
 
 每个隔离阶段的默认停止阈值为观察到 500,000 Token 或启动 40 个常规轮次；可用 `CODEX_TEST_LIVE_MAX_TOKENS`、`CODEX_TEST_LIVE_MAX_TURNS` 调低。它们是停止条件，**不是预估费用或严格账单上限**，在途请求、压缩与工具费用可能超出；实际唤醒单独增加一次最小请求。每次运行前都必须展示对应计划并取得当次明确同意；B1 的同意不覆盖 B2，B1/B2 的同意也不覆盖 C。
 
-后台进程没有桌面特有的 web.run、computer use、Apps、语音、自动化和远程宿主。B 后台成功状态为 `desktop-host-not-verified`，再按[桌面宿主步骤](testing-desktop-host.md)留下实际调用和独立结果。缺少能力、配置或权限必须写原因；不能把未执行改成通过。
+后台进程没有桌面特有的 web.run、computer use、Apps、语音、自动化和远程宿主。每个 B 批固定拆为 `B*-backend/<runtime>` 和 `B*-desktop/<runtime>`：后台组件通过而桌面组件未运行时，整批保持 `incomplete`；只有两者绑定同一源码、平台、运行环境和供应商且都通过时才是 `passed`。桌面组件由[桌面入口执行器](testing-desktop-host.md)核对实际模型与工具调用 ID、模型请求层的脱敏工具清单、当前中继/Widget，以及独立 HTTP 材料记录。B1 必须实际完成 web 搜索；B2 缺少独立 `web.run` 时记录 `unsupported`，不能把 DeepSeek 会忽略的 Hosted `web_search` 请求描述当作已支持。条件能力缺少配置或权限时必须写明原因，不能把未执行改成通过。
 
 ## 报告和以后怎么防止漏测
 
 - `.runtime/test-results/offline.json`：本次平台、Node、实际 CLI/浏览器/Relay 摘要、源码摘要、`A-common` 与各原生 Relay 组件结果、`selectedStatus`、`currentRuntimeStatus`、`allSupportedStatus`、用例结果，以及全部 69 个场景的证据状态。默认完整运行以 `allSupportedStatus` 为总状态；定向运行只允许 `selectedStatus` 通过。
 - `offline-events.jsonl` 与 `browser-*.png`：逐项事件和浏览器截图；错误保留首次异常。截图来自临时页面。
-- `live-<配置 ID>-<运行环境>[-<阶段>].json` 与 `live-<阶段>-<配置 ID>-<运行环境>-events.jsonl`：绑定一个真实 profile 和一个运行环境的计划及后台结果；失败时保留阶段、用量、工具状态、脱敏错误和 MCP 参数形状，不复制提示词或工具正文。TokenHub 两条没有运行报告。
+- `live-<配置 ID>-<运行环境>[-<阶段>].json` 与 `live-<阶段>-<配置 ID>-<运行环境>-events.jsonl`：绑定一个真实 profile 和一个运行环境的后台计划及结果，分别保存 `backendStatus`、`desktopHostStatus` 和 `overallStatus`；失败时保留阶段、用量、工具状态、脱敏错误和 MCP 参数形状，不复制提示词或工具正文。TokenHub 两条没有运行报告。
+- `desktop-host/<run-id>/report.json` 与相邻 `progress.html`：绑定真实桌面任务使用的模型、任务/轮次/工具调用 ID、源码摘要、平台、运行环境、项目/中继/Widget 版本，以及材料服务独立记录的提交和下载。实时页面只展示报告，不参与判定；完成后把桌面组件和 B 总状态同步回对应后台报告。
 - `lifecycle/<run-id>/report.json`：正式包哈希、每次 Codex/注入器/中继 PID、协议版本、`C-package-common`/`C-windows-native`/`C-wsl-native`/自动切换恢复结果和脱敏账号指纹。相邻的 `progress.html` 从该报告生成，测试开始前在浏览器打开，显示当前步骤、失败和回滚状态；它不触发操作，也不参与通过判定。`control.json` 只为中断恢复保存两个账号 ID 和权限限制为当前用户的配置备份路径，不保存 Token；公开报告不写账号 ID、邮箱、配置正文或 Router 私密地址。配置副本留在对应私有 run 目录，供中断核对和人工恢复。
 - [场景索引](testing-scenarios.json)逐一对应[69 项矩阵](codex-compatibility-test-plan.md)。`free-evidence-passed` 只表示列出的免费证据通过，仍保留 `liveStatus: not-run` 和每项限制；不能把它当完整验收。
 - [协议清单](testing-protocol-inventory.json)覆盖当前 CLI 的默认及实验协议。字段、方法或类型变化会使 A 失败，要求重新审核清单和补测试，不能默默复用上次绿灯。
@@ -95,8 +98,8 @@ B1 只选择 Codex 官方模型，B2 只选择已配置的 DeepSeek 模型；两
 
 ## 补测发现并修复的问题
 
-本轮回归复现并修复了 Responses Lite/命名空间/原始文本工具无法正确转换、WS 本地预热丢失增量历史、账号写入失败留下虚假内存状态、取消 OAuth 后仍可能保存授权、唤醒进程继承日常 HOME、Widget 主题切换不同步、隔离 Chrome 误探测日常 macOS 钥匙串、真实测试错误拒绝写入型 MCP 工具、原生网页搜索错误排除 OpenAI 官方仓库来源、Codex 私有历史元数据被转发给第三方 Responses API，以及 Codex 重放的推理历史含有 DeepSeek 不支持字段等问题。DeepSeek 目录原先同时声明搜索工具和未指定工具模式，导致 app-server 延迟 MCP 工具并让模型反复发出无意义命令；当前目录关闭该模型不具备的搜索工具能力，使 MCP 从第一轮以直接命名空间暴露。真实 B 原先把所有场景堆在一个长任务中，压缩后的累计上下文会先撞到 Token 阈值；当前按工具、历史、压缩、宿主四个独立任务运行。
+本轮回归复现并修复了 Responses Lite/命名空间/原始文本工具无法正确转换、WS 本地预热丢失增量历史、账号写入失败留下虚假内存状态、取消 OAuth 后仍可能保存授权、唤醒进程继承日常 HOME、Widget 主题切换不同步、隔离 Chrome 误探测日常 macOS 钥匙串、真实测试错误拒绝写入型 MCP 工具、原生网页搜索错误排除 OpenAI 官方仓库来源、Codex 私有历史元数据被转发给第三方 Responses API，以及 Codex 重放的推理历史含有 DeepSeek 不支持字段等问题。Codex 从 CLI `0.153.4` 升级到 `0.154.0-alpha.6.2` 后，动态 app tools 开始校验到进程祖父级，旧的 `ChatGPT → shim → Node RPC relay → 官方 codex` 拓扑会因未签名 Node 位于祖先链而返回 `missing-code-signing-identity`；当前 macOS shim 把 RPC relay 改成官方 app-server 的 sidecar，并原位启动官方 codex，保留官方签名链。此前启动门禁只核对进程和中继，也不消费 `codex_app` 启动终态或证明常用入口已注册；当前按会话、generation、PID 和运行环境持久化宿主健康状态，要求 `list_threads`、`read_thread`、`list_projects`、`get_usage_limits` 四个常用只读入口齐全。Widget 在所有面板关闭按钮左侧常驻显示无文字彩色状态点；正常悬浮只列易读功能名，异常悬浮只强调缺失项、处理建议与技术诊断。健康检查改为目录事件驱动：状态文件原子替换后 100 毫秒防抖刷新，正常状态每 30 秒兜底，启动中或异常状态每 3 秒自愈；监听不可用时回退到 3 秒轮询。检查时间不进入页面视图模型，避免刷新导致 Tooltip 闪烁；生命周期门禁继续拒绝未核验目录。DeepSeek 目录原先同时声明搜索工具和未指定工具模式，导致 app-server 延迟 MCP 工具并让模型反复发出无意义命令；当前目录关闭该模型不具备的搜索工具能力，使 MCP 从第一轮以直接命名空间暴露。真实 B 原先把所有场景堆在一个长任务中，压缩后的累计上下文会先撞到 Token 阈值；当前后台按工具、历史、压缩、app-server 回调四个独立任务运行，桌面入口作为另一个必需组件单独留证。
 
 MCP 回归固定 `never` 下写入拒绝无副作用和只读工具实际执行两条路径，宿主 URL 使用明确的回环 HTTP 契约；网页来源回归同时固定官方正例和仿冒/无关反例；第三方历史回归实际经过官方 app-server 和内置 DeepSeek 路由，覆盖真实推理项、工具历史、恢复、分叉和压缩。修复针对共享数据流和测试边界，并有实际失效断言。
 
-发布版本为 `0.1.210`，Widget 运行时 `124`，中继协议 `54`；账号新增临时与已转出状态及迁移时间，因此账号存储版本为 `3`。源码版本和日常 Codex 实际加载版本分别记录，只有 lifecycle 报告中的正式包哈希及中继 generation 能证明本次加载。
+发布版本为 `0.1.216`，Widget 运行时 `127`，中继协议 `57`；账号新增临时与已转出状态及迁移时间，因此账号存储版本为 `3`。源码版本和日常 Codex 实际加载版本分别记录，只有 lifecycle 报告中的正式包哈希及中继 generation 能证明本次加载。

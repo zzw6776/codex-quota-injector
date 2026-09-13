@@ -105,12 +105,22 @@ export async function execOffline(executable, args, { directory, ...options }) {
 }
 
 export async function stopChild(child) {
-  if (!child || child.exitCode != null || child.signalCode != null) return;
-  const exited = once(child, "exit").catch(() => undefined);
-  child.stdin?.end();
-  child.kill("SIGTERM");
+  if (!child) return;
+  const exited = child.exitCode != null || child.signalCode != null;
+  const streamsClosed = child.stdio.filter(Boolean)
+    .every((stream) => stream.closed === true || stream.destroyed === true);
+  if (exited && streamsClosed) return;
+  // macOS 的签名安全拓扑让官方 app-server 保持桌面的直接子进程，RPC
+  // 观察器则作为 sidecar 继续持有同一组 stdio。只等 `exit` 会在 sidecar
+  // 完成最后的状态/用量收尾前删除临时 HOME；`close` 才代表整条 stdio
+  // 链已经释放。
+  const closed = once(child, "close").catch(() => undefined);
+  if (!exited) {
+    child.stdin?.end();
+    child.kill("SIGTERM");
+  }
   const timeout = setTimeout(() => child.kill("SIGKILL"), 2_000);
-  try { await exited; } finally { clearTimeout(timeout); }
+  try { await closed; } finally { clearTimeout(timeout); }
 }
 
 export function message(text, phase = "final_answer") {
@@ -422,10 +432,16 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
       platforms: route ? [platform] : [],
     }));
     const configPath = join(directory, "relay-config.json");
-    await writeFile(configPath, JSON.stringify({ version: 4, upstreamExecutable: cli,
+    await writeFile(configPath, JSON.stringify({
+      version: process.platform === "darwin" ? 5 : 2,
+      upstreamExecutable: cli,
       relayExecutable: process.execPath, relayArguments: [resolve(ROOT, "src/launcher.mjs")],
       providerSettingsPath, extraModelSettingsPath, modelCatalogPath: catalogPath,
-      relayStatePath: join(directory, "relay-state.json"), tokenUsageEventsPath: usagePath,
+      relayStatePath: join(directory, "relay-state.json"),
+      hostHealthPath: join(directory, "host-health.json"),
+      hostToolsRequired: true,
+      runtimeTarget,
+      tokenUsageEventsPath: usagePath,
       generation: `offline-${randomUUID()}`,
       router: route ? { providerId: route.providerId, baseUrl: route.baseUrl,
         tokenEnv: route.tokenEnv, tokenHeader: route.tokenHeader,

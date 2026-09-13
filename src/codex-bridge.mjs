@@ -14,8 +14,8 @@ import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
 import { fetchOfficialModelCatalog } from "./official-model-catalog.mjs";
 
 const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
-const RELAY_CONFIG_VERSION = 1;
-const MACOS_SHIM_CONFIG_VERSION = 4;
+const RELAY_CONFIG_VERSION = 2;
+const MACOS_SHIM_CONFIG_VERSION = 5;
 
 export async function refreshCodexModelCatalog({
   contextManager,
@@ -75,6 +75,7 @@ export async function prepareCodexLaunch({
   }
   const defaultInjectionMode = await resolveDefaultInjectionMode();
   const statePath = join(defaultAccountDataDir(), "app-server-relay-state.json");
+  const healthPath = join(defaultAccountDataDir(), "app-server-health.json");
   const tokenUsageEventPath = join(defaultAccountDataDir(), "token-usage-events.jsonl");
   const relayConfigPath = join(defaultAccountDataDir(), "app-server-relay-config.json");
   const reusableRouterIdentity = process.platform === "darwin"
@@ -110,7 +111,9 @@ export async function prepareCodexLaunch({
         env: {},
         relay: {
           statePath,
+          healthPath,
           expectAbsent: true,
+          hostToolsRequired: false,
           wslNative: defaultInjectionMode === "wsl",
         },
         injectionMode: defaultInjectionMode,
@@ -138,7 +141,9 @@ export async function prepareCodexLaunch({
         env: {},
         relay: {
           statePath,
+          healthPath,
           expectAbsent: true,
+          hostToolsRequired: false,
           wslNative: defaultInjectionMode === "wsl",
         },
         injectionMode: defaultInjectionMode,
@@ -174,7 +179,9 @@ export async function prepareCodexLaunch({
       env: {},
       relay: {
         statePath,
+        healthPath,
         expectAbsent: true,
+        hostToolsRequired: false,
         wslNative: defaultInjectionMode === "wsl",
       },
       injectionMode: defaultInjectionMode,
@@ -198,6 +205,9 @@ export async function prepareCodexLaunch({
           extraModelSettingsPath: runtime.settingsPath,
           modelCatalogPath: staticModelCatalog ? runtime.path : null,
           relayStatePath: statePath,
+          hostHealthPath: healthPath,
+          hostToolsRequired: true,
+          runtimeTarget: "macos-native",
           tokenUsageEventsPath: tokenUsageEventPath,
           generation: `${relayGeneration}:${router?.instanceId ?? "direct"}`,
           router: router
@@ -217,6 +227,11 @@ export async function prepareCodexLaunch({
           extraModelSettingsPath: runtime.settingsPath,
           modelCatalogPath: staticModelCatalog ? runtime.path : null,
           relayStatePath: statePath,
+          hostHealthPath: healthPath,
+          hostToolsRequired: true,
+          runtimeTarget: resolveInjectionMode(relayExecutable) === "wsl"
+            ? "wsl-native"
+            : "windows-native",
           tokenUsageEventsPath: tokenUsageEventPath,
           generation: relayGeneration,
         };
@@ -229,7 +244,9 @@ export async function prepareCodexLaunch({
       env: {},
       relay: {
         statePath,
+        healthPath,
         expectAbsent: true,
+        hostToolsRequired: false,
         wslNative: defaultInjectionMode === "wsl",
       },
       injectionMode: defaultInjectionMode,
@@ -251,8 +268,10 @@ export async function prepareCodexLaunch({
     },
     relay: {
       statePath,
+      healthPath,
       configPath: relayConfigPath,
       generation: effectiveGeneration,
+      hostToolsRequired: true,
       wslNative: isWslNativeRelay(relayExecutable),
     },
     injectionMode: resolveInjectionMode(relayExecutable),

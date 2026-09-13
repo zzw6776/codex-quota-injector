@@ -73,6 +73,28 @@ for await (const line of lines) {
 }
 `;
 
+const FAILED_CODEX_APP = `#!/usr/bin/env node
+import readline from "node:readline";
+const lines = readline.createInterface({ input: process.stdin });
+for await (const line of lines) {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(JSON.stringify({
+      method: "mcpServer/startupStatus/updated",
+      params: {
+        threadId: null,
+        name: "codex_app",
+        status: "failed",
+        error: { message: "missing code signing identity; Bearer fixture-secret" },
+      },
+    }) + "\\n");
+  }
+  if (message.id != null) {
+    process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");
+  }
+}
+`;
+
 function runRelay({
   configPath,
   messages,
@@ -157,6 +179,43 @@ async function createNodeAlias(path) {
   await chmod(path, 0o700);
   return path;
 }
+
+test("app-server relay 观察 codex_app 启动失败且不改写官方通知", async (t) => {
+  const directory = await useTempDir(t, "codex-host-health-relay-");
+  const fakeCodexPath = join(directory, "failed-codex-app.mjs");
+  const upstreamExecutable = join(
+    directory,
+    process.platform === "win32" ? "node-upstream.exe" : "node-upstream",
+  );
+  const configPath = join(directory, "relay.json");
+  const statePath = join(directory, "relay-state.json");
+  const healthPath = join(directory, "host-health.json");
+  await writeFile(fakeCodexPath, FAILED_CODEX_APP);
+  await createNodeAlias(upstreamExecutable);
+  await writeFile(configPath, JSON.stringify({
+    version: process.platform === "darwin" ? 5 : 2,
+    upstreamExecutable,
+    relayStatePath: statePath,
+    hostHealthPath: healthPath,
+    hostToolsRequired: true,
+    runtimeTarget: process.platform === "win32" ? "windows-native" : "macos-native",
+    generation: "health-generation",
+  }));
+  const { stdout } = await runRelay({
+    configPath,
+    messages: [{ id: 1, method: "initialize", params: {} }],
+    relayArguments: [fakeCodexPath, "app-server"],
+  });
+  const output = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.ok(output.some((message) =>
+    message.method === "mcpServer/startupStatus/updated" &&
+    message.params?.name === "codex_app" && message.params?.status === "failed"));
+  const health = JSON.parse(await readFile(healthPath, "utf8"));
+  assert.equal(health.status, "degraded");
+  assert.equal(health.code, "missing-code-signing-identity");
+  assert.match(health.detail, /Bearer \[redacted\]/);
+  assert.doesNotMatch(health.detail, /fixture-secret/);
+});
 
 test("Windows 独立中继在桌面端未转发环境变量时从固定配置执行官方 CLI", async (t) => {
   const directory = await useTempDir(t, "codex-windows-relay-fallback-");

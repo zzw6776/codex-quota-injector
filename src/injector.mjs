@@ -5,6 +5,12 @@ import { CodexContextManager } from "./codex-context.mjs";
 import { prepareCodexLaunch, refreshCodexModelCatalog } from "./codex-bridge.mjs";
 import { DeepSeekManager } from "./deepseek-manager.mjs";
 import { ExtraModelManager } from "./extra-model-manager.mjs";
+import {
+  directHostHealth,
+  hostHealthPollInterval,
+  readHostHealthViewModel,
+  watchHostHealthFiles,
+} from "./host-health.mjs";
 import { ModelRouterManager } from "./model-router.mjs";
 import { isCodexRunning, isRelayStateCurrent, restartCodex } from "./platform.mjs";
 import { TokenUsageManager } from "./token-usage.mjs";
@@ -50,6 +56,8 @@ export async function runInjector({
   recoverLaunch = null,
   registerLaunchRecovery = null,
   registerWidgetReload = null,
+  getLaunchOptions = () => null,
+  openLogs = null,
 } = {}) {
   if (!accountManagerInitialized) await accountManager.initialize();
   if (!managersInitialized) {
@@ -99,6 +107,16 @@ export async function runInjector({
   let pendingWidgetReload = null;
   let widgetReloading = false;
   let modelRouterClosePromise = null;
+  let hostHealth = directHostHealth();
+  let hostHealthJson = JSON.stringify(hostHealth);
+  let hostHealthActionError = null;
+  let hostHealthSyncPromise = null;
+  let lastHostHealthCheckAt = 0;
+  let hostHealthWatcher = null;
+  let hostHealthWatcherKey = null;
+  let hostHealthWatchAttemptKey = null;
+  let lastHostHealthWatchAttemptAt = 0;
+  let lastHostHealthWatchError = null;
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
   const wakeupManager = new AccountWakeupManager(accountManager, () => {
     markWidgetDataDirty();
@@ -119,6 +137,114 @@ export async function runInjector({
     markWidgetDataDirty();
   }
 
+  function closeHostHealthWatcher() {
+    hostHealthWatcher?.close();
+    hostHealthWatcher = null;
+    hostHealthWatcherKey = null;
+  }
+
+  function hostHealthBindingKey(binding) {
+    if (!binding?.hostToolsRequired) return "direct";
+    return JSON.stringify([
+      String(binding.statePath ?? ""),
+      String(binding.healthPath ?? ""),
+      String(binding.generation ?? ""),
+      binding.wslNative === true,
+    ]);
+  }
+
+  function ensureHostHealthWatcher(binding, now = Date.now()) {
+    const key = hostHealthBindingKey(binding);
+    if (hostHealthWatcher?.active && key === hostHealthWatcherKey) return;
+    if (!binding?.hostToolsRequired) {
+      if (hostHealthWatcher || key !== hostHealthWatcherKey) closeHostHealthWatcher();
+      hostHealthWatcherKey = key;
+      return;
+    }
+    if (key === hostHealthWatchAttemptKey &&
+      now - lastHostHealthWatchAttemptAt < hostHealthPollInterval("starting")) return;
+
+    closeHostHealthWatcher();
+    hostHealthWatcherKey = key;
+    hostHealthWatchAttemptKey = key;
+    lastHostHealthWatchAttemptAt = now;
+    const watcher = watchHostHealthFiles(binding, {
+      onChange() {
+        void refreshHostHealthFromEvent();
+      },
+      onError(error) {
+        closeHostHealthWatcher();
+        const message = error?.message ?? String(error);
+        if (message !== lastHostHealthWatchError) {
+          console.error(`[host-health] 状态文件监听失败，回退轮询：${message}`);
+          lastHostHealthWatchError = message;
+        }
+      },
+    });
+    if (watcher.active) {
+      hostHealthWatcher = watcher;
+      lastHostHealthWatchError = null;
+    } else {
+      hostHealthWatcherKey = null;
+    }
+  }
+
+  async function refreshHostHealthFromEvent() {
+    try {
+      await hostHealthSyncPromise;
+      if (stopped) return;
+      lastHostHealthCheckAt = 0;
+      await syncHostHealth({ force: true });
+      await requestWidgetUpdate();
+    } catch (error) {
+      console.error(`[host-health] 事件刷新失败：${error.message}`);
+    }
+  }
+
+  async function syncHostHealth({ force = false } = {}) {
+    const now = Date.now();
+    const binding = getLaunchOptions?.()?.relay;
+    ensureHostHealthWatcher(binding, now);
+    const pollMs = binding?.hostToolsRequired && !hostHealthWatcher?.active
+      ? hostHealthPollInterval("starting")
+      : hostHealthPollInterval(hostHealth.status);
+    if (!force && now - lastHostHealthCheckAt < pollMs) return hostHealth;
+    if (hostHealthSyncPromise) return hostHealthSyncPromise;
+    lastHostHealthCheckAt = now;
+    const task = (async () => {
+      const next = await readHostHealthViewModel(binding);
+      const displayed = hostHealthActionError
+        ? { ...next, actionError: hostHealthActionError }
+        : next;
+      const nextJson = JSON.stringify(displayed);
+      if (nextJson !== hostHealthJson) {
+        hostHealth = displayed;
+        hostHealthJson = nextJson;
+        markWidgetDataDirty();
+      }
+      return hostHealth;
+    })().catch((error) => {
+      const displayed = {
+        ...hostHealth,
+        status: "degraded",
+        code: "health-check-failed",
+        message: "无法读取 Codex 任务工具状态",
+        detail: error.message,
+      };
+      const nextJson = JSON.stringify(displayed);
+      if (nextJson !== hostHealthJson) {
+        hostHealth = displayed;
+        hostHealthJson = nextJson;
+        markWidgetDataDirty();
+      }
+      return hostHealth;
+    }).finally(() => {
+      if (hostHealthSyncPromise === task) hostHealthSyncPromise = null;
+    });
+    hostHealthSyncPromise = task;
+    return task;
+  }
+
   const stop = () => {
     stopped = true;
     registerLaunchRecovery?.(null);
@@ -128,6 +254,7 @@ export async function runInjector({
     clearTimeout(deepSeekBalanceTimer);
     clearTimeout(modelCatalogRefreshTimer);
     clearTimeout(tokenUsageFallbackTimer);
+    closeHostHealthWatcher();
     quotaRefreshTimer = null;
     modelCatalogRefreshTimer = null;
     tokenUsageFallbackTimer = null;
@@ -338,6 +465,7 @@ export async function runInjector({
       deepSeek: viewModel.deepSeek,
       extraModels: viewModel.extraModels,
       network: viewModel.network,
+      hostHealth,
     };
     const staticJson = JSON.stringify(staticViewModel);
     const nextTokenUsageSignatures = new Map();
@@ -421,6 +549,22 @@ export async function runInjector({
     markWidgetDataDirty();
     try {
       switch (action?.type) {
+        case "host-health-recheck":
+          hostHealthActionError = null;
+          lastHostHealthCheckAt = 0;
+          await syncHostHealth({ force: true });
+          break;
+        case "host-health-open-logs":
+          hostHealthActionError = null;
+          if (typeof openLogs !== "function") throw new Error("当前启动入口没有日志打开能力");
+          await openLogs();
+          lastHostHealthCheckAt = 0;
+          await syncHostHealth({ force: true });
+          break;
+        case "host-health-restart":
+          hostHealthActionError = null;
+          await restartForHostHealth();
+          break;
         case "wakeup-save":
           await wakeupManager.save(action.accountId, { enabled: action.enabled, times: action.times });
           break;
@@ -510,6 +654,11 @@ export async function runInjector({
           console.error(`[action] 未知操作: ${action?.type ?? "empty"}`);
       }
     } catch (error) {
+      if (String(action?.type ?? "").startsWith("host-health-")) {
+        hostHealthActionError = error.message;
+        lastHostHealthCheckAt = 0;
+        await syncHostHealth({ force: true });
+      }
       if (String(action?.type ?? "").startsWith("context-")) {
         contextManager.setError(error.message);
       }
@@ -543,6 +692,20 @@ export async function runInjector({
     }
   }
 
+  async function restartForHostHealth() {
+    restartingCodex = true;
+    try {
+      const options = await prepareLaunch();
+      if (options.preparationError) throw new Error(options.preparationError);
+      await restartCodex(port, options);
+      resetAfterCodexRestart();
+      lastHostHealthCheckAt = 0;
+      await syncHostHealth({ force: true });
+    } finally {
+      restartingCodex = false;
+    }
+  }
+
   async function restartForConfigurationChange({ context = false, modelProviders = false } = {}) {
     restartingCodex = true;
     try {
@@ -570,6 +733,7 @@ export async function runInjector({
     widgetInstalled = false;
     lastStaticJson = null;
     lastWidgetHealthCheckAt = 0;
+    lastHostHealthCheckAt = 0;
     lastTokenUsageSignatures = new Map();
     lastTokenUsageStatus = null;
     lastTokenUsageError = null;
@@ -755,6 +919,7 @@ export async function runInjector({
       }
     }
     try {
+      await syncHostHealth();
       syncAsyncAccountOperation();
       debugLog(`[DEBUG] loop#${_loopCount} calling connectAndInject...`);
       const injected = await connectAndInject();

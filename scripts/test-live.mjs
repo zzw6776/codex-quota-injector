@@ -17,6 +17,11 @@ import {
   runtimeTargetsForPlatform,
 } from "./test-runtime-targets.mjs";
 import { requireFreeResult, RESULTS, ROOT, sourceSnapshot, writeReport } from "./test-support.mjs";
+import {
+  backendComponentId,
+  combineBStatuses,
+  desktopComponentId,
+} from "./desktop-host-evidence.mjs";
 
 const args = new Set(process.argv.slice(2));
 const known = new Set(["--plan", "--confirm-token-use", "--wakeup"]);
@@ -34,13 +39,14 @@ for (const argument of args) {
 }
 
 const profileFilter = argumentValue(profileArguments, "--profile");
-const stageFilter = argumentValue(stageArguments, "--stage");
+const requestedStageFilter = argumentValue(stageArguments, "--stage");
+const stageFilter = requestedStageFilter === "host" ? "callbacks" : requestedStageFilter;
 const requestedRuntime = argumentValue(runtimeArguments, "--runtime") ?? "current";
 const liveStageFiles = new Map([
   ["tools", "live-tests/tools.test.mjs"],
   ["history", "live-tests/history.test.mjs"],
   ["compaction", "live-tests/compaction.test.mjs"],
-  ["host", "live-tests/host.test.mjs"],
+  ["callbacks", "live-tests/callbacks.test.mjs"],
 ]);
 if (stageFilter && !liveStageFiles.has(stageFilter)) {
   throw new Error(`未知真实测试场景 ${stageFilter}；可用场景：${[...liveStageFiles.keys()].join("、")}`);
@@ -74,11 +80,17 @@ const stageDescriptions = new Map([
   ["tools", "独立任务的文件、命令、补丁与 MCP 调用"],
   ["history", "独立短任务的历史恢复与分叉"],
   ["compaction", "独立短任务的显式压缩与压缩后历史恢复"],
-  ["host", describeHostStage(profiles)],
+  ["callbacks", describeCallbacksStage(profiles)],
 ]);
+const backendComponent = profileFilter && ["official", "deepseek"].includes(profileFilter)
+  ? backendComponentId(profileFilter, runtimeTarget)
+  : `${batch}-backend/${runtimeTarget}`;
+const desktopComponent = profileFilter && ["official", "deepseek"].includes(profileFilter)
+  ? desktopComponentId(profileFilter, runtimeTarget)
+  : `${batch}-desktop/${runtimeTarget}`;
 const plan = {
   batch,
-  component: `${batch}/${runtimeTarget}`,
+  component: backendComponent,
   platform: process.platform,
   arch: process.arch,
   profiles,
@@ -94,7 +106,23 @@ const plan = {
   perProfile: stageFilter
     ? [stageDescriptions.get(stageFilter)]
     : [...stageDescriptions.values()],
-  desktopHostChecks: "另按 docs/testing-desktop-host.md 由当前 Codex 调用实际 web.run、computer use 等宿主工具；独立 app-server 不具有这些桌面工具",
+  components: [
+    {
+      id: backendComponent,
+      kind: "backend",
+      status: "planned",
+      stages: stageFilter ? [stageFilter] : [...liveStageFiles.keys()],
+    },
+    {
+      id: desktopComponent,
+      kind: "desktop-entry",
+      status: "not-run",
+      command: profileFilter
+        ? `npm run test:desktop -- --profile=${profileFilter} --runtime=${runtimeTarget} --plan`
+        : null,
+    },
+  ],
+  desktopHostChecks: "后台通过后使用 test:desktop，由选择同一供应商模型的真实 Codex 桌面任务调用 web.run、computer use 等宿主工具",
   wakeup: args.has("--wakeup"),
   lifecycle: "关闭、重启、接管、安装更新、Windows/WSL 自动切换和真实账号往返另由 C 批执行",
   note: "一次授权只运行一个供应商和一个运行环境。每个隔离阶段分别应用 Token 与轮次阈值；任一阶段失败后停止后续付费阶段。",
@@ -106,7 +134,14 @@ const free = await requireFreeResult({ runtimeTarget });
 await mkdir(RESULTS, { recursive: true });
 const report = {
   ...plan,
-  status: "running",
+  status: "incomplete",
+  backendStatus: "running",
+  desktopHostStatus: "not-run",
+  overallStatus: "incomplete",
+  components: plan.components.map((component) => ({
+    ...component,
+    status: component.kind === "backend" ? "running" : "not-run",
+  })),
   startedAt: new Date().toISOString(),
   snapshot: free.snapshot,
   freeComponent: {
@@ -150,15 +185,23 @@ try {
     report.wakeupStatus = wakeupResult ? "passed" : code === 0 ? "not-run" : "failed-or-not-run";
   }
   report.backendStatus = code === 0 ? "passed" : "failed";
-  report.status = code === 0 ? "desktop-host-not-verified" : "failed";
+  report.components.find((component) => component.kind === "backend").status = report.backendStatus;
+  report.overallStatus = combineBStatuses(report.backendStatus, report.desktopHostStatus);
+  report.status = report.overallStatus;
   if (code !== 0) process.exitCode = 1;
 } catch (error) {
+  report.backendStatus = "blocked";
+  report.components.find((component) => component.kind === "backend").status = "blocked";
+  report.overallStatus = "blocked";
   report.status = "blocked";
   report.error = error.message;
   process.exitCode = 1;
 }
 const finishedSnapshot = await sourceSnapshot();
 if (finishedSnapshot.sha256 !== report.snapshot.sha256) {
+  report.backendStatus = "failed";
+  report.components.find((component) => component.kind === "backend").status = "failed";
+  report.overallStatus = "failed";
   report.status = "stale";
   report.sourceChangedDuringTest = true;
   report.error = [report.error, "真实测试期间源码发生变化，报告不能用于当前源码"].filter(Boolean).join("；");
@@ -167,6 +210,10 @@ if (finishedSnapshot.sha256 !== report.snapshot.sha256) {
 report.finishedAt = new Date().toISOString();
 await writeReport(reportPath, report);
 console.log(`真实测试报告：${reportPath}。运行环境：${runtimeTargetLabel(runtimeTarget)}。桌面宿主结果须另行记录。`);
+if (report.backendStatus === "passed") {
+  console.log(`${backendComponent}: passed；${desktopComponent}: not-run；${batch}: incomplete`);
+  console.log(`桌面入口计划：npm run test:desktop -- --profile=${profileFilter} --runtime=${runtimeTarget} --plan`);
+}
 
 function selectedStages(profileArtifactName) {
   const selected = stageFilter
@@ -242,9 +289,9 @@ function safeArtifact(value) {
     .slice(0, 80) || "profile";
 }
 
-function describeHostStage(selectedProfiles) {
+function describeCallbacksStage(selectedProfiles) {
   const checks = ["网页/浏览器宿主适配", "用户输入"];
   if (selectedProfiles.some((profile) => profile.images)) checks.push("图片");
   if (selectedProfiles.some((profile) => profile.id === "official")) checks.push("官方原生搜索");
-  return `独立任务的${checks.join("、")}`;
+  return `独立 app-server 的${checks.join("、")}回调`;
 }

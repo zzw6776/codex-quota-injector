@@ -1,6 +1,6 @@
 {
   "name": "codex-quota-injector",
-  "version": "0.1.210",
+  "version": "0.1.216",
   "private": true,
   "type": "module",
   "description": "Inject a standalone multi-account quota, expiry and account-switching panel into the Codex macOS and Windows clients.",
@@ -15,6 +15,7 @@
     "test:live": "node scripts/test-live.mjs",
     "test:live:official": "node scripts/test-live.mjs --profile=official",
     "test:live:deepseek": "node scripts/test-live.mjs --profile=deepseek",
+    "test:desktop": "node scripts/test-desktop-host.mjs",
     "test:lifecycle": "node scripts/test-lifecycle.mjs",
     "build:relay:windows": "node scripts/build-windows-relay.mjs",
     "preview": "node src/preview-server.mjs",

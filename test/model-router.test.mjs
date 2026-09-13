@@ -37,7 +37,7 @@ test("Router 跨注入器版本复用原端点，端口被占用时才生成新�
 
   const original = await owner.configure(routerSettings(upstream.origin));
   const identity = reusableRouterIdentityFromRelayConfig({
-    version: 4,
+    version: 5,
     generation: `catalog:usage-events-v40:${original.instanceId}`,
     router: {
       baseUrl: original.baseUrl,
@@ -69,7 +69,7 @@ test("Router 跨注入器版本复用原端点，端口被占用时才生成新�
   assert.equal(reused.instanceId, original.instanceId);
 
   assert.equal(reusableRouterIdentityFromRelayConfig({
-    version: 4,
+    version: 5,
     generation: `catalog:${original.instanceId}`,
     router: {
       baseUrl: original.baseUrl.replace("127.0.0.1", "localhost"),
@@ -701,6 +701,53 @@ test("自定义 Responses 请求只改写声明过的兼容字段并隔离官方
     "resp_custom",
   );
   assert.equal(events.find((event) => event.type === "generation").generation.hasVisibleText, true);
+});
+
+test("自定义模型把 Codex 跨任务委托还原为用户消息且不掩盖其他孤立工具输出", async (t) => {
+  const received = [];
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received.push(await readJsonRequest(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "resp_delegation", status: "completed", output: [] }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const config = await manager.configure(routerSettings(upstream.origin));
+  const delegatedPrompt = "继续执行 DeepSeek 桌面验收。\n保留完整换行。";
+  const orphanOutput = { type: "function_call_output", name: "other_tool", output: "orphan" };
+
+  const response = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-model",
+      input: [
+        {
+          type: "function_call_output",
+          id: "fco_delegation",
+          name: "send_message_to_thread",
+          namespace: "codex_app",
+          output: [
+            "<codex_delegation>",
+            "  <source_thread_id>01a00000-0000-7000-8000-000000000000</source_thread_id>",
+            `  <input>${delegatedPrompt}</input>`,
+            "</codex_delegation>",
+          ].join("\n"),
+          internal_chat_message_metadata_passthrough: { turn_id: "private-turn" },
+        },
+        orphanOutput,
+      ],
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(received[0].input[0], {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: delegatedPrompt }],
+  });
+  assert.deepEqual(received[0].input[1], orphanOutput,
+    "非 Codex 跨任务委托的孤立工具输出必须保留，让上游继续暴露协议错误");
 });
 
 test("自定义模型 4xx 只记录字段结构，不把提示词、工具参数或凭据写入诊断", async (t) => {
@@ -1353,6 +1400,14 @@ test("官方 WebSocket 连续预热与 incomplete 响应保持帧透明且只统
   });
   await waitFor(() => manager.getNetworkViewModel().status === "stable");
   const usageEvents = await readEvents(usageEventPath);
+  const inventory = usageEvents.find((event) => event.type === "request-tool-inventory");
+  assert.deepEqual(inventory.tools, [{
+    type: "mcp",
+    name: null,
+    namespace: null,
+    serverLabel: "yuque",
+  }]);
+  assert.doesNotMatch(JSON.stringify(inventory), /call_1|ok/);
   assert.equal(usageEvents.filter((event) => event.type === "generation").length, 1);
   const generation = usageEvents.find((event) => event.type === "generation").generation;
   assert.equal(generation.responseId, "resp_2");

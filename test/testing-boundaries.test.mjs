@@ -57,12 +57,17 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
       ? selectedPlan.currentRuntime
       : "unsupported");
   assert.equal(selectedPlan.changesDesktopRuntime, false);
+  assert.equal(selectedPlan.component, `B1-official-backend/${selectedPlan.runtimeTarget}`);
+  assert.deepEqual(selectedPlan.components.map(component => [component.kind, component.status]), [
+    ["backend", "planned"],
+    ["desktop-entry", "not-run"],
+  ]);
   assert.deepEqual(selectedPlan.profiles.map(p => p.id), ["official"]);
   assert.deepEqual(selectedPlan.perProfile, [
     "独立任务的文件、命令、补丁与 MCP 调用",
     "独立短任务的历史恢复与分叉",
     "独立短任务的显式压缩与压缩后历史恢复",
-    "独立任务的网页/浏览器宿主适配、用户输入、图片、官方原生搜索",
+    "独立 app-server 的网页/浏览器宿主适配、用户输入、图片、官方原生搜索回调",
   ]);
   assert.equal(selectedPlan.maxObservedTokensPerStage, 500000);
   assert.equal(selectedPlan.maxTurnsPerStage, 40);
@@ -79,16 +84,33 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
   assert.deepEqual(compactionPlan.perProfile, ["独立短任务的显式压缩与压缩后历史恢复"]);
   const hostPlan = JSON.parse((await exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=official", "--stage=host"], options)).stdout);
+  assert.equal(hostPlan.stageFilter, "callbacks");
   assert.deepEqual(hostPlan.perProfile,
-    ["独立任务的网页/浏览器宿主适配、用户输入、图片、官方原生搜索"]);
+    ["独立 app-server 的网页/浏览器宿主适配、用户输入、图片、官方原生搜索回调"]);
+  const callbacksPlan = JSON.parse((await exec(process.execPath,
+    ["scripts/test-live.mjs", "--plan", "--profile=official", "--stage=callbacks"], options)).stdout);
+  assert.equal(callbacksPlan.stageFilter, "callbacks");
   const deepseekPlan = JSON.parse((await exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=deepseek"], options)).stdout);
   assert.deepEqual(deepseekPlan.perProfile, [
     "独立任务的文件、命令、补丁与 MCP 调用",
     "独立短任务的历史恢复与分叉",
     "独立短任务的显式压缩与压缩后历史恢复",
-    "独立任务的网页/浏览器宿主适配、用户输入",
+    "独立 app-server 的网页/浏览器宿主适配、用户输入回调",
   ]);
+  const desktopPlan = JSON.parse((await exec(process.execPath,
+    ["scripts/test-desktop-host.mjs", "--plan", "--profile=deepseek"], options)).stdout);
+  assert.equal(desktopPlan.batch, "B2-deepseek");
+  assert.equal(desktopPlan.component, `B2-deepseek-desktop/${desktopPlan.runtimeTarget}`);
+  assert.equal(desktopPlan.expectedModel, "deepseek-v4-flash");
+  await assert.rejects(exec(process.execPath,
+    ["scripts/test-desktop-host.mjs", "--profile=official"], options), error => {
+    assert.match(error.stderr, /追加 --confirm-token-use/); return true;
+  });
+  await assert.rejects(exec(process.execPath,
+    ["scripts/test-desktop-host.mjs", "--plan", "--profile=official", "--runtime=all"], options), error => {
+    assert.match(error.stderr, /一次只能选择一个运行环境|没有完整测试运行环境/); return true;
+  });
   await assert.rejects(exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=missing"], options), error => {
     assert.match(error.stderr, /未找到真实测试配置 missing/); return true;
@@ -112,7 +134,7 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
     assert.match(error.stderr, /必须分批指定 --profile=official 或 --profile=deepseek/); return true;
   });
   const skipped = await exec(process.execPath, ["--test", "live-tests/tools.test.mjs", "live-tests/current-account-smoke.test.mjs",
-    "live-tests/history.test.mjs", "live-tests/compaction.test.mjs", "live-tests/host.test.mjs"], options);
+    "live-tests/history.test.mjs", "live-tests/compaction.test.mjs", "live-tests/callbacks.test.mjs"], options);
   assert.match(skipped.stdout, /skip|跳过/i);
   await assert.rejects(readFile(join(options.env.CODEX_HOME, "auth.json")), { code: "ENOENT" });
 });

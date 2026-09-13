@@ -2,12 +2,17 @@
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import deepSeekModel from "./deepseek-model.json" with { type: "json" };
+import {
+  createHostHealthTracker,
+  isMcpStatusListMethod,
+} from "./host-health.mjs";
 import { RELAY_PROTOCOL_VERSION, RELAY_STATE_VERSION } from "./relay-contract.mjs";
 import { startChatCompatibilityProxy } from "./chat-compat-proxy.mjs";
 
@@ -43,6 +48,9 @@ const PENDING_REQUEST_TTL_MS = 2 * 60 * 1000;
 const TURN_MODEL_TTL_MS = 15 * 60 * 1000;
 const THREAD_CONTEXT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RELAY_CLEANUP_INTERVAL_MS = 60 * 1000;
+const SIDECAR_MODE_ENV = "CODEX_QUOTA_APP_SERVER_SIDECAR";
+const SIDECAR_UPSTREAM_STDIN_FD_ENV = "CODEX_QUOTA_UPSTREAM_STDIN_FD";
+const SIDECAR_UPSTREAM_STDOUT_FD_ENV = "CODEX_QUOTA_UPSTREAM_STDOUT_FD";
 const execFileAsync = promisify(execFile);
 
 export async function runAppServerRelay() {
@@ -189,64 +197,100 @@ export async function runAppServerRelay() {
   delete env.CODEX_APP_SERVER_WS_URL;
   env.CODEX_CLI_PATH = upstreamExecutable;
 
-  const child = spawn(upstreamExecutable, args, {
+  const sidecar = openSidecarUpstream();
+  const child = sidecar ? null : spawn(upstreamExecutable, args, {
     env,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: process.platform === "win32",
   });
+  const upstreamInput = sidecar?.stdin ?? child.stdin;
+  const upstreamOutput = sidecar?.stdout ?? child.stdout;
   const statePath = await resolveRelayPath(
     relayConfig?.relayStatePath ?? process.env.CODEX_QUOTA_RELAY_STATE ?? "",
   );
+  const healthPath = await resolveRelayPath(relayConfig?.hostHealthPath ?? "");
+  const processIdentity = await currentRelayProcessIdentity(wslNative);
   const usageEventWriter = createUsageEventWriter(
     await resolveRelayPath(
       relayConfig?.tokenUsageEventsPath ?? process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "",
     ),
   );
   try {
-    await writeRelayState(
-      statePath,
-      relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
-    );
+    if (!sidecar) {
+      await writeRelayState(
+        statePath,
+        relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+        processIdentity,
+      );
+    }
   } catch (error) {
-    child.kill();
+    child?.kill();
+    sidecar?.close();
     await chatCompatibilityProxy?.close();
     throw error;
   }
+  const hostHealth = await createHostHealthTracker({
+    path: healthPath,
+    generation: relayConfig?.generation ??
+      process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+    runtimeTarget: relayConfig?.runtimeTarget ?? (wslNative
+      ? "wsl-native"
+      : windowsNative
+        ? "windows-native"
+        : process.platform === "darwin"
+          ? "macos-native"
+          : null),
+    processIdentity,
+  });
   let relayCleanupTimer = null;
   let cleanedUp = false;
-  const cleanup = async () => {
+  const cleanup = async (detail = null) => {
     if (cleanedUp) return;
     cleanedUp = true;
     if (relayCleanupTimer) clearInterval(relayCleanupTimer);
     relayCleanupTimer = null;
     await Promise.all([
       removeRelayState(statePath),
+      // Relay 状态一旦删除，读取端会立即把宿主能力判为断开。这里不再
+      // 追加一次健康文件写入，避免 macOS sidecar 在官方进程退出后与
+      // 临时 HOME/正式卸载目录回收竞争；已持久化的具体启动根因仍保留。
+      hostHealth.close({ disconnected: false }),
       usageEventWriter.close(),
       chatCompatibilityProxy?.close(),
     ]);
   };
-  forwardSignals(child);
-  child.once("error", (error) => {
-    void (async () => {
-      if (wslNative) {
-        await appendNativeWslDiagnostic(`Upstream process error: ${error.message}`)
-          .catch(() => undefined);
-      }
-      await cleanup();
-      fail(error);
-    })();
-  });
-  child.once("exit", (code, signal) => {
-    void (async () => {
-      if (wslNative) {
-        await appendNativeWslDiagnostic(
-          `Upstream process exited; code=${code ?? "null"}; signal=${signal ?? "null"}`,
-        ).catch(() => undefined);
-      }
-      await cleanup();
-      exitLikeChild(code, signal);
-    })();
-  });
+  if (child) {
+    forwardSignals(child);
+    child.once("error", (error) => {
+      void (async () => {
+        if (wslNative) {
+          await appendNativeWslDiagnostic(`Upstream process error: ${error.message}`)
+            .catch(() => undefined);
+        }
+        await cleanup(error.message);
+        fail(error);
+      })();
+    });
+    child.once("exit", (code, signal) => {
+      void (async () => {
+        if (wslNative) {
+          await appendNativeWslDiagnostic(
+            `Upstream process exited; code=${code ?? "null"}; signal=${signal ?? "null"}`,
+          ).catch(() => undefined);
+        }
+        await cleanup(`官方 app-server 已退出（code=${code ?? "null"}, signal=${signal ?? "null"}）`);
+        exitLikeChild(code, signal);
+      })();
+    });
+  } else {
+    forwardSidecarSignals(cleanup);
+    upstreamOutput.once("end", () => {
+      void cleanup("官方 app-server 输出已关闭").then(() => {
+        if (process.stdout.writableFinished) process.exit(0);
+        else process.stdout.once("finish", () => process.exit(0));
+      });
+    });
+  }
   process.once("exit", () => void cleanup());
 
   const pendingRequests = new Map();
@@ -264,12 +308,41 @@ export async function runAppServerRelay() {
     modelRevision: 0,
     modelListStatus: null,
     emitUsageEvent: usageEventWriter.write,
+    hostHealth,
   };
   relayCleanupTimer = setInterval(() => pruneRelayState(relayState), RELAY_CLEANUP_INTERVAL_MS);
   relayCleanupTimer.unref?.();
-  pipeLines(process.stdin, child.stdin, (line) => rewriteClientLine(line, relayState));
-  pipeLines(child.stdout, process.stdout, (line) => rewriteServerLine(line, relayState));
-  pipeRaw(child.stderr, process.stderr);
+  pipeLines(process.stdin, upstreamInput, (line) => rewriteClientLine(line, relayState));
+  pipeLines(upstreamOutput, process.stdout, (line) => rewriteServerLine(line, relayState));
+  if (child) pipeRaw(child.stderr, process.stderr);
+}
+
+function openSidecarUpstream() {
+  if (process.env[SIDECAR_MODE_ENV] !== "1") return null;
+  if (process.platform !== "darwin") {
+    throw new Error("app-server 中继 sidecar 仅支持 macOS");
+  }
+  const stdinFd = inheritedDescriptor(SIDECAR_UPSTREAM_STDIN_FD_ENV);
+  const stdoutFd = inheritedDescriptor(SIDECAR_UPSTREAM_STDOUT_FD_ENV);
+  if (stdinFd === stdoutFd) throw new Error("app-server 中继 sidecar 管道描述符重复");
+  const stdin = createWriteStream(null, { fd: stdinFd, autoClose: true });
+  const stdout = createReadStream(null, { fd: stdoutFd, autoClose: true });
+  return {
+    stdin,
+    stdout,
+    close() {
+      stdin.destroy();
+      stdout.destroy();
+    },
+  };
+}
+
+function inheritedDescriptor(name) {
+  const value = Number(process.env[name]);
+  if (!Number.isInteger(value) || value < 3) {
+    throw new Error(`app-server 中继 sidecar 缺少有效的 ${name}`);
+  }
+  return value;
 }
 
 function rewriteClientLine(line, state) {
@@ -281,10 +354,16 @@ function rewriteClientLine(line, state) {
   }
   if (!message || typeof message !== "object") return line;
 
+  state.hostHealth?.observeClientMessage(message);
+
   const method = message.method;
   const params = message.params && typeof message.params === "object"
     ? { ...message.params }
     : {};
+  if (isMcpStatusListMethod(method)) {
+    if (message.id != null) rememberPendingRequest(state, message.id, { method });
+    return line;
+  }
   if (method === MODEL_LIST_METHOD) {
     if (message.id != null) {
       rememberPendingRequest(state, message.id, {
@@ -472,6 +551,7 @@ function rewriteServerLine(line, state) {
   } catch {
     return line;
   }
+  state.hostHealth?.observeServerMessage(message);
   learnThreadContexts(message?.params, state, {
     source: "thread-discovery",
     revision: 0,
@@ -484,6 +564,10 @@ function rewriteServerLine(line, state) {
   const pending = state.pendingRequests.get(message.id);
   if (!pending) return line;
   state.pendingRequests.delete(message.id);
+  if (isMcpStatusListMethod(pending.method)) {
+    state.hostHealth?.observeStatusList(message.result, message.error);
+    return line;
+  }
   if (message.error) {
     restoreThreadContext(
       state.threadContexts,
@@ -1251,26 +1335,38 @@ function isWindowsPath(path) {
   return /^(?:[a-z]:[\\/]|\\\\\?\\[a-z]:[\\/])/i.test(path);
 }
 
-async function writeRelayState(path, generation) {
+async function writeRelayState(path, generation, processIdentity = null) {
   if (!path) return;
   const resolvedGeneration = generation ??
     process.env.CODEX_QUOTA_BRIDGE_GENERATION ??
     `usage-events-v${RELAY_PROTOCOL_VERSION}`;
+  const identity = processIdentity ?? await currentRelayProcessIdentity(
+    process.env.CODEX_QUOTA_WSL_NATIVE === "1",
+  );
+  await writeFile(path, `${JSON.stringify({
+    version: RELAY_STATE_VERSION,
+    pid: identity.pid,
+    generation: resolvedGeneration,
+    processStartedAt: identity.processStartedAt,
+    ...(identity.bootId ? { bootId: identity.bootId } : {}),
+    ...(identity.processStartTicks != null
+      ? { processStartTicks: identity.processStartTicks }
+      : {}),
+    startedAt: Date.now(),
+  })}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+async function currentRelayProcessIdentity(wslNative) {
   const processStartedAt = Math.max(
     0,
     Math.floor(Date.now() - process.uptime() * 1000),
   );
-  const wslProcessIdentity = process.env.CODEX_QUOTA_WSL_NATIVE === "1"
-    ? await readCurrentLinuxProcessIdentity()
-    : null;
-  await writeFile(path, `${JSON.stringify({
-    version: RELAY_STATE_VERSION,
+  const wslProcessIdentity = wslNative ? await readCurrentLinuxProcessIdentity() : null;
+  return {
     pid: process.pid,
-    generation: resolvedGeneration,
     processStartedAt,
     ...(wslProcessIdentity ?? {}),
-    startedAt: Date.now(),
-  })}\n`, { encoding: "utf8", mode: 0o600 });
+  };
 }
 
 async function readCurrentLinuxProcessIdentity() {
@@ -1311,6 +1407,9 @@ function clearRelayEnvironment(env) {
     "CODEX_QUOTA_WSL_NATIVE",
     "CODEX_QUOTA_WSL_UPSTREAM_CODEX_CLI",
     "CODEX_QUOTA_WINDOWS_NATIVE",
+    SIDECAR_MODE_ENV,
+    SIDECAR_UPSTREAM_STDIN_FD_ENV,
+    SIDECAR_UPSTREAM_STDOUT_FD_ENV,
   ]) {
     delete env[key];
   }
@@ -1338,6 +1437,17 @@ function forwardSignals(child) {
   return () => {
     for (const [signal, handler] of handlers) process.off(signal, handler);
   };
+}
+
+function forwardSidecarSignals(cleanup) {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => {
+      void cleanup().then(
+        () => process.kill(process.pid, signal),
+        (error) => fail(error),
+      );
+    });
+  }
 }
 
 function exitLikeChild(code, signal) {

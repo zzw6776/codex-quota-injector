@@ -3,6 +3,9 @@ import Darwin
 import Foundation
 
 private let officialBundleIdentifier = "com.openai.codex"
+private let sidecarModeEnvironmentKey = "CODEX_QUOTA_APP_SERVER_SIDECAR"
+private let sidecarUpstreamStdinEnvironmentKey = "CODEX_QUOTA_UPSTREAM_STDIN_FD"
+private let sidecarUpstreamStdoutEnvironmentKey = "CODEX_QUOTA_UPSTREAM_STDOUT_FD"
 private let standardOfficialExecutables = [
   "/Applications/ChatGPT.app/Contents/Resources/codex",
   "/Applications/Codex.app/Contents/Resources/codex",
@@ -19,6 +22,7 @@ private struct LaunchConfiguration: Decodable {
   let modelCatalogPath: String?
   let relayStatePath: String?
   let generation: String?
+  let hostToolsRequired: Bool?
   let router: RouterConfiguration?
 }
 
@@ -79,6 +83,9 @@ private func clearBootstrapEnvironment() {
     "CODEX_QUOTA_ROLE",
     "CODEX_APP_SERVER_FORCE_CLI",
     "CODEX_APP_SERVER_WS_URL",
+    sidecarModeEnvironmentKey,
+    sidecarUpstreamStdinEnvironmentKey,
+    sidecarUpstreamStdoutEnvironmentKey,
   ] {
     unsetenv(key)
   }
@@ -119,11 +126,15 @@ private func providerOverride(_ providerId: String, router: RouterConfiguration)
     "env_http_headers={\(jsonQuote(router.tokenHeader))=\(jsonQuote(router.tokenEnv))}}"
 }
 
-private func writeRelayState(_ configuration: LaunchConfiguration) {
+private func writeRelayState(
+  _ configuration: LaunchConfiguration,
+  processId: pid_t = getpid(),
+  terminateOnFailure processToTerminate: pid_t? = nil
+) {
   guard let path = configuration.relayStatePath, !path.isEmpty else { return }
   let state: [String: Any] = [
     "version": 2,
-    "pid": Int(getpid()),
+    "pid": Int(processId),
     "processStartedAt": Date().timeIntervalSince1970 * 1000,
     "generation": configuration.generation as Any? ?? NSNull(),
   ]
@@ -138,8 +149,97 @@ private func writeRelayState(_ configuration: LaunchConfiguration) {
     try data.write(to: url, options: .atomic)
     chmod(path, 0o600)
   } catch {
+    if let processToTerminate {
+      _ = kill(processToTerminate, SIGTERM)
+    }
     fail("无法写入桥接状态：\(error.localizedDescription)")
   }
+}
+
+private func closeDescriptor(_ descriptor: Int32) {
+  if descriptor >= 0 {
+    _ = Darwin.close(descriptor)
+  }
+}
+
+private func startAppServerRelaySidecar(
+  executable: String,
+  arguments: [String],
+  configPath: String,
+  upstreamExecutable: String
+) -> pid_t {
+  var requestsToUpstream: [Int32] = [-1, -1]
+  var responsesFromUpstream: [Int32] = [-1, -1]
+  guard Darwin.pipe(&requestsToUpstream) == 0 else {
+    fail("无法创建 app-server 请求管道：\(String(cString: strerror(errno)))")
+  }
+  guard Darwin.pipe(&responsesFromUpstream) == 0 else {
+    closeDescriptor(requestsToUpstream[0])
+    closeDescriptor(requestsToUpstream[1])
+    fail("无法创建 app-server 响应管道：\(String(cString: strerror(errno)))")
+  }
+
+  var fileActions: posix_spawn_file_actions_t? = nil
+  let actionsStatus = posix_spawn_file_actions_init(&fileActions)
+  guard actionsStatus == 0 else {
+    for descriptor in requestsToUpstream + responsesFromUpstream {
+      closeDescriptor(descriptor)
+    }
+    fail("无法初始化 app-server 中继 sidecar：\(String(cString: strerror(actionsStatus)))")
+  }
+  defer { posix_spawn_file_actions_destroy(&fileActions) }
+  posix_spawn_file_actions_addclose(&fileActions, requestsToUpstream[0])
+  posix_spawn_file_actions_addclose(&fileActions, responsesFromUpstream[1])
+
+  setenv("CODEX_QUOTA_ROLE", "app-server-relay", 1)
+  setenv("CODEX_QUOTA_RELAY_CONFIG", configPath, 1)
+  setenv("CODEX_QUOTA_UPSTREAM_CODEX_CLI", upstreamExecutable, 1)
+  setenv("CODEX_CLI_PATH", upstreamExecutable, 1)
+  setenv(sidecarModeEnvironmentKey, "1", 1)
+  setenv(sidecarUpstreamStdinEnvironmentKey, String(requestsToUpstream[1]), 1)
+  setenv(sidecarUpstreamStdoutEnvironmentKey, String(responsesFromUpstream[0]), 1)
+
+  let values = [executable] + arguments
+  var pointers: [UnsafeMutablePointer<CChar>?] = values.map { strdup($0) }
+  pointers.append(nil)
+  var child: pid_t = 0
+  let spawnStatus = executable.withCString { executablePointer in
+    pointers.withUnsafeMutableBufferPointer { buffer in
+      posix_spawn(
+        &child,
+        executablePointer,
+        &fileActions,
+        nil,
+        buffer.baseAddress,
+        environ
+      )
+    }
+  }
+  for case let pointer? in pointers { free(pointer) }
+  guard spawnStatus == 0 else {
+    for descriptor in requestsToUpstream + responsesFromUpstream {
+      closeDescriptor(descriptor)
+    }
+    fail("无法创建 app-server 中继 sidecar：\(String(cString: strerror(spawnStatus)))")
+  }
+
+  closeDescriptor(requestsToUpstream[1])
+  closeDescriptor(responsesFromUpstream[0])
+  guard dup2(requestsToUpstream[0], STDIN_FILENO) >= 0 else {
+    closeDescriptor(requestsToUpstream[0])
+    closeDescriptor(responsesFromUpstream[1])
+    _ = kill(child, SIGTERM)
+    fail("无法连接官方 app-server 标准输入：\(String(cString: strerror(errno)))")
+  }
+  guard dup2(responsesFromUpstream[1], STDOUT_FILENO) >= 0 else {
+    closeDescriptor(requestsToUpstream[0])
+    closeDescriptor(responsesFromUpstream[1])
+    _ = kill(child, SIGTERM)
+    fail("无法连接官方 app-server 标准输出：\(String(cString: strerror(errno)))")
+  }
+  closeDescriptor(requestsToUpstream[0])
+  closeDescriptor(responsesFromUpstream[1])
+  return child
 }
 
 private func execProcess(
@@ -193,20 +293,21 @@ guard isUsableOfficialExecutable(configuration.upstreamExecutable) else {
 }
 
 if let appServerIndex = arguments.firstIndex(of: "app-server") {
-  if configuration.router != nil,
-     let relayExecutable = configuration.relayExecutable,
-     !relayExecutable.isEmpty {
-    guard isUsableOfficialExecutable(relayExecutable) else {
-      fail("模型 Router 已配置，但 app-server 中继不存在或不可执行")
+  var relayProcessId: pid_t? = nil
+  let relayRequired = configuration.hostToolsRequired == true || configuration.router != nil
+  if relayRequired {
+    guard let relayExecutable = configuration.relayExecutable,
+          !relayExecutable.isEmpty else {
+      fail("app-server 观察中继已启用，但中继路径为空")
     }
-    setenv("CODEX_QUOTA_ROLE", "app-server-relay", 1)
-    setenv("CODEX_QUOTA_RELAY_CONFIG", configPath, 1)
-    setenv("CODEX_QUOTA_UPSTREAM_CODEX_CLI", configuration.upstreamExecutable, 1)
-    setenv("CODEX_CLI_PATH", configuration.upstreamExecutable, 1)
-    execProcess(
-      relayExecutable,
+    guard isUsableOfficialExecutable(relayExecutable) else {
+      fail("app-server 观察中继不存在或不可执行")
+    }
+    relayProcessId = startAppServerRelaySidecar(
+      executable: relayExecutable,
       arguments: (configuration.relayArguments ?? []) + arguments,
-      failureDescription: "app-server 中继"
+      configPath: configPath,
+      upstreamExecutable: configuration.upstreamExecutable
     )
   }
   var overrides: [String] = []
@@ -229,7 +330,11 @@ if let appServerIndex = arguments.firstIndex(of: "app-server") {
     }
   }
   arguments.insert(contentsOf: overrides, at: appServerIndex + 1)
-  writeRelayState(configuration)
+  writeRelayState(
+    configuration,
+    processId: relayProcessId ?? getpid(),
+    terminateOnFailure: relayProcessId
+  )
 }
 
 clearBootstrapEnvironment()
