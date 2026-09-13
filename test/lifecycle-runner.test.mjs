@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -109,28 +109,28 @@ test("[A LCH-06] 报告使用原子替换，拒绝未来版本和重复步骤", 
   await assert.rejects(readLifecycleReport(reportPath), /版本不受支持/);
 });
 
-test("[A HAR-03 LCH-06] 恢复任务只接受当前项目运行目录内的控制文件路径", () => {
-  const root = "/repo";
-  const runDirectory = "/repo/.runtime/test-results/lifecycle/run-1";
+test("[A HAR-03 LCH-06] 恢复任务只接受当前项目运行目录内的控制文件路径", async (t) => {
+  const root = resolve(await useTempDir(t, "lifecycle-control-"));
+  const runDirectory = join(root, ".runtime", "test-results", "lifecycle", "run-1");
   const control = {
     version: 2,
     runId: "run-1",
     root,
-    reportPath: `${runDirectory}/report.json`,
-    progressPath: `${runDirectory}/progress.html`,
+    reportPath: join(runDirectory, "report.json"),
+    progressPath: join(runDirectory, "progress.html"),
   };
   assert.equal(validateLifecycleControl(control, { root, runDirectory }), control);
   assert.throws(() => validateLifecycleControl({
     ...control,
-    reportPath: "/tmp/report.json",
+    reportPath: join(root, "outside", "report.json"),
   }, { root, runDirectory }), /不属于当前项目/);
   assert.throws(() => validateLifecycleControl({
     ...control,
-    progressPath: "/tmp/progress.html",
+    progressPath: join(root, "outside", "progress.html"),
   }, { root, runDirectory }), /不属于当前项目/);
   assert.throws(() => validateLifecycleControl(control, {
     root,
-    runDirectory: "/repo/.runtime/test-results/lifecycle/other-run",
+    runDirectory: join(root, ".runtime", "test-results", "lifecycle", "other-run"),
   }), /不属于当前项目/);
 });
 

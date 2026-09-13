@@ -46,6 +46,12 @@ if (stageFilter && !liveStageFiles.has(stageFilter)) {
   throw new Error(`未知真实测试场景 ${stageFilter}；可用场景：${[...liveStageFiles.keys()].join("、")}`);
 }
 if (stageFilter && args.has("--wakeup")) throw new Error("单场景定向测试不能同时执行账号唤醒");
+if (!args.has("--plan") && !args.has("--confirm-token-use")) {
+  throw new Error("会消耗真实 Token。先查看 B1/B2 计划并取得对应批次的本次明确同意；查看计划不会发送模型请求。");
+}
+if (!args.has("--plan") && !profileFilter) {
+  throw new Error("付费测试必须分批指定 --profile=official 或 --profile=deepseek；不得一次执行全部供应商");
+}
 
 const availableRuntimes = runtimeTargetsForPlatform();
 const activeRuntime = availableRuntimes.length ? await currentRuntimeTarget() : null;
@@ -95,12 +101,6 @@ const plan = {
 };
 console.log(JSON.stringify(plan, null, 2));
 if (args.has("--plan")) process.exit(0);
-if (!args.has("--confirm-token-use")) {
-  throw new Error("会消耗真实 Token。先查看 B1/B2 计划并取得对应批次的本次明确同意；查看计划不会发送模型请求。");
-}
-if (!profileFilter) {
-  throw new Error("付费测试必须分批指定 --profile=official 或 --profile=deepseek；不得一次执行全部供应商");
-}
 
 const free = await requireFreeResult({ runtimeTarget });
 await mkdir(RESULTS, { recursive: true });
