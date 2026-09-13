@@ -66,6 +66,21 @@ test("账号存储可持久化、排序、切换和删除，并返回隔离副�
   );
 });
 
+test("已转出账号保留加密凭据，但不能成为当前账号", async (t) => {
+  const dataDir = await useTempDir(t);
+  const cockpitDir = await useTempDir(t, "codex-cockpit-test-");
+  const store = new AccountStore({ dataDir, cockpitDir });
+  await store.initialize();
+  await store.upsert(account("transferred", { authStatus: "transferred", transferredAt: 123 }));
+
+  await assert.rejects(store.setCurrent("transferred"), /已转出/);
+  const reloaded = new AccountStore({ dataDir, cockpitDir });
+  await reloaded.initialize();
+  assert.equal(reloaded.get("transferred").authStatus, "transferred");
+  assert.equal(reloaded.get("transferred").tokens.accessToken, "access");
+  assert.equal(reloaded.get("transferred").tokens.refreshToken, "refresh");
+});
+
 test("已有账号索引丢失密钥时停止启动，避免生成新密钥覆盖数据", async (t) => {
   const dataDir = await useTempDir(t);
   const cockpitDir = await useTempDir(t, "codex-cockpit-test-");

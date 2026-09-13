@@ -60,7 +60,8 @@
         accounts: [
           {
             id: "account-1", email: "current@example.com", authMode: "oauth",
-            planType: "plus", current: true,
+            authStatus: "active", planType: "plus", current: true,
+            canTransfer: true, canTemporaryTransfer: true,
             subscriptionActiveUntil: new Date(Date.now() + 18 * 86400000).toISOString(),
             windows: [
               { label: "5h", remainingPercent: 92, resetsAt: now + 2 * 3600 },
@@ -69,7 +70,8 @@
           },
           {
             id: "account-2", email: "backup@example.com", authMode: "oauth",
-            planType: "plus", current: false,
+            authStatus: "active", planType: "plus", current: false,
+            canTransfer: true, canTemporaryTransfer: true,
             subscriptionActiveUntil: new Date(Date.now() + 6 * 86400000).toISOString(),
             windows: [
               { label: "5h", remainingPercent: 64, resetsAt: now + 4 * 3600 },
@@ -78,7 +80,8 @@
           },
           {
             id: "account-3", email: "expired-session@example.com", authMode: "oauth",
-            planType: "plus", current: false,
+            authStatus: "needsReauth", planType: "plus", current: false,
+            canTransfer: false, canTemporaryTransfer: false,
             subscriptionActiveUntil: new Date(Date.now() - 86400000).toISOString(),
             windows: [], quotaError: "登录已过期，需要重新添加或授权",
           },

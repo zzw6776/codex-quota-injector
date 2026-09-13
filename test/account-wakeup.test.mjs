@@ -32,6 +32,7 @@ test("唤醒设置仅接受 OAuth 账号和合法且非空的启用时间", asyn
     openaiApiKey: "sk-test",
     tokens: {},
   }));
+  await store.upsert(account("transferred", { authStatus: "transferred" }));
   let changes = 0;
   const wakeup = new AccountWakeupManager({ store }, () => { changes += 1; });
   t.after(() => wakeup.close());
@@ -45,7 +46,9 @@ test("唤醒设置仅接受 OAuth 账号和合法且非空的启用时间", asyn
   assert.match(wakeup.getViewModel("oauth").message.text, /至少添加一个/);
   await wakeup.save("api", { enabled: true, times: ["08:00"] });
   assert.match(wakeup.getViewModel("api").message.text, /仅 OAuth/);
-  assert.equal(changes, 3);
+  await wakeup.save("transferred", { enabled: true, times: ["08:00"] });
+  assert.match(wakeup.getViewModel("transferred").message.text, /已转出/);
+  assert.equal(changes, 4);
 });
 
 test("启动时把未完成的 running 记录标成结果未知，不会伪报成功", async (t) => {

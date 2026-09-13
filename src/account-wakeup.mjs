@@ -64,6 +64,11 @@ export class AccountWakeupManager {
     try {
       const account = this.store.get(accountId);
       if (account?.authMode !== "oauth") throw new Error("仅 OAuth 账号支持定时唤醒");
+      if (account.authStatus !== "active") {
+        throw new Error(account.authStatus === "transferred"
+          ? "账号已转出，不能配置唤醒"
+          : "当前凭据状态不能配置唤醒，请重新授权");
+      }
       const times = normalizeWakeupTimes(settings.times);
       if (settings.enabled && times.length === 0) throw new Error("请至少添加一个唤醒时间");
       await this.store.update(accountId, (latest) => ({
@@ -87,7 +92,7 @@ export class AccountWakeupManager {
     for (const account of this.store.list()) {
       if (this.abortController.signal.aborted) break;
       const settings = account.wakeup;
-      if (account.authMode !== "oauth" || !settings.enabled) continue;
+      if (account.authMode !== "oauth" || account.authStatus !== "active" || !settings.enabled) continue;
       for (const time of settings.times) {
         const due = localTimeAt(date, time);
         if (!Number.isFinite(due) || due <= previous || due <= settings.updatedAt || due > now) continue;
@@ -117,7 +122,8 @@ export class AccountWakeupManager {
 
   trigger(accountId, slot = null) {
     if (this.abortController.signal.aborted || this.jobs.has(accountId)) return;
-    if (this.store.get(accountId)?.authMode !== "oauth") return;
+    const account = this.store.get(accountId);
+    if (account?.authMode !== "oauth" || account.authStatus !== "active") return;
     this.messages.set(accountId, { status: "loading", text: "等待唤醒…" });
     // Serial requests avoid process bursts when many accounts share the same time.
     const task = this.queue.catch(() => undefined)

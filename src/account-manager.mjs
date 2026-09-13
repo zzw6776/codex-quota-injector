@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { watch } from "node:fs";
 import { createServer } from "node:http";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -21,16 +21,21 @@ const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_REFRESH_MS = 12 * 60 * 60 * 1000;
 const TOKEN_REFRESH_LEAD_SECONDS = 5 * 60;
 const OFFICIAL_SYNC_DEBOUNCE_MS = 250;
+const TRANSFER_KIND = "codex-account-transfer";
+const TRANSFER_VERSION = 2;
+const TRANSFER_MODES = new Set(["temporary", "handoff"]);
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 export class AccountManager {
   constructor({ store = new AccountStore(), codexHome = resolveCodexHome(),
-    oauth = {}, exportDirectory = join(homedir(), "Downloads") } = {}) {
+    oauth = {}, exportDirectory = join(homedir(), "Downloads"),
+    syncOfficialKeychain = process.platform === "darwin" } = {}) {
     this.store = store;
     this.codexHome = codexHome;
     this.oauth = { callbackPort: OAUTH_CALLBACK_PORT, timeoutMs: OAUTH_TIMEOUT_MS, openExternal, ...oauth };
     this.exportDirectory = exportDirectory;
+    this.syncOfficialKeychain = syncOfficialKeychain;
     this.operation = null;
     this.oauthPromise = null;
     this.oauthAbortController = null;
@@ -120,13 +125,16 @@ export class AccountManager {
     await this.syncCurrentAccountFromOfficialCredentials();
     const accountId = this.store.index.currentAccountId;
     const account = accountId ? this.store.get(accountId) : null;
+    if (["transferred", "needsReauth"].includes(account?.authStatus)) return null;
     if (account?.authMode === "apiKey" && account.openaiApiKey) return account;
     return account?.authMode === "oauth" && account.tokens?.accessToken ? account : null;
   }
 
   async refreshAll({ forceSubscription = false } = {}) {
     await this.syncCurrentAccountFromOfficialCredentials();
-    const accounts = this.store.list().filter((account) => account.authMode === "oauth");
+    const accounts = this.store.list().filter((account) =>
+      account.authMode === "oauth" && account.authStatus !== "transferred"
+    );
     const results = await Promise.allSettled(
       accounts.map((account) => this.refreshAccount(account.id, { forceSubscription })),
     );
@@ -164,7 +172,11 @@ export class AccountManager {
         await this.syncCurrentAccountFromOfficialCredentials();
         let account = this.store.get(accountId);
         if (!account || account.authMode !== "oauth") throw new Error("仅支持已保存的 OAuth 账号");
-        if (account.authStatus === "needsReauth") throw new Error("登录凭据已失效，请重新授权");
+        if (account.authStatus !== "active") {
+          throw new Error(account.authStatus === "transferred"
+            ? "账号已转出，请先恢复"
+            : "登录凭据不可用于账号唤醒，请重新授权");
+        }
         try {
           if (account.id === this.store.index.currentAccountId) {
             const expiration = jwtExpiration(account.tokens.accessToken);
@@ -238,16 +250,38 @@ export class AccountManager {
 
   async importTokenInput(input) {
     return this.#withOperation("正在导入 Token…", async () => {
-      const { tokens: candidates, apiKeys } = parseCredentialInput(input);
+      const { tokens: candidates, apiKeys, transfer } = parseCredentialInput(input);
       if (candidates.length === 0 && apiKeys.length === 0) {
         throw new Error("没有识别到可导入的账号凭据");
       }
+      if (transfer?.mode === "temporary" && apiKeys.length > 0) {
+        throw new Error("临时迁移不支持 API Key");
+      }
       const imported = [];
       for (const candidate of candidates) {
-        const tokens = candidate.refreshToken && !candidate.accessToken
-          ? { ...candidate, ...await refreshTokens(candidate.refreshToken, candidate.idToken) }
-          : candidate;
-        imported.push(await this.#upsertOAuthTokens(tokens));
+        let tokens = candidate;
+        let options = {};
+        if (transfer?.mode === "handoff") {
+          if (!candidate.refreshToken) throw new Error("完整转移凭据缺少 refresh token");
+          tokens = {
+            ...candidate,
+            ...await refreshTokens(candidate.refreshToken, candidate.idToken),
+          };
+        } else if (transfer?.mode === "temporary") {
+          if (candidate.refreshToken) throw new Error("临时迁移文件不能包含 refresh token");
+          const temporaryExpiresAt = candidate.temporaryExpiresAt ??
+            jwtExpiration(candidate.accessToken);
+          if (!temporaryExpiresAt || temporaryExpiresAt <= Math.floor(Date.now() / 1000)) {
+            throw new Error("临时迁移凭据已经过期");
+          }
+          options = { authStatus: "temporary", temporaryExpiresAt };
+        } else if (candidate.refreshToken && !candidate.accessToken) {
+          tokens = {
+            ...candidate,
+            ...await refreshTokens(candidate.refreshToken, candidate.idToken),
+          };
+        }
+        imported.push(await this.#upsertOAuthTokens(tokens, null, options));
       }
       for (const candidate of apiKeys) {
         imported.push(await this.#upsertApiKey(candidate.apiKey, candidate.name));
@@ -255,26 +289,191 @@ export class AccountManager {
       await Promise.allSettled(imported.map((account) => this.refreshAccount(account.id, {
         forceSubscription: true,
       })));
+      if (transfer?.mode === "handoff") return `已接收 ${imported.length} 个完整转移账号`;
+      if (transfer?.mode === "temporary") return `已导入 ${imported.length} 个临时账号`;
       return `已导入 ${imported.length} 个账号`;
     });
   }
 
-  async exportAccounts() {
-    return this.#withOperation("正在导出全部账号…", async () => {
-      const accounts = this.store.list();
-      if (accounts.length === 0) throw new Error("暂无可导出的账号");
+  async exportAccounts({ mode, accountIds } = {}) {
+    const operationText = mode === "handoff" ? "正在完整转移账号…" : "正在生成临时迁移…";
+    return this.#withOperation(operationText, async () => {
+      if (!TRANSFER_MODES.has(mode)) throw new Error("请选择临时使用或完整转移");
+      await this.syncCurrentAccountFromOfficialCredentials();
+      const requestedIds = [...new Set(Array.isArray(accountIds) ? accountIds.map(String) : [])];
+      const available = this.store.list();
+      const selected = requestedIds.length > 0
+        ? requestedIds.map((accountId) => {
+            const account = this.store.get(accountId);
+            if (!account) throw new Error(`账号不存在: ${accountId}`);
+            return account;
+          })
+        : available.filter((account) => canExportAccount(account, mode));
+      if (selected.length === 0) throw new Error("请至少选择一个可迁移账号");
+      for (const account of selected) {
+        if (!canExportAccount(account, mode)) {
+          throw new Error(`${account.email} 当前不能用于${mode === "handoff" ? "完整转移" : "临时迁移"}`);
+        }
+      }
+
+      for (const account of selected) {
+        if (account.authMode !== "oauth") continue;
+        let refreshed;
+        try {
+          refreshed = await this.#withAccountLock(account.id, async () => {
+            const latest = this.store.get(account.id);
+            if (!canExportAccount(latest, mode)) throw new Error(`${account.email} 的凭据状态已变化，请重试`);
+            return this.#refreshStoredTokens(latest);
+          });
+        } catch (error) {
+          if (isPermanentRefreshError(error)) {
+            await this.store.update(account.id, {
+              authStatus: "needsReauth",
+              quotaError: `迁移前刷新失败，需要重新授权（${error.code ?? error.message}）`,
+            });
+          }
+          throw error;
+        }
+        if (mode === "temporary" && refreshed.id === this.store.index.currentAccountId) {
+          await writeOfficialCredentials(this.codexHome, refreshed, {
+            syncKeychain: this.syncOfficialKeychain,
+            strictKeychain: this.syncOfficialKeychain,
+          });
+        }
+      }
+
+      const refreshedAccounts = selected.map((account) => this.store.get(account.id));
       const exportedAt = new Date();
-      const fileName = `codex-quota-accounts-${exportedAt.toISOString()
+      const fileName = `codex-quota-${mode === "handoff" ? "handoff" : "temporary"}-${exportedAt.toISOString()
         .replace(/[:.]/g, "-")}.json`;
       const exportPath = join(this.exportDirectory, fileName);
       const payload = {
-        version: 1,
+        version: TRANSFER_VERSION,
+        kind: TRANSFER_KIND,
+        mode,
         exportedAt: exportedAt.toISOString(),
-        currentAccountId: this.store.index.currentAccountId,
-        accounts: accounts.map(toExportAccount),
+        accounts: refreshedAccounts.map((account) => toTransferAccount(account, mode)),
       };
-      await atomicWrite(exportPath, `${JSON.stringify(payload, null, 2)}\n`);
-      return `已导出 ${accounts.length} 个账号到 ${exportPath}`;
+
+      let restartRequired = false;
+      if (mode === "handoff") {
+        const snapshots = refreshedAccounts.map((account) => structuredClone(account));
+        const selectedIds = new Set(snapshots.map((account) => account.id));
+        const currentId = this.store.index.currentAccountId;
+        const currentSelected = currentId != null && selectedIds.has(currentId);
+        let fallback = null;
+        try {
+          for (const account of snapshots) {
+            await this.store.update(account.id, (latest) => ({
+              authStatus: "transferred",
+              transferredAt: exportedAt.getTime(),
+              temporaryExpiresAt: null,
+              quotaError: null,
+              wakeup: { ...latest.wakeup, enabled: false },
+            }));
+          }
+          if (currentSelected) {
+            fallback = this.store.list().find((account) =>
+              !selectedIds.has(account.id) && account.authStatus === "active" &&
+              (account.authMode === "apiKey" ? account.openaiApiKey : account.tokens.refreshToken)
+            ) ?? null;
+            if (fallback?.authMode === "oauth") {
+              fallback = await this.#withAccountLock(fallback.id, async () =>
+                this.#ensureFreshTokens(this.store.get(fallback.id), {
+                  refreshIfExpirationUnknown: true,
+                }));
+            }
+            if (fallback) {
+              if (fallback.authMode === "apiKey" && this.syncOfficialKeychain) {
+                await clearOfficialCredentials(this.codexHome, { syncKeychain: true });
+              }
+              await writeOfficialCredentials(this.codexHome, fallback, {
+                syncKeychain: this.syncOfficialKeychain,
+                strictKeychain: this.syncOfficialKeychain,
+              });
+            } else {
+              await clearOfficialCredentials(this.codexHome, {
+                syncKeychain: this.syncOfficialKeychain,
+              });
+            }
+            await this.store.setCurrent(fallback?.id ?? null);
+            restartRequired = true;
+          }
+          await atomicWrite(exportPath, `${JSON.stringify(payload, null, 2)}\n`);
+        } catch (error) {
+          for (const snapshot of snapshots) {
+            await this.store.upsert(snapshot).catch(() => undefined);
+          }
+          if (currentSelected) {
+            const previousCurrent = snapshots.find((account) => account.id === currentId);
+            if (previousCurrent) {
+              await writeOfficialCredentials(this.codexHome, previousCurrent, {
+                syncKeychain: this.syncOfficialKeychain,
+                strictKeychain: this.syncOfficialKeychain,
+              }).catch(() => undefined);
+              await this.store.setCurrent(previousCurrent.id).catch(() => undefined);
+            }
+          }
+          await unlink(exportPath).catch(() => undefined);
+          throw error;
+        }
+      } else {
+        await atomicWrite(exportPath, `${JSON.stringify(payload, null, 2)}\n`);
+      }
+
+      const label = mode === "handoff" ? "完整转移文件" : "临时迁移文件";
+      return {
+        message: `已生成 ${refreshedAccounts.length} 个账号的${label}：${exportPath}`,
+        exportPath,
+        mode,
+        restartRequired,
+      };
+    });
+  }
+
+  async restoreTransferredAccount(accountId) {
+    return this.#withOperation("正在验证并恢复已转出账号…", async () => {
+      const account = this.store.get(accountId);
+      if (!account) throw new Error("目标账号不存在，请刷新列表");
+      if (account.authStatus !== "transferred") throw new Error("该账号不是已转出状态");
+      if (account.authMode === "apiKey") {
+        await this.store.update(account.id, {
+          authStatus: "active",
+          transferredAt: null,
+          quotaError: null,
+        });
+        return `已恢复 ${account.email}`;
+      }
+      if (!account.tokens.refreshToken) {
+        await this.store.update(account.id, {
+          authStatus: "needsReauth",
+          transferredAt: null,
+          quotaError: "恢复失败，缺少 refresh token，需要重新授权",
+        });
+        throw new Error("恢复失败，缺少 refresh token，需要重新授权");
+      }
+      try {
+        const tokens = await refreshTokens(account.tokens.refreshToken, account.tokens.idToken);
+        await this.store.update(account.id, (latest) => ({
+          tokens,
+          authStatus: "active",
+          transferredAt: null,
+          temporaryExpiresAt: null,
+          quotaError: null,
+          tokenGeneration: (latest.tokenGeneration ?? 0) + 1,
+        }));
+      } catch (error) {
+        if (isPermanentRefreshError(error)) {
+          await this.store.update(account.id, {
+            authStatus: "needsReauth",
+            transferredAt: null,
+            quotaError: `恢复失败，需要重新授权（${error.code ?? error.message}）`,
+          });
+        }
+        throw error;
+      }
+      await this.refreshAccount(account.id, { forceSubscription: true }).catch(() => undefined);
+      return `已验证并恢复 ${account.email}`;
     });
   }
 
@@ -319,6 +518,9 @@ export class AccountManager {
         account = await this.#withAccountLock(account.id, async () => {
           const latest = this.store.get(account.id);
           if (!latest) throw new Error("目标账号不存在，请刷新列表");
+          if (latest.authStatus === "transferred") {
+            throw new Error(`${latest.email} 已转出，请先点击“已转出”恢复`);
+          }
           if (latest.authStatus === "needsReauth") {
             throw new Error(`${latest.email} 的登录凭证已失效，需要重新授权后才能切换`);
           }
@@ -335,7 +537,9 @@ export class AccountManager {
         }
         throw error;
       }
-      await writeOfficialCredentials(this.codexHome, account);
+      await writeOfficialCredentials(this.codexHome, account, {
+        syncKeychain: this.syncOfficialKeychain,
+      });
       await this.store.setCurrent(account.id);
       return `已切换到 ${account.email}`;
     });
@@ -368,6 +572,9 @@ export class AccountManager {
   async #refreshAccountOnce(accountId, { forceSubscription }) {
     let account = this.store.get(accountId);
     if (!account) throw new Error(`账号不存在: ${accountId}`);
+    if (account.authStatus === "transferred") {
+      throw new Error(`${account.email} 已转出，本机不会刷新该账号`);
+    }
     if (account.authMode !== "oauth" || !account.tokens.accessToken) return account;
     let isCurrent = account.id === this.store.index.currentAccountId;
 
@@ -387,6 +594,7 @@ export class AccountManager {
         quota = await fetchQuota(account);
       } catch (error) {
         if (error?.status !== 401) throw error;
+        if (account.authStatus === "temporary") throw createTemporaryTokenExpiredError(account);
         if (!isCurrent) {
           account = await this.#refreshStoredTokens(account);
           quota = await fetchQuota(account);
@@ -405,7 +613,7 @@ export class AccountManager {
         quota,
         quotaUpdatedAt: Math.floor(Date.now() / 1000),
         quotaError: null,
-        authStatus: "active",
+        authStatus: account.authStatus === "temporary" ? "temporary" : "active",
       };
       if (quota.planType) updates.planType = quota.planType;
 
@@ -433,7 +641,7 @@ export class AccountManager {
       return await this.store.update(accountId, updates);
     } catch (error) {
       const updates = {};
-      if (!isCurrent && isPermanentRefreshError(error)) {
+      if ((!isCurrent || account.authStatus === "temporary") && isPermanentRefreshError(error)) {
         updates.authStatus = "needsReauth";
         updates.quotaError = `登录凭证已失效，需要重新授权（${error.code ?? error.message}）`;
       } else {
@@ -445,10 +653,19 @@ export class AccountManager {
   }
 
   async #ensureFreshTokens(account, { refreshIfExpirationUnknown = false } = {}) {
+    if (account.authStatus === "transferred") {
+      throw new Error(`${account.email} 已转出，请先恢复`);
+    }
     if (account.authStatus === "needsReauth") {
       throw new Error(`${account.email} 的登录凭证已失效，需要重新授权`);
     }
     const expiration = jwtExpiration(account.tokens.accessToken);
+    if (account.authStatus === "temporary") {
+      if (expiration == null || expiration <= Math.floor(Date.now() / 1000)) {
+        throw createTemporaryTokenExpiredError(account);
+      }
+      return account;
+    }
     if (expiration == null) {
       if (refreshIfExpirationUnknown && account.tokens.refreshToken) {
         return this.#refreshStoredTokens(account);
@@ -462,6 +679,9 @@ export class AccountManager {
   }
 
   async #refreshStoredTokens(account) {
+    if (account.authStatus === "transferred") {
+      throw new Error(`${account.email} 已转出，请先恢复`);
+    }
     if (!account.tokens.refreshToken) {
       const error = new Error(`${account.email} 的登录已过期，需要重新添加或授权`);
       error.code = "refresh_token_missing";
@@ -533,13 +753,23 @@ export class AccountManager {
     const apiKey = typeof credentials.OPENAI_API_KEY === "string"
       ? credentials.OPENAI_API_KEY.trim()
       : "";
+    const candidate = apiKey ? null : parseTokenInput(JSON.stringify(credentials))[0];
+    if (account?.authStatus === "transferred") {
+      const stillUsingTransferredCredentials = apiKey
+        ? account.openaiApiKey === apiKey
+        : candidate?.accessToken && sameTokens(account.tokens, candidate);
+      if (stillUsingTransferredCredentials) {
+        const currentChanged = this.store.index.currentAccountId === account.id;
+        if (currentChanged) await this.store.setCurrent(null);
+        return { changed: currentChanged, account: null };
+      }
+    }
     if (apiKey) {
       if (!account) {
         account = await this.#upsertApiKey(apiKey, "Local API Key");
         credentialsChanged = true;
       }
     } else {
-      const candidate = parseTokenInput(JSON.stringify(credentials))[0];
       if (candidate?.accessToken) {
         if (!account && candidate.accountId) {
           const current = this.store.get(this.store.index.currentAccountId);
@@ -559,7 +789,8 @@ export class AccountManager {
           !account ||
           !sameTokens(account.tokens, nextTokens) ||
           (candidate.accountId && candidate.accountId !== account.accountId) ||
-          account.authStatus === "needsReauth"
+          ["needsReauth", "transferred"].includes(account.authStatus) ||
+          (account.authStatus === "temporary" && candidate.refreshToken)
         ) {
           account = await this.#upsertOAuthTokens(nextTokens, account);
           credentialsChanged = true;
@@ -580,7 +811,10 @@ export class AccountManager {
     return { changed: credentialsChanged || currentChanged, account };
   }
 
-  async #upsertOAuthTokens(tokens, existingAccount = null) {
+  async #upsertOAuthTokens(tokens, existingAccount = null, {
+    authStatus = null,
+    temporaryExpiresAt = null,
+  } = {}) {
     if (!tokens.accessToken) throw new Error("OAuth 凭据缺少 access_token");
     const idClaims = decodeJwt(tokens.idToken) ?? {};
     const accessClaims = decodeJwt(tokens.accessToken) ?? {};
@@ -596,9 +830,15 @@ export class AccountManager {
       (accountId && account.accountId === accountId) ||
       (!accountId && account.email.toLowerCase() === String(email).toLowerCase()),
     );
+    if (authStatus === "temporary" && existing?.authStatus === "active" &&
+      existing.authMode === "oauth" && existing.tokens.refreshToken) {
+      return existing;
+    }
     const id = existing?.id ?? `codex_${sha256(
       `${email}:${accountId ?? ""}:${organizationId ?? ""}`,
     ).slice(0, 32)}`;
+    const nextAuthStatus = authStatus ??
+      (existing?.authStatus === "temporary" && !tokens.refreshToken ? "temporary" : "active");
     return this.store.upsert({
       id,
       email,
@@ -611,7 +851,11 @@ export class AccountManager {
       accountId: accountId ?? existing?.accountId ?? null,
       organizationId: organizationId ?? existing?.organizationId ?? null,
       planType: auth.chatgpt_plan_type ?? existing?.planType ?? null,
-      authStatus: "active",
+      authStatus: nextAuthStatus,
+      transferredAt: null,
+      temporaryExpiresAt: nextAuthStatus === "temporary"
+        ? temporaryExpiresAt ?? jwtExpiration(tokens.accessToken)
+        : null,
       quotaError: isAuthenticationError(existing?.quotaError) ? null : existing?.quotaError,
       tokenGeneration: (existing?.tokenGeneration ?? 0) + 1,
     });
@@ -627,6 +871,9 @@ export class AccountManager {
       openaiApiKey: key,
       planType: "API_KEY",
       tokens: {},
+      authStatus: "active",
+      transferredAt: null,
+      temporaryExpiresAt: null,
     });
   }
 
@@ -695,7 +942,8 @@ export class AccountManager {
     this.#setOperation("loading", message);
     try {
       const result = await callback();
-      this.#setOperation("success", result);
+      const resultMessage = typeof result === "string" ? result : result?.message;
+      this.#setOperation("success", resultMessage || "操作已完成");
       this.clearOperationAfter();
       return result;
     } catch (error) {
@@ -809,9 +1057,8 @@ async function exchangeAuthorizationCode(code, verifier, redirectUri, signal) {
 export async function writeOfficialCredentials(
   codexHome,
   account,
-  { syncKeychain = process.platform === "darwin" } = {},
+  { syncKeychain = process.platform === "darwin", strictKeychain = false } = {},
 ) {
-  await mkdir(codexHome, { recursive: true, mode: 0o700 });
   const payload = account.authMode === "apiKey"
     ? { auth_mode: "apikey", OPENAI_API_KEY: account.openaiApiKey }
     : account.tokens.idToken || account.tokens.refreshToken
@@ -826,25 +1073,46 @@ export async function writeOfficialCredentials(
           last_refresh: new Date().toISOString(),
         }
       : { OPENAI_API_KEY: null, personal_access_token: account.tokens.accessToken };
-  await atomicWrite(join(codexHome, "auth.json"), `${JSON.stringify(payload, null, 2)}\n`);
+  await writeOfficialCredentialPayload(codexHome, payload, {
+    syncKeychain: syncKeychain && account.authMode === "oauth",
+    strictKeychain,
+  });
+}
 
-  if (syncKeychain && account.authMode === "oauth") {
-    try {
-      const resolved = await realpath(codexHome).catch(() => codexHome);
-      const keychainAccount = `cli|${sha256(resolved).slice(0, 16)}`;
-      await execFileAsync("/usr/bin/security", [
-        "add-generic-password",
-        "-U",
-        "-s",
-        "Codex Auth",
-        "-a",
-        keychainAccount,
-        "-w",
-        JSON.stringify(payload),
-      ]);
-    } catch (error) {
-      console.error(`[switch] Keychain 更新失败，已保留 auth.json: ${error.message}`);
-    }
+export async function clearOfficialCredentials(
+  codexHome,
+  { syncKeychain = process.platform === "darwin" } = {},
+) {
+  await writeOfficialCredentialPayload(codexHome, { OPENAI_API_KEY: null }, {
+    syncKeychain,
+    strictKeychain: true,
+  });
+}
+
+async function writeOfficialCredentialPayload(
+  codexHome,
+  payload,
+  { syncKeychain = false, strictKeychain = false } = {},
+) {
+  await mkdir(codexHome, { recursive: true, mode: 0o700 });
+  await atomicWrite(join(codexHome, "auth.json"), `${JSON.stringify(payload, null, 2)}\n`);
+  if (!syncKeychain) return;
+  try {
+    const resolved = await realpath(codexHome).catch(() => codexHome);
+    const keychainAccount = `cli|${sha256(resolved).slice(0, 16)}`;
+    await execFileAsync("/usr/bin/security", [
+      "add-generic-password",
+      "-U",
+      "-s",
+      "Codex Auth",
+      "-a",
+      keychainAccount,
+      "-w",
+      JSON.stringify(payload),
+    ]);
+  } catch (error) {
+    if (strictKeychain) throw new Error(`Codex 钥匙串清理失败：${error.message}`);
+    console.error(`[switch] Keychain 更新失败，已保留 auth.json: ${error.message}`);
   }
 }
 
@@ -860,6 +1128,10 @@ function toPublicAccount(account, current) {
     quotaUpdatedAt: account.quotaUpdatedAt,
     quotaError: account.quotaError,
     authStatus: account.authStatus,
+    transferredAt: account.transferredAt,
+    temporaryExpiresAt: account.temporaryExpiresAt,
+    canTransfer: canExportAccount(account, "handoff"),
+    canTemporaryTransfer: canExportAccount(account, "temporary"),
     current,
   };
 }
@@ -883,7 +1155,7 @@ function normalizeCredits(credits) {
   };
 }
 
-function toExportAccount(account) {
+function toTransferAccount(account, mode) {
   const common = {
     id: account.id,
     email: account.email,
@@ -892,15 +1164,27 @@ function toExportAccount(account) {
   if (account.authMode === "apiKey") {
     return { ...common, OPENAI_API_KEY: account.openaiApiKey };
   }
-  return {
+  const result = {
     ...common,
     tokens: {
       id_token: account.tokens.idToken,
       access_token: account.tokens.accessToken,
-      refresh_token: account.tokens.refreshToken ?? "",
       account_id: account.accountId,
     },
   };
+  if (mode === "handoff") result.tokens.refresh_token = account.tokens.refreshToken ?? "";
+  if (mode === "temporary") {
+    result.temporary_expires_at = jwtExpiration(account.tokens.accessToken);
+  }
+  return result;
+}
+
+function canExportAccount(account, mode) {
+  if (!account || account.authStatus !== "active") return false;
+  if (account.authMode === "apiKey") {
+    return mode === "handoff" && Boolean(account.openaiApiKey);
+  }
+  return Boolean(account.tokens.accessToken && account.tokens.refreshToken);
 }
 
 function normalizeUsageWindow(window) {
@@ -974,7 +1258,7 @@ function parseAccountCheck(payload, preferredAccountId) {
 
 function parseCredentialInput(rawInput) {
   const input = String(rawInput ?? "").trim();
-  if (!input) return { tokens: [], apiKeys: [] };
+  if (!input) return { tokens: [], apiKeys: [], transfer: null };
   let value;
   try {
     value = JSON.parse(input);
@@ -983,19 +1267,30 @@ function parseCredentialInput(rawInput) {
       return {
         tokens: [{ idToken: "", accessToken: input, refreshToken: null }],
         apiKeys: [],
+        transfer: null,
       };
     }
     return {
       tokens: [{ idToken: "", accessToken: "", refreshToken: input }],
       apiKeys: [],
+      transfer: null,
     };
+  }
+  let transfer = null;
+  if (value?.kind === TRANSFER_KIND) {
+    if (value.version !== TRANSFER_VERSION) {
+      throw new Error(`不支持的账号迁移文件版本 ${value.version ?? "unknown"}`);
+    }
+    if (!TRANSFER_MODES.has(value.mode)) throw new Error("账号迁移文件模式无效");
+    if (!Array.isArray(value.accounts)) throw new Error("账号迁移文件缺少账号列表");
+    transfer = { mode: value.mode, exportedAt: value.exportedAt ?? null };
   }
   const items = Array.isArray(value)
     ? value
     : Array.isArray(value?.accounts)
       ? value.accounts
       : [value];
-  const parsed = { tokens: [], apiKeys: [] };
+  const parsed = { tokens: [], apiKeys: [], transfer };
   for (const item of items) {
     const apiKey = item?.OPENAI_API_KEY ?? item?.openaiApiKey ?? item?.openai_api_key;
     if (typeof apiKey === "string" && apiKey.trim()) {
@@ -1011,8 +1306,17 @@ function parseCredentialInput(rawInput) {
     const refreshToken = tokens?.refresh_token ?? tokens?.refreshToken ?? null;
     const accountId = tokens?.account_id ?? tokens?.accountId ??
       item?.account_id ?? item?.accountId ?? null;
+    const temporaryExpiresAt = Number(
+      item?.temporary_expires_at ?? item?.temporaryExpiresAt,
+    ) || null;
     if (accessToken || refreshToken) {
-      parsed.tokens.push({ idToken, accessToken, refreshToken, accountId });
+      parsed.tokens.push({
+        idToken,
+        accessToken,
+        refreshToken,
+        accountId,
+        ...(temporaryExpiresAt ? { temporaryExpiresAt } : {}),
+      });
     }
   }
   return parsed;
@@ -1093,7 +1397,14 @@ function isPermanentRefreshError(error) {
   return code === "refresh_token_reused" ||
     code === "invalid_grant" ||
     code === "refresh_token_missing" ||
+    code === "temporary_token_expired" ||
     (error?.status === 401 && String(error?.message ?? "").startsWith("Token 刷新失败"));
+}
+
+function createTemporaryTokenExpiredError(account) {
+  const error = new Error(`${account.email} 的临时凭据已过期，需要重新导入或授权`);
+  error.code = "temporary_token_expired";
+  return error;
 }
 
 function isAuthenticationError(message) {
@@ -1186,8 +1497,12 @@ function openExternal(url) {
 async function atomicWrite(path, content) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`;
-  await writeFile(temp, content, { mode: 0o600 });
-  await rename(temp, path);
+  try {
+    await writeFile(temp, content, { mode: 0o600 });
+    await rename(temp, path);
+  } finally {
+    await unlink(temp).catch(() => undefined);
+  }
 }
 
 function base64Url(buffer) {

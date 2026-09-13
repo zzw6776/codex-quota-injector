@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 
 import { defaultAccountDataDir } from "./platform.mjs";
 
-const STORE_VERSION = 2;
+const STORE_VERSION = 3;
 const ENCRYPTION_ALGORITHM = "AES-256-GCM";
 
 export class AccountStore {
@@ -136,6 +136,9 @@ export class AccountStore {
     if (accountId != null && !this.accounts.has(accountId)) {
       throw new Error(`账号不存在: ${accountId}`);
     }
+    if (accountId != null && this.accounts.get(accountId)?.authStatus === "transferred") {
+      throw new Error("已转出的账号不能设为当前账号，请先恢复");
+    }
     this.index.currentAccountId = accountId;
     if (accountId) {
       const account = this.accounts.get(accountId);
@@ -176,7 +179,10 @@ export class AccountStore {
     }
     this.index = loadedIndex;
     this.accounts = loadedAccounts;
-    if (!this.accounts.has(this.index.currentAccountId)) {
+    if (
+      !this.accounts.has(this.index.currentAccountId) ||
+      this.accounts.get(this.index.currentAccountId)?.authStatus === "transferred"
+    ) {
       this.index.currentAccountId = null;
     }
     return true;
@@ -340,6 +346,10 @@ function normalizeAccount(raw) {
   const quotaError = raw.quotaError ?? raw.quota_error?.message ?? null;
   const authStatus = raw.authStatus ?? raw.auth_status ??
     (String(quotaError ?? "").includes("refresh_token_reused") ? "needsReauth" : "active");
+  const normalizedAuthStatus = ["active", "needsReauth", "temporary", "transferred"]
+    .includes(authStatus) ? authStatus : "active";
+  const wakeup = normalizeWakeup(raw.wakeup);
+  if (normalizedAuthStatus === "transferred") wakeup.enabled = false;
   return {
     id,
     email: String(raw.email ?? raw.accountName ?? id),
@@ -361,8 +371,10 @@ function normalizeAccount(raw) {
     quota: normalizeQuota(raw.quota),
     quotaUpdatedAt: Number(raw.quotaUpdatedAt ?? raw.usage_updated_at) || null,
     quotaError,
-    authStatus: authStatus === "needsReauth" ? "needsReauth" : "active",
-    wakeup: normalizeWakeup(raw.wakeup),
+    authStatus: normalizedAuthStatus,
+    transferredAt: Number(raw.transferredAt ?? raw.transferred_at) || null,
+    temporaryExpiresAt: Number(raw.temporaryExpiresAt ?? raw.temporary_expires_at) || null,
+    wakeup,
     tokenGeneration: Number(raw.tokenGeneration ?? raw.token_generation) || 0,
     createdAt: Number(raw.createdAt ?? raw.created_at) || Math.floor(Date.now() / 1000),
     lastUsed: Number(raw.lastUsed ?? raw.last_used) || Math.floor(Date.now() / 1000),

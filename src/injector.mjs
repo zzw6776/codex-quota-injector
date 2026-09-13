@@ -442,8 +442,16 @@ export async function runInjector({
         case "local-import":
           await accountManager.importLocalAccount();
           break;
-        case "export-all":
-          await accountManager.exportAccounts();
+        case "account-transfer": {
+          const transfer = await accountManager.exportAccounts({
+            mode: action.mode,
+            accountIds: action.accountIds,
+          });
+          if (transfer.restartRequired) await restartForAccountChange();
+          break;
+        }
+        case "restore-transferred":
+          await accountManager.restoreTransferredAccount(action.accountId);
           break;
         case "refresh-all":
           await accountManager.refreshAllWithOperation();
@@ -495,23 +503,8 @@ export async function runInjector({
           await restartForConfigurationChange({ modelProviders: true });
           break;
         case "switch-account":
-          restartingCodex = true;
-          try {
-            await accountManager.switchAccount(action.accountId);
-            const options = await prepareLaunch();
-            await restartCodex(port, options);
-            if (options.officialCatalogChanged) {
-              if (options.officialCatalogSource === "bundled") {
-                contextManager.markBundledCatalogCurrent({ restarted: true });
-              } else {
-                contextManager.markOfficialCatalogRestarted();
-              }
-            }
-            resetAfterCodexRestart();
-            scheduleQuotaRefresh(0);
-          } finally {
-            restartingCodex = false;
-          }
+          await accountManager.switchAccount(action.accountId);
+          await restartForAccountChange();
           break;
         default:
           console.error(`[action] 未知操作: ${action?.type ?? "empty"}`);
@@ -528,6 +521,25 @@ export async function runInjector({
         extraModelManager.setError(error.message);
       }
       console.error(`[action] ${error.message}`);
+    }
+  }
+
+  async function restartForAccountChange() {
+    restartingCodex = true;
+    try {
+      const options = await prepareLaunch();
+      await restartCodex(port, options);
+      if (options.officialCatalogChanged) {
+        if (options.officialCatalogSource === "bundled") {
+          contextManager.markBundledCatalogCurrent({ restarted: true });
+        } else {
+          contextManager.markOfficialCatalogRestarted();
+        }
+      }
+      resetAfterCodexRestart();
+      scheduleQuotaRefresh(0);
+    } finally {
+      restartingCodex = false;
     }
   }
 

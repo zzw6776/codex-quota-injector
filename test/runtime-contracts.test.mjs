@@ -356,7 +356,14 @@ test("Widget 桥接表达式安全传输完整数据、revision 和增量，不�
   ]);
   assert.equal(evaluate(widgetRuntimeVersionExpression()), WIDGET_RUNTIME_VERSION);
   assert.deepEqual(evaluate(widgetDrainActionsExpression()), [{ type: "refresh" }]);
-  assert.doesNotThrow(() => new Function("window", "document", widgetInstallExpression()));
+  const installExpression = widgetInstallExpression();
+  assert.doesNotThrow(() => new Function("window", "document", installExpression));
+  assert.match(installExpression, /迁移账号/);
+  assert.match(installExpression, /临时使用/);
+  assert.match(installExpression, /完整转移/);
+  assert.match(installExpression, /已转出/);
+  assert.match(installExpression, /可能使新设备登录失效/);
+  assert.doesNotMatch(installExpression, /导出全部|两台设备都要长期使用/);
 
   const details = Array.from({ length: 45 }, (_value, index) => ({ sequence: index + 1 }));
   assert.deepEqual(paginateGenerationDetails(details, 20), {

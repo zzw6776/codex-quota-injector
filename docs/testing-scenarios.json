@@ -274,11 +274,12 @@
         "test/account-manager.test.mjs",
         "test/account-store.test.mjs",
         "test/account-oauth.test.mjs",
+        "test/account-transfer.test.mjs",
         "test/account-reliability.test.mjs",
         "runtime-tests/widget-browser.test.mjs"
       ],
       "live": "backend+host",
-      "note": "测试凭据的 OAuth/取消/超时/导入导出/加密/并发/损坏/写失败；不操作真实 Keychain，不为测试购买、兑换或发送邮件。"
+      "note": "测试凭据的 OAuth/取消/超时、临时迁移、完整转移、恢复、加密、并发、损坏和写失败；不操作真实 Keychain，不为测试购买、兑换或发送邮件。"
     },
     {
       "ids": [

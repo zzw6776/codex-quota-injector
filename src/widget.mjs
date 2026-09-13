@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 123;
+export const WIDGET_RUNTIME_VERSION = 124;
 
 export function paginateGenerationDetails(details, visibleCount = 20) {
   const ordered = Array.isArray(details)
@@ -451,6 +451,8 @@ export function installQuotaWidget(
     dismissed: false,
     actions: [],
     page: "accounts",
+    migrationMode: "temporary",
+    migrationSelectedIds: new Set(),
     wakeupDrafts: new Map(),
     accountTooltipTimer: null,
     contextEditingSlug: null,
@@ -512,6 +514,7 @@ export function installQuotaWidget(
     .quota-popover.context-popover { width: min(620px, calc(100vw - 24px)); }
     .quota-popover.provider-popover { width: min(520px, calc(100vw - 24px)); }
     .quota-popover.wakeup-popover { width: min(520px, calc(100vw - 24px)); }
+    .quota-popover.migration-popover { width: min(540px, calc(100vw - 24px)); }
     .quota-popover.extra-models-popover { width: min(660px, calc(100vw - 24px)); }
     .quota-wrap.is-open .quota-popover {
       opacity: 1; visibility: visible; transform: translateY(0) scale(1); pointer-events: auto;
@@ -545,11 +548,15 @@ export function installQuotaWidget(
     .account-list { display: grid; gap: 8px; }
     .account-card { padding: 11px 12px; border: 1px solid rgba(255,255,255,.07); border-radius: 12px; background: rgba(255,255,255,.025); }
     .account-card.current { border-color: rgba(217,184,255,.33); background: rgba(217,184,255,.055); }
+    .account-card.transferred { opacity: .76; border-style: dashed; }
     .account-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .account-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
     .badges { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
     .badge { padding: 2px 6px; border-radius: 999px; background: rgba(255,255,255,.07); color: var(--token-text-secondary, #aaaab5); font-size: 10px; line-height: 16px; }
     .badge.current { color: #d9b8ff; background: rgba(217,184,255,.12); }
+    .badge.transferred { color: #e5b86a; background: rgba(229,184,106,.1); }
+    button.badge { appearance: none; border: 0; cursor: pointer; font: inherit; }
+    button.badge:hover { background: rgba(229,184,106,.18); }
     .expiry { margin-top: 5px; color: var(--token-text-secondary, #aaaab5); font-size: 10.5px; line-height: 15px; }
     .account-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; white-space: nowrap; }
     .window-list { display: grid; gap: 7px; margin-top: 9px; }
@@ -589,6 +596,20 @@ export function installQuotaWidget(
     .toolbar-actions { display: flex; align-items: center; gap: 7px; }
     .add-title { font-size: 12px; font-weight: 650; }
     .add-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
+    .migration-form { display: grid; gap: 10px; padding: 0; }
+    .migration-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .migration-option { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 8px; padding: 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 11px; cursor: pointer; background: rgba(255,255,255,.025); }
+    .migration-option.selected { border-color: rgba(217,184,255,.3); background: rgba(217,184,255,.055); }
+    .migration-option input { width: auto; margin: 2px 0 0; }
+    .migration-option-title { display: block; font-size: 12px; font-weight: 650; }
+    .migration-option-note { display: block; margin-top: 4px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; line-height: 15px; }
+    .migration-account-list { display: grid; gap: 6px; }
+    .migration-account-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px 9px; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; }
+    .migration-account-row input { width: auto; margin: 0; }
+    .migration-account-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+    .migration-account-state { color: var(--token-text-secondary, #aaaab5); font-size: 10px; white-space: nowrap; }
+    .migration-current-note { padding: 8px 9px; border-radius: 9px; color: #e5b86a; background: rgba(229,184,106,.08); font-size: 10px; line-height: 15px; }
+    .migration-actions { display: flex; justify-content: flex-end; }
     details { grid-column: 1 / -1; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; }
     summary { cursor: pointer; padding: 7px 9px; color: var(--token-text-secondary, #aaaab5); font-size: 11px; }
     form { display: grid; gap: 7px; padding: 0 9px 9px; }
@@ -680,6 +701,7 @@ export function installQuotaWidget(
     .quota-wrap.is-light .account-card.current { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
     .quota-wrap.is-light .badge { color: #676771; background: rgba(0,0,0,.055); }
     .quota-wrap.is-light .badge.current { color: #754694; background: rgba(116,69,143,.1); }
+    .quota-wrap.is-light .badge.transferred { color: #9a6500; background: rgba(154,101,0,.09); }
     .quota-wrap.is-light .expiry, .quota-wrap.is-light .window-label, .quota-wrap.is-light .window-reset,
     .quota-wrap.is-light .window-credit, .quota-wrap.is-light .window-subline,
     .quota-wrap.is-light summary, .quota-wrap.is-light .empty { color: #6f6f79; }
@@ -705,7 +727,9 @@ export function installQuotaWidget(
     .quota-wrap.is-light .context-summary, .quota-wrap.is-light .model-card,
     .quota-wrap.is-light .provider-summary, .quota-wrap.is-light .provider-form,
     .quota-wrap.is-light .balance-card, .quota-wrap.is-light .extra-platform-card,
-    .quota-wrap.is-light .extra-platform-form { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
+    .quota-wrap.is-light .extra-platform-form, .quota-wrap.is-light .migration-option,
+    .quota-wrap.is-light .migration-account-row { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
+    .quota-wrap.is-light .migration-option.selected { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
     .quota-wrap.is-light .extra-model-row, .quota-wrap.is-light .extra-model-reasoning { border-color: rgba(0,0,0,.09); }
     .quota-wrap.is-light .model-card.overridden { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
     .quota-wrap.is-light .model-value { background: rgba(0,0,0,.04); }
@@ -818,6 +842,7 @@ export function installQuotaWidget(
     const providerPage = state.page === "provider";
     const extraModelsPage = state.page === "extra-models";
     const wakeupPage = state.page === "wakeup";
+    const migrationPage = state.page === "migration";
     const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
     const injectionRuntime = state.data.injectionMode === "wsl"
       ? { label: "WSL", title: "注入运行时：WSL" }
@@ -849,6 +874,8 @@ export function installQuotaWidget(
       ? "quota-popover context-popover"
       : wakeupPage
         ? "quota-popover wakeup-popover"
+      : migrationPage
+        ? "quota-popover migration-popover"
       : providerPage
         ? "quota-popover provider-popover"
         : extraModelsPage
@@ -858,6 +885,8 @@ export function installQuotaWidget(
       ? renderContextPage(busy)
       : wakeupPage
         ? renderWakeupPage(busy)
+      : migrationPage
+        ? renderMigrationPage(accounts, busy, operation)
       : providerPage
         ? renderProviderPage()
         : extraModelsPage
@@ -876,11 +905,11 @@ export function installQuotaWidget(
         <div class="account-list">${accountHtml}</div>
         ${operation}
         <section class="add-panel">
-          <div class="add-toolbar"><span class="add-title">账号管理</span><span class="toolbar-actions"><button class="btn export-all" type="button" title="导出文件包含完整登录凭据，请妥善保管" ${busy || accounts.length === 0 ? "disabled" : ""}>导出全部</button><button class="btn refresh-all" type="button" ${busy ? "disabled" : ""}>刷新全部</button></span></div>
+          <div class="add-toolbar"><span class="add-title">账号管理</span><span class="toolbar-actions"><button class="btn migration-open" type="button" ${busy || accounts.length === 0 ? "disabled" : ""}>迁移账号</button><button class="btn refresh-all" type="button" ${busy ? "disabled" : ""}>刷新全部</button></span></div>
           <div class="add-options">
             <button class="btn primary oauth-add" type="button" ${busy ? "disabled" : ""}>OpenAI OAuth</button>
             <button class="btn local-import" type="button" ${busy ? "disabled" : ""}>导入本机登录</button>
-            <details><summary>Token / JSON</summary><form class="token-form"><textarea name="token" autocomplete="off" placeholder="粘贴 auth.json、tokens JSON、access token 或 refresh token" required ${busy ? "disabled" : ""}></textarea><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>导入 Token</button></form></details>
+            <details><summary>Token / JSON</summary><form class="token-form"><textarea name="token" autocomplete="off" placeholder="粘贴迁移 JSON、auth.json、access token 或 refresh token" required ${busy ? "disabled" : ""}></textarea><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>解析并导入</button></form></details>
             <details><summary>API Key</summary><form class="api-key-form"><input name="name" placeholder="账号名称（可选）" ${busy ? "disabled" : ""}><input name="apiKey" type="password" autocomplete="off" placeholder="OpenAI API Key" required ${busy ? "disabled" : ""}><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>添加 API Key</button></form></details>
           </div>
         </section>`;
@@ -893,7 +922,7 @@ export function installQuotaWidget(
       : "";
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="查看账号额度">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : providerPage ? "DeepSeek 设置" : extraModelsPage ? "额外模型管理" : "Codex 账号与额度"}">${popoverContent}${versionFooter}</section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : providerPage ? "DeepSeek 设置" : extraModelsPage ? "额外模型管理" : "Codex 账号与额度"}">${popoverContent}${versionFooter}</section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       nextPopover.showPopover();
@@ -1836,8 +1865,63 @@ export function installQuotaWidget(
         window.matchMedia?.("(prefers-color-scheme: light)").matches);
   }
 
+  function renderMigrationPage(accounts, busy, operation) {
+    const mode = state.migrationMode === "handoff" ? "handoff" : "temporary";
+    const isEligible = (account) => mode === "handoff"
+      ? account.canTransfer === true
+      : account.canTemporaryTransfer === true;
+    for (const accountId of state.migrationSelectedIds) {
+      const account = accounts.find((item) => item.id === accountId);
+      if (!account || !isEligible(account)) state.migrationSelectedIds.delete(accountId);
+    }
+    const rows = accounts.map((account) => {
+      const eligible = isEligible(account);
+      const checked = eligible && state.migrationSelectedIds.has(account.id);
+      const stateText = account.authStatus === "transferred"
+        ? "已转出"
+        : account.authStatus === "needsReauth"
+          ? "需要重新授权"
+          : account.authStatus === "temporary"
+            ? "临时凭据"
+            : mode === "temporary" && account.authMode === "apiKey"
+              ? "仅支持完整转移"
+              : account.current
+                ? "当前账号"
+                : formatPlan(account.authMode);
+      return `<label class="migration-account-row">
+        <input class="migration-account-checkbox" type="checkbox" value="${escapeHtml(account.id)}" ${checked ? "checked" : ""} ${busy || !eligible ? "disabled" : ""}>
+        <span class="migration-account-label" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span>
+        <span class="migration-account-state">${escapeHtml(stateText)}</span>
+      </label>`;
+    }).join("");
+    const selectedAccounts = accounts.filter((account) => state.migrationSelectedIds.has(account.id));
+    const currentSelected = mode === "handoff" && selectedAccounts.some((account) => account.current);
+    const currentNote = currentSelected
+      ? '<div class="migration-current-note">所选账号包含当前账号。生成文件后，Codex 将自动切换到其他可用账号；没有可用账号时会退出登录并重新启动。</div>'
+      : "";
+    const modeNote = mode === "temporary"
+      ? "导出前会主动刷新所选 OAuth 账号，把新的 access token 和 refresh token 都写回本机加密账户库；若包含当前账号，也同步写回 Codex 登录。迁移文件只包含 access token，新设备只能使用到它过期。"
+      : "导出前会主动刷新所选 OAuth 账号，把新的 access token 和 refresh token 都写回本机加密账户库供恢复验证。迁移文件包含完整凭据；生成后本机账号标记为“已转出”，停止刷新、切换和唤醒。";
+    const submitText = mode === "handoff" ? "确认完整转移" : "生成临时迁移文件";
+    return `<header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn migration-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">账号迁移</div><div class="panel-subtitle">导入继续使用账号管理中的 Token / JSON</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>
+      <form class="migration-form">
+        <div class="migration-options">
+          <label class="migration-option ${mode === "temporary" ? "selected" : ""}"><input class="migration-mode" type="radio" name="migrationMode" value="temporary" ${mode === "temporary" ? "checked" : ""} ${busy ? "disabled" : ""}><span><span class="migration-option-title">临时使用</span><span class="migration-option-note">不导出 refresh token，本机账号不停止。</span></span></label>
+          <label class="migration-option ${mode === "handoff" ? "selected" : ""}"><input class="migration-mode" type="radio" name="migrationMode" value="handoff" ${mode === "handoff" ? "checked" : ""} ${busy ? "disabled" : ""}><span><span class="migration-option-title">完整转移</span><span class="migration-option-note">新设备接管刷新凭据，本机进入已转出状态。</span></span></label>
+        </div>
+        <section class="provider-summary"><div class="provider-note">${escapeHtml(modeNote)}</div><div class="provider-warning">迁移文件包含明文敏感凭据，只能存放在可信设备中。</div></section>
+        <div class="add-title">选择账号</div>
+        <div class="migration-account-list">${rows || '<div class="empty">暂无账号</div>'}</div>
+        ${currentNote}
+        ${operation}
+        <div class="migration-actions"><button class="btn primary migration-submit" type="submit" ${busy || selectedAccounts.length === 0 ? "disabled" : ""}>${submitText}</button></div>
+      </form>`;
+  }
+
   function renderWakeupPage(busy) {
-    const accounts = (state.data.accounts ?? []).filter((item) => item.authMode === "oauth");
+    const accounts = (state.data.accounts ?? []).filter((item) =>
+      item.authMode === "oauth" && item.authStatus === "active"
+    );
     const header = `<header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn wakeup-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">每日唤醒</div><div class="panel-subtitle">${accounts.length} 个账号 · 已开启 ${accounts.filter((item) => item.wakeup?.enabled).length} 个</div></div></div><button class="icon-btn close-panel" type="button" aria-label="关闭">×</button></header>`;
     if (!accounts.length) return `${header}<div class="empty">添加 OAuth 账号后可配置每日唤醒；API Key 账号不支持此功能</div>`;
     return `${header}
@@ -1883,7 +1967,7 @@ export function installQuotaWidget(
   }
 
   function renderWakeupStatus(account) {
-    if (account.authMode !== "oauth") return "";
+    if (account.authMode !== "oauth" || account.authStatus !== "active") return "";
     const wakeup = account.wakeup ?? {};
     const lastRun = wakeup.lastRun;
     const result = lastRun
@@ -1915,15 +1999,29 @@ export function installQuotaWidget(
     const updatedAt = formatUpdatedAt(account.quotaUpdatedAt);
     const busy = state.data.operation?.state === "loading";
     const needsReauth = account.authStatus === "needsReauth";
+    const transferred = account.authStatus === "transferred";
+    const temporary = account.authStatus === "temporary";
     const switchControl = account.current
       ? ""
+      : transferred
+        ? ""
       : needsReauth
         ? '<span class="badge">需要重新授权</span>'
         : `<button class="btn primary account-switch switch-account" type="button" data-account-id="${escapeHtml(account.id)}" data-account-tooltip="切换到此账号" aria-label="切换到此账号" ${busy ? "disabled" : ""}>切换</button>`;
     const removeControl = `<button class="btn account-remove remove-account" type="button" data-account-id="${escapeHtml(account.id)}" data-account-email="${escapeHtml(account.email)}" title="${account.current ? "当前账号请先切换后再移除" : "移除本工具保存的账号凭据"}" ${busy || account.current ? "disabled" : ""}>移除</button>`;
-    return `<article class="account-card ${account.current ? "current" : ""}">
-      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}${switchControl}${removeControl}${renderWakeupStatus(account)}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
-      <div class="expiry account-meta"><span>订阅：${escapeHtml(expiry)}</span><span>最后刷新：${escapeHtml(updatedAt)}</span></div>
+    const authStateControl = transferred
+      ? `<button class="badge transferred restore-transferred" type="button" data-account-id="${escapeHtml(account.id)}" data-account-email="${escapeHtml(account.email)}" data-auth-mode="${escapeHtml(account.authMode)}" title="点击验证并恢复本机使用" ${busy ? "disabled" : ""}>已转出</button>`
+      : temporary
+        ? '<span class="badge">临时</span>'
+        : "";
+    const stateMeta = transferred
+      ? `<span>转出：${escapeHtml(formatUpdatedAt(account.transferredAt))}</span>`
+      : temporary
+        ? `<span>临时至：${escapeHtml(formatUpdatedAt(account.temporaryExpiresAt))}</span>`
+        : `<span>订阅：${escapeHtml(expiry)}</span>`;
+    return `<article class="account-card ${account.current ? "current" : ""} ${transferred ? "transferred" : ""}">
+      <div class="account-head"><span class="account-email" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span><span class="badges">${account.current ? '<span class="badge current">当前</span>' : ""}${authStateControl}${switchControl}${removeControl}${renderWakeupStatus(account)}<span class="badge">${escapeHtml(formatPlan(account.planType ?? account.authMode))}</span></span></div>
+      <div class="expiry account-meta">${stateMeta}<span>最后刷新：${escapeHtml(updatedAt)}</span></div>
       ${quotaHtml}
       ${account.quotaError ? `<div class="quota-error">刷新异常：${escapeHtml(account.quotaError)}</div>` : ""}
     </article>`;
@@ -2008,6 +2106,56 @@ export function installQuotaWidget(
       state.page = "accounts";
       state.wakeupDrafts.clear();
       render();
+    });
+    wrap.querySelector(".migration-open")?.addEventListener("click", () => {
+      state.migrationMode = "temporary";
+      state.migrationSelectedIds = new Set((state.data.accounts ?? [])
+        .filter((account) => account.canTemporaryTransfer)
+        .map((account) => account.id));
+      state.page = "migration";
+      state.pinned = true;
+      state.dismissed = false;
+      render();
+    });
+    wrap.querySelector(".migration-back")?.addEventListener("click", () => {
+      state.page = "accounts";
+      state.migrationSelectedIds.clear();
+      render();
+    });
+    wrap.querySelectorAll(".migration-mode").forEach((input) => input.addEventListener("change", () => {
+      if (!input.checked) return;
+      state.migrationMode = input.value === "handoff" ? "handoff" : "temporary";
+      const eligibilityField = state.migrationMode === "handoff"
+        ? "canTransfer"
+        : "canTemporaryTransfer";
+      state.migrationSelectedIds = new Set((state.data.accounts ?? [])
+        .filter((account) => account[eligibilityField])
+        .map((account) => account.id));
+      render();
+    }));
+    wrap.querySelectorAll(".migration-account-checkbox").forEach((input) => input.addEventListener("change", () => {
+      if (input.checked) state.migrationSelectedIds.add(input.value);
+      else state.migrationSelectedIds.delete(input.value);
+      render();
+    }));
+    wrap.querySelector(".migration-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const accountIds = [...state.migrationSelectedIds];
+      if (accountIds.length === 0) return;
+      if (state.migrationMode === "handoff") {
+        const selected = (state.data.accounts ?? []).filter((account) => accountIds.includes(account.id));
+        const includesCurrent = selected.some((account) => account.current);
+        const warning = [
+          `确认完整转移 ${accountIds.length} 个账号？`,
+          "",
+          "导出前会主动刷新 Token。生成文件后，本机账号将标记为“已转出”，停止刷新、切换和唤醒。",
+          includesCurrent ? "当前账号将被切换或退出登录，Codex 随后会重启。" : "",
+          "迁移文件包含明文敏感凭据，请只交给目标设备。",
+        ].filter(Boolean).join("\n");
+        if (!window.confirm(warning)) return;
+      }
+      event.currentTarget.querySelector(".migration-submit").disabled = true;
+      enqueue({ type: "account-transfer", mode: state.migrationMode, accountIds });
     });
     wrap.querySelectorAll(".wakeup-form").forEach((form) => {
       const accountId = form.dataset.accountId;
@@ -2218,6 +2366,16 @@ export function installQuotaWidget(
       });
     }));
     wrap.querySelectorAll(".switch-account").forEach((button) => button.addEventListener("click", () => enqueue({ type: "switch-account", accountId: button.dataset.accountId })));
+    wrap.querySelectorAll(".restore-transferred").forEach((button) => button.addEventListener("click", () => {
+      const email = button.dataset.accountEmail || "该账号";
+      const apiKey = button.dataset.authMode === "apiKey";
+      const warning = apiKey
+        ? `确认恢复 ${email} 在本机的使用？\n\n恢复后，本机与新设备可能同时使用同一 API Key 并分别产生费用。请确认新设备已经停止使用。`
+        : `确认恢复 ${email} 在本机的使用？\n\n仅在迁移文件尚未导入，或新设备已经停止使用时恢复。恢复会刷新本机保留的 refresh token，可能使新设备登录失效；如果 Token 已被新设备轮换，本机将需要重新 OAuth。`;
+      if (!window.confirm(warning)) return;
+      button.disabled = true;
+      enqueue({ type: "restore-transferred", accountId: button.dataset.accountId });
+    }));
     wrap.querySelectorAll(".remove-account").forEach((button) => button.addEventListener("click", () => {
       const email = button.dataset.accountEmail || "该账号";
       if (!window.confirm(`确定移除 ${email}？\n\n将删除本工具保存的账号凭据，不会注销 OpenAI 账号。`)) return;
@@ -2227,7 +2385,6 @@ export function installQuotaWidget(
     wrap.querySelector(".oauth-add")?.addEventListener("click", () => enqueue({ type: "oauth-add" }));
     wrap.querySelector(".oauth-cancel")?.addEventListener("click", () => enqueue({ type: "oauth-cancel" }));
     wrap.querySelector(".local-import")?.addEventListener("click", () => enqueue({ type: "local-import" }));
-    wrap.querySelector(".export-all")?.addEventListener("click", () => enqueue({ type: "export-all" }));
     wrap.querySelector(".refresh-all")?.addEventListener("click", () => enqueue({ type: "refresh-all" }));
     wrap.querySelector(".token-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -2259,6 +2416,7 @@ export function installQuotaWidget(
     state.pinned = false;
     state.dismissed = true;
     state.page = "accounts";
+    state.migrationSelectedIds.clear();
     state.wakeupDrafts.clear();
     state.contextEditingSlug = null;
     state.extraPlatformDraft = null;

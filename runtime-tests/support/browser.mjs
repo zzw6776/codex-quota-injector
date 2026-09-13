@@ -13,7 +13,8 @@ export const SHADOW = 'document.getElementById("codex-quota-injector-root").shad
 export function fixtureData(overrides = {}) {
   return {
     version: "test", currentAccountId: "account-1",
-    accounts: [{ id: "account-1", email: "fixture@example.test", current: true, authMode: "oauth", planType: "plus",
+    accounts: [{ id: "account-1", email: "fixture@example.test", current: true, authMode: "oauth", authStatus: "active", planType: "plus",
+      canTransfer: true, canTemporaryTransfer: true,
       windows: [{ label: "5h", remainingPercent: 77 }], wakeup: { enabled: false, times: ["08:00"] } }],
     windows: [{ label: "5h", remainingPercent: 77 }], operation: null,
     context: { status: "applied", overriddenCount: 1, models: [{ slug: "fixture-model", displayName: "Fixture Model", overridden: true,

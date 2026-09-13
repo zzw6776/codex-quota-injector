@@ -33,7 +33,7 @@ function fakeTokens() {
     "https://api.openai.com/auth": { chatgpt_account_id: "fixture-workspace" } }), refresh_token: "offline-refresh" };
 }
 
-test("[A ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存，导出再导入保持可用", async t => {
+test("[A ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存，完整转移后可导入", async t => {
   const { directory, store, manager, opened } = await setup(t);
   const requests = [];
   t.mock.method(globalThis, "fetch", async (url, options) => {
@@ -60,7 +60,7 @@ test("[A ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存�
   await assert.rejects(readFile(join(manager.codexHome, "auth.json")), { code: "ENOENT" });
   await assert.rejects(callback(opened[0], { code: "replay" }));
   await manager.addApiKey("sk-offline-api-key", "Fixture API");
-  await manager.exportAccounts();
+  await manager.exportAccounts({ mode: "handoff" });
   const path = join(directory, "export", (await readdir(join(directory, "export")))[0]);
   const backup = await readFile(path, "utf8");
   // Windows exposes synthetic POSIX permission bits; access is governed by the
@@ -70,6 +70,8 @@ test("[A ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存�
   await other.manager.importTokenInput(backup);
   assert.deepEqual(other.store.list().map(a => [a.authMode, a.email]).sort(), store.list().map(a => [a.authMode, a.email]).sort());
   assert.equal(other.store.list().find(a => a.authMode === "apiKey").openaiApiKey, "sk-offline-api-key");
+  assert.equal(store.list().every(account => account.authStatus === "transferred"), true);
+  assert.equal(other.store.list().every(account => account.authStatus === "active"), true);
 });
 
 test("[A ACC-02] OAuth 取消、超时和回调端口冲突均释放流程，错误不创建账号", async t => {
