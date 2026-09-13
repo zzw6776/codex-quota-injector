@@ -1,8 +1,29 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 
-export const LIFECYCLE_REPORT_VERSION = 1;
+export const LIFECYCLE_REPORT_VERSION = 2;
+
+export function validateLifecycleControl(control, { root, runDirectory } = {}) {
+  const expectedRoot = resolve(root);
+  const expectedRunDirectory = resolve(runDirectory);
+  const runId = String(control?.runId ?? "");
+  const ownedRunDirectory = resolve(
+    expectedRoot,
+    ".runtime",
+    "test-results",
+    "lifecycle",
+    runId,
+  );
+  const expectedReportPath = resolve(expectedRunDirectory, "report.json");
+  const expectedProgressPath = resolve(expectedRunDirectory, "progress.html");
+  if (![1, 2].includes(control?.version) || control.root !== expectedRoot ||
+    expectedRunDirectory !== ownedRunDirectory || control.reportPath !== expectedReportPath ||
+    control.progressPath != null && control.progressPath !== expectedProgressPath) {
+    throw new Error("生命周期控制文件不属于当前项目或版本不受支持");
+  }
+  return control;
+}
 
 export function createLifecycleReport({
   runId = randomUUID(),
@@ -55,7 +76,45 @@ export async function readLifecycleReport(path) {
   return report;
 }
 
+export async function readLatestUnfinishedLifecycle(latestPath) {
+  let pointer;
+  try {
+    pointer = JSON.parse(await readFile(latestPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!pointer?.reportPath || typeof pointer.reportPath !== "string") {
+    throw new Error("生命周期 latest 指针结构不完整");
+  }
+  let report;
+  try {
+    report = await readLifecycleReport(pointer.reportPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (["passed", "failed"].includes(report.status)) return null;
+  return {
+    runId: report.runId,
+    status: report.status,
+    reportPath: pointer.reportPath,
+    progressPath: pointer.progressPath ?? null,
+  };
+}
+
+export function lifecycleResumeDecision(report, {
+  ownerAlive = isProcessAlive,
+} = {}) {
+  validateLifecycleReport(report);
+  if (["passed", "failed"].includes(report.status)) return "terminal";
+  if (report.status === "rollback-failed") return "manual-recovery";
+  if (report.status === "running" && ownerAlive(report.ownerPid)) return "already-running";
+  return "resume";
+}
+
 export async function writeLifecycleReport(path, report) {
+  updateLifecycleComponents(report);
   validateLifecycleReport(report);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.tmp.${process.pid}.${randomUUID()}`;
@@ -181,7 +240,7 @@ export async function runLifecycleReport({
 }
 
 export function validateLifecycleReport(report) {
-  if (!report || report.version !== LIFECYCLE_REPORT_VERSION) {
+  if (!report || ![1, LIFECYCLE_REPORT_VERSION].includes(report.version)) {
     throw new Error("生命周期报告版本不受支持");
   }
   if (!report.runId || !Array.isArray(report.steps) || report.steps.length === 0) {
@@ -191,6 +250,23 @@ export function validateLifecycleReport(report) {
   if (ids.some((id) => typeof id !== "string") || new Set(ids).size !== ids.length) {
     throw new Error("生命周期报告步骤无效");
   }
+}
+
+export function updateLifecycleComponents(report) {
+  const definitions = report?.metadata?.components;
+  if (!definitions || typeof definitions !== "object") return report;
+  const steps = new Map(report.steps.map((step) => [step.id, step]));
+  report.components = Object.entries(definitions).map(([id, stepIds]) => {
+    const selected = (Array.isArray(stepIds) ? stepIds : []).map((stepId) => steps.get(stepId));
+    let status = "pending";
+    if (!selected.length || selected.some((step) => !step)) status = "invalid";
+    else if (selected.some((step) => step.rollback?.status === "failed")) status = "rollback-failed";
+    else if (selected.some((step) => step.status === "failed")) status = "failed";
+    else if (selected.every((step) => step.status === "passed")) status = "passed";
+    else if (selected.some((step) => step.status === "running")) status = "running";
+    return { id, status, steps: [...stepIds] };
+  });
+  return report;
 }
 
 function createContext(reportPath, report, step) {

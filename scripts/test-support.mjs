@@ -4,6 +4,13 @@ import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { officialExecutable } from "../runtime-tests/support/offline-runtime.mjs";
 import { browserExecutable } from "../runtime-tests/support/browser.mjs";
+import {
+  COMMON_COMPONENT,
+  WSL_NATIVE,
+  currentRuntimeTarget,
+  hashFile,
+  runtimeComponentId,
+} from "./test-runtime-targets.mjs";
 export const ROOT = resolve(import.meta.dirname, "..");
 export const RESULTS = join(ROOT, ".runtime", "test-results");
 
@@ -59,14 +66,25 @@ export async function scenarioCoverage(tests = []) {
   }));
 }
 
-export async function requireFreeResult() {
+export async function requireFreeResult({ runtimeTarget = null, requireAll = false } = {}) {
   const report = JSON.parse(await readFile(join(RESULTS, "offline.json"), "utf8").catch(() => {
     throw new Error("请先运行 npm run test:offline 并取得当前代码的完整免费通过报告");
   }));
   const snapshot = await sourceSnapshot();
-  if (report.status !== "passed" || report.platform !== process.platform || report.arch !== process.arch || report.snapshot.sha256 !== snapshot.sha256) {
+  const target = runtimeTarget ?? await currentRuntimeTarget();
+  const common = report.components?.find((component) => component.id === COMMON_COMPONENT);
+  const runtime = report.components?.find((component) => component.id === runtimeComponentId(target));
+  const statusReady = common?.status === "passed" && runtime?.status === "passed" &&
+    (!requireAll || report.allSupportedStatus === "passed");
+  if (!statusReady || report.platform !== process.platform || report.arch !== process.arch || report.snapshot.sha256 !== snapshot.sha256) {
     throw new Error("免费报告未通过或不属于当前代码/平台；请先运行 npm run test:offline");
   }
   if (JSON.stringify(report.runtimeSnapshot) !== JSON.stringify(await runtimeSnapshot())) throw new Error("官方 CLI 或测试浏览器已更换；请重新运行 npm run test:offline");
-  return report;
+  if (runtime.artifact?.path) {
+    const actualHash = await hashFile(runtime.artifact.path).catch(() => null);
+    if (actualHash !== runtime.artifact.sha256) {
+      throw new Error(`${target === WSL_NATIVE ? "WSL" : "Windows"} 原生 Relay 已变化；请重新运行完整 A 批`);
+    }
+  }
+  return { ...report, selectedRuntime: target, selectedRuntimeComponent: runtime };
 }

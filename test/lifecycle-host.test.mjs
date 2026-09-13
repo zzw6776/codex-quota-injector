@@ -17,12 +17,19 @@ import {
   waitForTargetHost,
 } from "../scripts/lifecycle-macos.mjs";
 import {
+  captureWindowsRuntimeConfiguration,
+  inspectWindowsSourceRecovery,
+  inspectWslLifecyclePrerequisites,
+  restoreWindowsRuntimeConfiguration,
   selectWindowsInstallRollbackAction,
+  setWindowsRuntimeConfiguration,
   verifyWindowsInstallation,
   verifyWindowsInstaller,
+  waitForWindowsTargetHost,
+  windowsRuntimeConfigurationMatches,
   windowsScheduledTaskScript,
 } from "../scripts/lifecycle-windows.mjs";
-import { open } from "node:fs/promises";
+import { open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { useTempDir } from "./helpers.mjs";
 
@@ -117,8 +124,119 @@ test("[A HAR-02 LCH-06] Windows 监督器由计划任务托管并保留带空格
   assert.match(script, /New-ScheduledTaskAction/);
   assert.match(script, /New-ScheduledTaskPrincipal/);
   assert.match(script, /-LogonType Interactive -RunLevel Limited/);
+  assert.match(script, /New-ScheduledTaskTrigger -AtLogOn/);
+  assert.match(script, /New-ScheduledTaskSettingsSet -RestartCount 3/);
   assert.match(script, /Start-ScheduledTask/);
   assert.match(script, /"C:\\repo path\\scripts\\lifecycle-supervisor\.mjs" --control "C:\\private path\\control\.json"/);
+});
+
+test("[A HAR-03 LCH-02] Windows 运行方式切换使用精确备份并恢复原文件", async (t) => {
+  const directory = await useTempDir(t, "codex-runtime-switch-");
+  const configPath = join(directory, "config.toml");
+  const original = "model = \"gpt-5\"\n[desktop]\nrunCodexInWindowsSubsystemForLinux = false # original\n";
+  await writeFile(configPath, original);
+  const configuration = await captureWindowsRuntimeConfiguration({
+    runDirectory: directory,
+    configPath,
+  });
+  assert.equal(configuration.originalRuntime, "windows-native");
+  await setWindowsRuntimeConfiguration(configuration, "wsl-native");
+  assert.match(await readFile(configPath, "utf8"), /runCodexInWindowsSubsystemForLinux = true/);
+  assert.equal(await windowsRuntimeConfigurationMatches(configuration), false);
+  const restored = await restoreWindowsRuntimeConfiguration(configuration);
+  assert.equal(restored.runtimeTarget, "windows-native");
+  assert.equal(await readFile(configPath, "utf8"), original);
+  assert.equal(await windowsRuntimeConfigurationMatches(configuration), true);
+
+  await setWindowsRuntimeConfiguration(configuration, "wsl-native");
+  await writeFile(configPath, `${await readFile(configPath, "utf8")}# external change\n`);
+  await assert.rejects(restoreWindowsRuntimeConfiguration(configuration), /外部修改/);
+
+  const secondDirectory = await useTempDir(t, "codex-runtime-external-");
+  const secondConfigPath = join(secondDirectory, "config.toml");
+  await writeFile(secondConfigPath, original);
+  const secondConfiguration = await captureWindowsRuntimeConfiguration({
+    runDirectory: secondDirectory,
+    configPath: secondConfigPath,
+  });
+  await writeFile(secondConfigPath, `${original}# changed before switch\n`);
+  await assert.rejects(
+    setWindowsRuntimeConfiguration(secondConfiguration, "wsl-native"),
+    /外部修改/,
+  );
+});
+
+test("[A LCH-02 LCH-03] Windows 生命周期等待目标 Relay 类型，不能继承另一环境结果", async () => {
+  const wrong = readyHost({ injectorPid: 101, wslNative: true });
+  const expected = readyHost({ injectorPid: 101, wslNative: false });
+  const snapshots = [wrong, expected];
+  const result = await waitForWindowsTargetHost({
+    installedApp: "C:\\Program Files\\Codex Quota Injector",
+    expectedProtocol: 53,
+  }, {
+    expectedRuntimeTarget: "windows-native",
+    timeoutMs: 100,
+    pollIntervalMs: 0,
+    inspectHost: async () => snapshots.shift() ?? expected,
+  });
+  assert.equal(result.relay.wslNative, false);
+});
+
+test("[A LCH-02] C 批在改配置前确认 WSL 官方 CLI 与进程身份接口可用", async () => {
+  let invocation;
+  assert.deepEqual(await inspectWslLifecyclePrerequisites({
+    platform: "win32",
+    execFileImpl: async (command, args, options) => {
+      invocation = { command, args, options };
+      return { stdout: "ready" };
+    },
+  }), { status: "ready" });
+  assert.equal(invocation.command, "wsl.exe");
+  assert.deepEqual(invocation.args.slice(0, 3), ["-e", "sh", "-lc"]);
+  assert.match(invocation.args.at(-1), /command -v codex/);
+  assert.match(invocation.args.at(-1), /boot_id/);
+  assert.equal((await inspectWslLifecyclePrerequisites({
+    platform: "win32",
+    execFileImpl: async () => { throw new Error("no distro"); },
+  })).status, "blocked");
+});
+
+test("[A LCH-06] 首次安装的源码恢复入口必须是当前运行环境的有效原生产物", async () => {
+  const checked = [];
+  const validators = {
+    assertWindowsExecutable: async (path) => { checked.push(["windows", path]); },
+    assertWslExecutable: async (path) => { checked.push(["wsl", path]); },
+  };
+  assert.deepEqual(await inspectWindowsSourceRecovery({
+    installationState: "empty",
+    currentRuntime: "windows-native",
+    sourceRecoveryRelay: "C:\\relay.exe",
+    ...validators,
+  }), { status: "ready", reason: null });
+  assert.deepEqual(await inspectWindowsSourceRecovery({
+    installationState: "empty",
+    currentRuntime: "wsl-native",
+    sourceRecoveryRelay: "C:\\relay-wsl",
+    ...validators,
+  }), { status: "ready", reason: null });
+  assert.deepEqual(checked, [
+    ["windows", "C:\\relay.exe"],
+    ["wsl", "C:\\relay-wsl"],
+  ]);
+  const blocked = await inspectWindowsSourceRecovery({
+    installationState: "empty",
+    currentRuntime: "windows-native",
+    sourceRecoveryRelay: "missing.exe",
+    assertWindowsExecutable: async () => { throw new Error("invalid PE"); },
+  });
+  assert.equal(blocked.status, "blocked-invalid-or-missing-native-relay");
+  assert.match(blocked.reason, /invalid PE/);
+  assert.deepEqual(await inspectWindowsSourceRecovery({
+    installationState: "versioned",
+    currentRuntime: "windows-native",
+    sourceRecoveryRelay: "unused.exe",
+    assertWindowsExecutable: async () => assert.fail("已有安装时不依赖源码入口"),
+  }), { status: "ready", reason: null });
 });
 
 test("[A LCH-06] Windows Setup 和安装目录必须与同一个版本化中继集合对应", async (t) => {
@@ -290,11 +408,11 @@ test("[A LCH-06 HAR-04] Windows 回滚按安装前状态恢复旧包、移除新
   }), /备份不存在/);
 });
 
-function readyHost({ injectorPid }) {
+function readyHost({ injectorPid, wslNative = false }) {
   return {
     codexPids: [10],
     injectorPids: [injectorPid],
-    relay: { pid: 30 },
+    relay: { pid: 30, wslNative },
     readiness: {
       ready: true,
       codexRunning: true,

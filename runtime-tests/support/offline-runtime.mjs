@@ -13,6 +13,11 @@ import { WebSocketServer } from "ws";
 import { ModelRouterManager } from "../../src/model-router.mjs";
 import { ExtraModelManager } from "../../src/extra-model-manager.mjs";
 import deepSeekModel from "../../src/deepseek-model.json" with { type: "json" };
+import {
+  MACOS_NATIVE,
+  WINDOWS_NATIVE,
+  WSL_NATIVE,
+} from "../../scripts/test-runtime-targets.mjs";
 
 const execFileAsync = promisify(execFile);
 export const LOOPBACK_SANDBOX = '(version 1)(allow default)(deny network*)(allow network-outbound (remote ip "localhost:*"))(allow network-inbound (local ip "localhost:*"))(allow network-bind (local ip "localhost:*"))(allow network* (local unix-socket) (remote unix-socket))';
@@ -67,8 +72,11 @@ export function sandboxCommand(executable, args = []) {
   if (process.platform === "win32") {
     return { executable, args };
   }
+  if (process.platform === "linux" && process.env.CODEX_TEST_RUNTIME_TARGET === WSL_NATIVE) {
+    return { executable, args };
+  }
   if (process.platform !== "darwin") {
-    throw new Error("BLOCKED: 当前免费官方运行时适配器只验证 macOS；此平台需实现并验证出站隔离后才能运行");
+    throw new Error("BLOCKED: 当前 Linux 进程不属于 WSL 原生测试执行器");
   }
   return { executable: "/usr/bin/sandbox-exec", args: ["-p", LOOPBACK_SANDBOX, executable, ...args] };
 }
@@ -79,6 +87,9 @@ export async function activateOfflineNetworkIsolation(executables) {
   }
   if (process.platform === "win32") {
     return { mode: "windows-temporary-profile-local-endpoints", close: async () => undefined };
+  }
+  if (process.platform === "linux" && process.env.CODEX_TEST_RUNTIME_TARGET === WSL_NATIVE) {
+    return { mode: "wsl-isolated-home-and-local-fixtures", close: async () => undefined };
   }
   if (process.platform !== "win32") {
     throw new Error(`BLOCKED: 当前平台 ${process.platform}/${process.arch} 没有免费出站隔离适配器`);
@@ -223,6 +234,8 @@ export class RpcClient {
 // The official CLI, tools, filesystem and production routing components are real.
 export async function startRuntime(t, { profile = "direct", config = "", model = null,
   initialize = true, experimental = true, prepare = null, cliArgs = [] } = {}) {
+  const runtimeTarget = process.env.CODEX_TEST_RUNTIME_TARGET ||
+    (process.platform === "darwin" ? MACOS_NATIVE : process.platform === "win32" ? WINDOWS_NATIVE : null);
   const profileLabel = profile;
   const productionCatalog = profile.startsWith("configured-");
   if (productionCatalog) profile = profile === "configured-chat" ? "chat" : "custom";
@@ -390,11 +403,14 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
     if (process.platform === "darwin") {
       shim = join(directory, "Codex Quota Injector Shim");
       await execFileAsync("/usr/bin/xcrun", ["swiftc", "-O", resolve(ROOT, "src/macos-codex-shim.swift"), "-o", shim], { timeout: 30_000 });
-    } else if (process.platform === "win32") {
-      shim = process.execPath;
-      executablePrefixArgs = [resolve(ROOT, "src/windows-relay-entry.mjs")];
+    } else if (process.platform === "win32" && runtimeTarget === WINDOWS_NATIVE) {
+      shim = String(process.env.CODEX_TEST_RELAY_EXECUTABLE ?? "").trim() || process.execPath;
+      if (shim === process.execPath) executablePrefixArgs = [resolve(ROOT, "src/windows-relay-entry.mjs")];
+    } else if (process.platform === "linux" && runtimeTarget === WSL_NATIVE) {
+      shim = String(process.env.CODEX_TEST_RELAY_EXECUTABLE ?? "").trim();
+      if (!shim) throw new Error("BLOCKED: WSL 原生测试缺少当前源码构建的 ELF Relay");
     } else {
-      throw new Error(`BLOCKED: ${process.platform}/${process.arch} 没有生产中继测试适配器`);
+      throw new Error(`BLOCKED: ${process.platform}/${process.arch}/${runtimeTarget ?? "unknown"} 没有生产中继测试适配器`);
     }
     const providerSettingsPath = join(directory, "provider-settings.json");
     const extraModelSettingsPath = join(directory, "runtime-extra-model-settings.json");
@@ -416,6 +432,7 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
         legacyProviderIds: route.legacyProviderIds } : null }));
     env.CODEX_QUOTA_RELAY_CONFIG = configPath;
     env.CODEX_QUOTA_UPSTREAM_CODEX_CLI = cli;
+    if (runtimeTarget === WSL_NATIVE) env.CODEX_QUOTA_WSL_UPSTREAM_CODEX_CLI = cli;
     executable = shim;
   }
   const command = sandboxCommand(executable, [...executablePrefixArgs, ...cliArgs, "app-server"]);
@@ -426,7 +443,7 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
       capabilities: { experimentalApi: experimental } });
     rpc.send({ method: "initialized", params: {} });
   }
-  t.diagnostic(`${version.trim()} / ${process.platform} ${process.arch} / ${profileLabel} / loopback-only`);
+  t.diagnostic(`${version.trim()} / ${process.platform} ${process.arch} / ${runtimeTarget ?? "unknown"} / ${profileLabel} / loopback-only`);
   return { ...{ directory, cwd, env, cli, rpc, child, model, catalog, catalogPath, origin, usagePath, requests, router, failures },
     enqueue(...handlers) { steps.push(...handlers.map(value => typeof value === "function" ? value : () => value)); },
     async thread(params = {}) { return rpc.request("thread/start", { model, cwd, approvalPolicy: "never", sandbox: "danger-full-access", ...params }); },

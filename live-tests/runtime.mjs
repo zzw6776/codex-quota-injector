@@ -18,6 +18,11 @@ import {
   ROOT,
   stopChild,
 } from "../runtime-tests/support/offline-runtime.mjs";
+import {
+  MACOS_NATIVE,
+  WINDOWS_NATIVE,
+  WSL_NATIVE,
+} from "../scripts/test-runtime-targets.mjs";
 const exec = promisify(execFile);
 export const approved = process.env.CODEX_TEST_LIVE_APPROVED === "current-run";
 
@@ -137,12 +142,14 @@ async function currentCredentials() {
 
 export async function startLiveRuntime(t, profile, budget) {
   assert.ok(approved, "真实测试只能由 npm run test:live -- --confirm-token-use 启动");
+  const runtimeTarget = process.env.CODEX_TEST_RUNTIME_TARGET ||
+    (process.platform === "darwin" ? MACOS_NATIVE : process.platform === "win32" ? WINDOWS_NATIVE : null);
   const credentials = await currentCredentials();
   const secrets = [credentials.accessToken ?? credentials.apiKey, profile.deepSeek?.apiKey, ...(profile.extraModels?.platforms ?? []).map(p => p.apiKey)].filter(Boolean);
   const sanitize = text => secrets.reduce((value, secret) => value.replaceAll(secret, "[凭据已隐藏]"), String(text));
   const directory = await mkdtemp(join(tmpdir(), "quota-live-"));
   const cwd = join(directory, "project");
-  const env = isolatedEnv(directory);
+  const env = isolatedEnv(directory, { CODEX_TEST_RUNTIME_TARGET: runtimeTarget });
   await mkdir(cwd); await mkdir(env.CODEX_HOME);
   let child;
   let router;
@@ -216,11 +223,14 @@ export async function startLiveRuntime(t, profile, budget) {
       "-o",
       relayExecutable,
     ], { timeout: 30000 });
-  } else if (process.platform === "win32") {
-    relayExecutable = process.execPath;
-    relayArguments = [join(ROOT, "src/windows-relay-entry.mjs")];
+  } else if (process.platform === "win32" && runtimeTarget === WINDOWS_NATIVE) {
+    relayExecutable = String(process.env.CODEX_TEST_RELAY_EXECUTABLE ?? "").trim();
+    assert.ok(relayExecutable, "Windows 真实测试缺少 A 批验证过的原生 Relay");
+  } else if (process.platform === "linux" && runtimeTarget === WSL_NATIVE) {
+    relayExecutable = String(process.env.CODEX_TEST_RELAY_EXECUTABLE ?? "").trim();
+    assert.ok(relayExecutable, "WSL 真实测试缺少 A 批验证过的原生 Relay");
   } else {
-    throw new Error(`当前平台 ${process.platform}/${process.arch} 没有真实中继测试适配器`);
+    throw new Error(`当前环境 ${process.platform}/${process.arch}/${runtimeTarget ?? "unknown"} 没有真实中继测试适配器`);
   }
   const config = join(directory, "relay.json");
   await writeFile(config, JSON.stringify({
@@ -235,6 +245,7 @@ export async function startLiveRuntime(t, profile, budget) {
     tokenUsageEventsPath: join(directory, "relay-usage.jsonl"), generation: randomUUID(),
     router: liveRouterConfiguration(route) }));
   env.CODEX_QUOTA_RELAY_CONFIG = config; env.CODEX_QUOTA_UPSTREAM_CODEX_CLI = cli;
+  if (runtimeTarget === WSL_NATIVE) env.CODEX_QUOTA_WSL_UPSTREAM_CODEX_CLI = cli;
   const mcp = join(ROOT, "runtime-tests/support/mcp-fixture.mjs");
   await writeFile(join(env.CODEX_HOME, "config.toml"), [
     'cli_auth_credentials_store="ephemeral"', 'mcp_oauth_credentials_store="file"', 'model_provider="openai"',
@@ -290,7 +301,7 @@ export async function startLiveRuntime(t, profile, budget) {
   const selected = available.find(m => m.model === model);
   const supported = selected.supportedReasoningEfforts?.map(e => e.reasoningEffort) ?? [];
   const effort = ["none", "minimal", "low", "medium", "high", "xhigh", "max"].find(e => supported.includes(e)) ?? selected.defaultReasoningEffort;
-  t.diagnostic(`真实配置 ${profile.id} / ${model} / ${process.platform} ${process.arch}`);
+  t.diagnostic(`真实配置 ${profile.id} / ${model} / ${process.platform} ${process.arch} / ${runtimeTarget}`);
   return { rpc, cwd, model, effort, directory, sanitize,
     async diagnostics(stage) {
       const evidence = summarizeLiveEvidence({ events: rpc.events, profile: profile.id, model, stage, budget, sanitize });

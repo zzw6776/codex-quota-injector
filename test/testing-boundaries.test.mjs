@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -32,20 +32,37 @@ test("[A RPC-02 HAR-04] 完整场景清单绑定证据文件，未执行与真�
 
 test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，不要求当前账号或启动官方程序", async t => {
   const directory = await useTempDir(t);
-  const options = { cwd: ROOT, env: isolatedEnv(directory, { CODEX_TEST_CLI: join(directory, "must-not-start") }), timeout: 10000 };
+  const providerData = join(directory, "provider-data");
+  await mkdir(providerData);
+  await writeFile(join(providerData, "provider-settings.json"), JSON.stringify({
+    version: 1,
+    enabled: true,
+    apiKey: "sk-fixture-deepseek",
+    generation: 1,
+  }));
+  const options = { cwd: ROOT, env: isolatedEnv(directory, {
+    CODEX_TEST_CLI: join(directory, "must-not-start"),
+    CODEX_QUOTA_DATA_DIR: providerData,
+  }), timeout: 10000 };
   const plan = JSON.parse((await exec(process.execPath, ["scripts/test-live.mjs", "--plan"], options)).stdout);
   assert.equal(plan.batch, "B-overview");
-  assert.deepEqual(plan.profiles.map(p => p.id), ["official"]);
+  assert.deepEqual(plan.profiles.map(p => p.id), ["official", "deepseek"]);
   const selectedPlan = JSON.parse((await exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=official"], options)).stdout);
   assert.equal(selectedPlan.profileFilter, "official");
   assert.equal(selectedPlan.batch, "B1-official");
+  assert.equal(selectedPlan.runtimeTarget, process.platform === "darwin"
+    ? "macos-native"
+    : process.platform === "win32"
+      ? selectedPlan.currentRuntime
+      : "unsupported");
+  assert.equal(selectedPlan.changesDesktopRuntime, false);
   assert.deepEqual(selectedPlan.profiles.map(p => p.id), ["official"]);
   assert.deepEqual(selectedPlan.perProfile, [
     "独立任务的文件、命令、补丁与 MCP 调用",
     "独立短任务的历史恢复与分叉",
     "独立短任务的显式压缩与压缩后历史恢复",
-    "独立任务的网页/浏览器宿主适配、用户输入、图片及官方原生搜索",
+    "独立任务的网页/浏览器宿主适配、用户输入、图片、官方原生搜索",
   ]);
   assert.equal(selectedPlan.maxObservedTokensPerStage, 500000);
   assert.equal(selectedPlan.maxTurnsPerStage, 40);
@@ -63,7 +80,15 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
   const hostPlan = JSON.parse((await exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=official", "--stage=host"], options)).stdout);
   assert.deepEqual(hostPlan.perProfile,
-    ["独立任务的网页/浏览器宿主适配、用户输入、图片及官方原生搜索"]);
+    ["独立任务的网页/浏览器宿主适配、用户输入、图片、官方原生搜索"]);
+  const deepseekPlan = JSON.parse((await exec(process.execPath,
+    ["scripts/test-live.mjs", "--plan", "--profile=deepseek"], options)).stdout);
+  assert.deepEqual(deepseekPlan.perProfile, [
+    "独立任务的文件、命令、补丁与 MCP 调用",
+    "独立短任务的历史恢复与分叉",
+    "独立短任务的显式压缩与压缩后历史恢复",
+    "独立任务的网页/浏览器宿主适配、用户输入",
+  ]);
   await assert.rejects(exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=missing"], options), error => {
     assert.match(error.stderr, /未找到真实测试配置 missing/); return true;
@@ -71,6 +96,10 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
   await assert.rejects(exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--stage=missing"], options), error => {
     assert.match(error.stderr, /未知真实测试场景 missing/); return true;
+  });
+  await assert.rejects(exec(process.execPath,
+    ["scripts/test-live.mjs", "--plan", "--runtime=all"], options), error => {
+    assert.match(error.stderr, /一次只能选择一个运行环境|没有完整测试运行环境/); return true;
   });
   await assert.rejects(exec(process.execPath, ["scripts/test-live.mjs", "--plan"], {
     ...options, env: { ...options.env, CODEX_TEST_LIVE_MAX_TOKENS: "invalid" },

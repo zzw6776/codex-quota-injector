@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   createLifecycleReport,
+  updateLifecycleComponents,
   writeLifecycleReport,
 } from "../src/lifecycle-runner.mjs";
 import {
@@ -142,4 +143,27 @@ test("[A HAR-02 LCH-01] Safari 可见后才把生命周期任务交给外部监�
     schedule: async () => { order.push("scheduled"); },
   });
   assert.deepEqual(order, ["visible", "scheduled"]);
+});
+
+test("[A HAR-02 LCH-02] Windows 报告页分别显示原生、WSL 和自动恢复结果", () => {
+  const report = createLifecycleReport({
+    runId: "runtime-components",
+    projectVersion: "1.2.3",
+    targetRelayProtocol: 54,
+    steps: ["switch-windows-runtime", "launch-windows-native", "switch-wsl-runtime",
+      "launch-wsl-native", "restore-runtime"],
+    metadata: { components: {
+      "C-windows-native": ["launch-windows-native"],
+      "C-wsl-native": ["launch-wsl-native"],
+      "C-runtime-switch": ["switch-windows-runtime", "switch-wsl-runtime", "restore-runtime"],
+    } },
+  });
+  for (const step of report.steps) step.status = "passed";
+  updateLifecycleComponents(report);
+  const html = renderLifecycleProgressHtml(report);
+  assert.match(html, /C-windows-native/);
+  assert.match(html, /C-wsl-native/);
+  assert.match(html, /C-runtime-switch/);
+  assert.match(html, /切换到 Windows 原生运行方式/);
+  assert.match(html, /恢复测试前的 Codex 运行方式/);
 });

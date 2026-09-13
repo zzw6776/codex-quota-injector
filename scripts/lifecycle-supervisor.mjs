@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import process from "node:process";
 
 import { startLifecycleProgressRenderer } from "../src/lifecycle-progress.mjs";
-import { runLifecycleReport } from "../src/lifecycle-runner.mjs";
+import { runLifecycleReport, validateLifecycleControl } from "../src/lifecycle-runner.mjs";
 import { createMacLifecycleOperations } from "./lifecycle-macos.mjs";
 
 const args = process.argv.slice(2);
@@ -14,10 +14,10 @@ if (args.length !== 2 || args[0] !== "--control") {
 }
 const controlPath = resolve(args[1]);
 const control = JSON.parse(await readFile(controlPath, "utf8"));
-if (control.version !== 1 || control.root !== resolve(import.meta.dirname, "..") ||
-  control.reportPath !== resolve(control.root, ".runtime", "test-results", "lifecycle", control.runId, "report.json")) {
-  throw new Error("生命周期控制文件不属于当前项目或版本不受支持");
-}
+validateLifecycleControl(control, {
+  root: resolve(import.meta.dirname, ".."),
+  runDirectory: resolve(controlPath, ".."),
+});
 const progress = await startLifecycleProgressRenderer({
   reportPath: control.reportPath,
   outputPath: control.progressPath,

@@ -16,6 +16,7 @@ import {
 import {
   createLifecycleReport,
   readLifecycleReport,
+  validateLifecycleControl,
   writeLifecycleReport,
 } from "../src/lifecycle-runner.mjs";
 import {
@@ -67,6 +68,7 @@ if (resumeArgument) {
   const runDirectory = join(lifecycleRoot, runId);
   const controlPath = join(runDirectory, "control.json");
   const control = JSON.parse(await readFile(controlPath, "utf8"));
+  validateLifecycleControl(control, { root: ROOT, runDirectory });
   control.progressPath ??= join(runDirectory, "progress.html");
   await writeLifecycleProgressPage(control.reportPath, control.progressPath);
   await openProgressPage(control.progressPath);

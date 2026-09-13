@@ -10,6 +10,7 @@ import {
   isRelayConfigCurrent,
   isRelayStateCurrent,
   parseWindowsSubsystemSetting,
+  updateWindowsSubsystemSetting,
   parseProcessList,
   requestMacCodexQuit,
   requestWindowsCodexQuit,
@@ -97,6 +98,33 @@ runCodexInWindowsSubsystemForLinux = true # desktop runtime
 [desktop.extra]
 runCodexInWindowsSubsystemForLinux = true
 `), false);
+});
+
+test("[A LCH-02 LCH-06] Windows 生命周期只修改 desktop 运行方式并保留其余配置", () => {
+  const original = [
+    'model = "gpt-5"',
+    "[desktop]",
+    "  runCodexInWindowsSubsystemForLinux = false # keep comment",
+    "theme = \"dark\"",
+    "[features]",
+    "multi_agent = true",
+    "",
+  ].join("\r\n");
+  const enabled = updateWindowsSubsystemSetting(original, true);
+  assert.match(enabled, /  runCodexInWindowsSubsystemForLinux = true # keep comment/);
+  assert.match(enabled, /model = "gpt-5"/);
+  assert.match(enabled, /multi_agent = true/);
+  assert.ok(enabled.includes("\r\n"));
+  assert.equal(parseWindowsSubsystemSetting(enabled), true);
+  assert.equal(parseWindowsSubsystemSetting(updateWindowsSubsystemSetting(enabled, false)), false);
+
+  const inserted = updateWindowsSubsystemSetting("[features]\na = true\n", true);
+  assert.match(inserted, /\[desktop\]\nrunCodexInWindowsSubsystemForLinux = true\n$/);
+  assert.throws(() => updateWindowsSubsystemSetting([
+    "[desktop]",
+    "runCodexInWindowsSubsystemForLinux = true",
+    "runCodexInWindowsSubsystemForLinux = false",
+  ].join("\n"), true), /重复/);
 });
 
 test("CDP 客户端按请求 ID 配对结果，并传播协议错误和 evaluate 异常", async (t) => {
