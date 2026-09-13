@@ -168,6 +168,9 @@ async function main() {
     return;
   }
   if (!options.profile) throw new Error("必须指定 --profile=official 或 --profile=deepseek");
+  if (!options.plan && !options.confirmTokenUse) {
+    throw new Error("桌面任务会产生对应模型用量；请先查看计划并取得该 B 批本次授权，再追加 --confirm-token-use");
+  }
   const runtimeTarget = await selectedRuntime(options.runtime, {
     allowUnsupportedCurrent: options.plan,
   });
@@ -175,9 +178,6 @@ async function main() {
   if (options.plan) {
     console.log(JSON.stringify(plan, null, 2));
     return;
-  }
-  if (!options.confirmTokenUse) {
-    throw new Error("桌面任务会产生对应模型用量；请先查看计划并取得该 B 批本次授权，再追加 --confirm-token-use");
   }
   await runDesktopSession({ ...options, ...plan, runtimeTarget });
 }
