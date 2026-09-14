@@ -9,28 +9,71 @@ import { customCall, execOffline, officialExecutable, startRuntime } from "./sup
 import { useTempDir } from "../test/helpers.mjs";
 const exec = promisify(execFile);
 const gitExecutable = process.platform === "win32" ? "git.exe" : "/usr/bin/git";
+const inventoryUrl = new URL("../docs/testing-protocol-inventory.json", import.meta.url);
+
+function protocolMethods(schema) {
+  return (schema.oneOf ?? []).flatMap(entry => entry.properties?.method?.enum ?? []);
+}
+
+function selectReviewedVariant(inventory, cliVersion) {
+  if (cliVersion === inventory.cliVersion &&
+      process.platform === inventory.platformScope.os &&
+      process.arch === inventory.platformScope.architecture) {
+    return { cliVersion, modes: inventory.modes, methodChanges: {} };
+  }
+  const variant = inventory.reviewedVariants?.find(candidate =>
+    candidate.cliVersion === cliVersion && candidate.platform === process.platform &&
+    candidate.architecture === process.arch);
+  assert.ok(variant,
+    `当前 ${process.platform}/${process.arch} 的 codex-cli ${cliVersion} 尚未审核；需要盘点协议差异后登记，不能沿用其他版本结果`);
+  return variant;
+}
+
+function expectedMethods(inventory, variant, mode, type) {
+  const changes = variant.methodChanges?.[mode]?.[type] ?? {};
+  const removed = new Set(changes.removed ?? []);
+  return [...inventory.modes[mode][type].methods.filter(method => !removed.has(method)), ...(changes.added ?? [])];
+}
 
 test("[A RPC-02 RPC-04 INT-03 IO-04 ENV-02 SES-09] 官方协议升级检查要求重新盘点所有能力分支", { timeout: 30_000 }, async t => {
   const directory = await useTempDir(t);
   const cli = await officialExecutable();
-  const expected = JSON.parse(await readFile(new URL("../docs/testing-protocol-inventory.json", import.meta.url), "utf8"));
+  const expected = JSON.parse(await readFile(inventoryUrl, "utf8"));
+  const { stdout: versionOutput } = await execOffline(cli, ["--version"], { directory });
+  const cliVersion = versionOutput.trim().replace(/^codex-cli\s+/, "");
+  const variant = selectReviewedVariant(expected, cliVersion);
   for (const [mode, entries] of Object.entries(expected.modes)) {
     const output = join(directory, mode);
     await execOffline(cli, ["app-server", "generate-json-schema", "--out", output, ...(mode === "experimental" ? ["--experimental"] : [])], { directory });
     for (const [type, definition] of Object.entries(entries)) {
       if (!definition.sha256) continue;
       const bytes = await readFile(join(output, `${type}.json`));
-      assert.equal(createHash("sha256").update(bytes).digest("hex"), definition.sha256,
+      const reviewed = variant.modes[mode][type];
+      assert.equal(createHash("sha256").update(bytes).digest("hex"), reviewed.sha256,
         `${mode}/${type} 已变化：需要审核新增/修改的字段、补测试并更新协议清单，不自动沿用旧版通过结果`);
+      const methods = protocolMethods(JSON.parse(bytes));
+      assert.equal(methods.length, reviewed.count, `${mode}/${type} 的方法计数与已审核变体不一致`);
+      assert.deepEqual(methods, expectedMethods(expected, variant, mode, type),
+        `${mode}/${type} 的方法集合与已审核变体不一致`);
     }
   }
 });
 
-test("[A INT-03] 官方用户验证状态通过隔离 shim 明确报告当前平台不可用且不触发模型请求", { timeout: 30_000 }, async t => {
+test("[A INT-03] 官方用户验证能力按当前已审核协议明确报告未提供或平台不可用", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim" });
+  const inventory = JSON.parse(await readFile(inventoryUrl, "utf8"));
+  const { stdout: versionOutput } = await execOffline(r.cli, ["--version"], { directory: r.directory });
+  const variant = selectReviewedVariant(inventory, versionOutput.trim().replace(/^codex-cli\s+/, ""));
+  const supported = expectedMethods(inventory, variant, "experimental", "ClientRequest")
+    .includes("userVerification/status");
   await assert.rejects(r.rpc.request("userVerification/status", {}), error => {
-    assert.equal(error.code, -32603);
-    assert.deepEqual(error.data, { type: "unavailable", reason: "providerUnavailable" });
+    if (supported) {
+      assert.equal(error.code, -32603);
+      assert.deepEqual(error.data, { type: "unavailable", reason: "providerUnavailable" });
+    } else {
+      assert.equal(error.code, -32600);
+      assert.match(error.message, /unknown variant.*userVerification\/status/i);
+    }
     return true;
   });
   assert.equal(r.requests.length, 0, "读取本机验证状态不能调用模型");

@@ -4,7 +4,7 @@ import { chmod, copyFile, link, mkdir, readFile, symlink, writeFile } from "node
 import { join } from "node:path";
 import test from "node:test";
 
-import { useTempDir } from "./helpers.mjs";
+import { useTempDir, waitFor } from "./helpers.mjs";
 
 const FAKE_CODEX = `#!/usr/bin/env node
 import readline from "node:readline";
@@ -166,6 +166,30 @@ function runRelay({
   });
 }
 
+function spawnRelay({ configPath, relayArguments = ["app-server"] }) {
+  const child = spawn(process.execPath, ["src/launcher.mjs", ...relayArguments], {
+    cwd: join(import.meta.dirname, ".."),
+    env: {
+      ...process.env,
+      CODEX_QUOTA_ROLE: "app-server-relay",
+      CODEX_QUOTA_RELAY_CONFIG: configPath,
+      CODEX_APP_SERVER_FORCE_CLI: "1",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const closed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`relay 退出异常 code=${code} signal=${signal}; stderr=${stderr}`));
+    });
+  });
+  return { child, closed };
+}
+
 async function createNodeAlias(path) {
   if (process.platform === "win32") {
     try {
@@ -215,6 +239,70 @@ test("app-server relay 观察 codex_app 启动失败且不改写官方通知", a
   assert.equal(health.code, "missing-code-signing-identity");
   assert.match(health.detail, /Bearer \[redacted\]/);
   assert.doesNotMatch(health.detail, /fixture-secret/);
+});
+
+test("并发 app-server 退出时保留存活 Relay，并在所有者退出后接管状态", async (t) => {
+  const directory = await useTempDir(t, "codex-relay-ownership-");
+  const fakeCodexPath = join(directory, "persistent-codex.mjs");
+  const upstreamExecutable = join(
+    directory,
+    process.platform === "win32" ? "node-upstream.exe" : "node-upstream",
+  );
+  const configPath = join(directory, "relay.json");
+  const statePath = join(directory, "relay-state.json");
+  const healthPath = join(directory, "host-health.json");
+  await writeFile(fakeCodexPath, `
+import readline from "node:readline";
+const lines = readline.createInterface({ input: process.stdin });
+for await (const line of lines) {
+  const message = JSON.parse(line);
+  if (message.id != null) process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");
+}
+`);
+  await createNodeAlias(upstreamExecutable);
+  await writeFile(configPath, JSON.stringify({
+    version: process.platform === "darwin" ? 5 : 2,
+    upstreamExecutable,
+    relayStatePath: statePath,
+    hostHealthPath: healthPath,
+    hostToolsRequired: true,
+    runtimeTarget: process.platform === "win32" ? "windows-native" : "macos-native",
+    generation: "concurrent-generation",
+  }));
+
+  const first = spawnRelay({
+    configPath,
+    relayArguments: [fakeCodexPath, "app-server"],
+  });
+  t.after(() => first.child.kill("SIGKILL"));
+  await waitFor(async () => {
+    const state = JSON.parse(await readFile(statePath, "utf8").catch(() => "null"));
+    return state?.pid === first.child.pid;
+  });
+
+  const second = spawnRelay({
+    configPath,
+    relayArguments: [fakeCodexPath, "app-server"],
+  });
+  t.after(() => second.child.kill("SIGKILL"));
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  assert.equal(JSON.parse(await readFile(statePath, "utf8")).pid, first.child.pid);
+
+  first.child.stdin.end();
+  await first.closed;
+  const takeover = await waitFor(async () => {
+    const state = JSON.parse(await readFile(statePath, "utf8").catch(() => "null"));
+    return state?.pid === second.child.pid ? state : null;
+  }, { timeoutMs: 4_000 });
+  assert.equal(takeover.generation, "concurrent-generation");
+  await waitFor(async () => {
+    const health = JSON.parse(await readFile(healthPath, "utf8").catch(() => "null"));
+    return health?.pid === second.child.pid;
+  });
+
+  second.child.stdin.end();
+  await second.closed;
+  await waitFor(async () => !await readFile(statePath, "utf8").then(() => true, () => false));
 });
 
 test("Windows 独立中继在桌面端未转发环境变量时从固定配置执行官方 CLI", async (t) => {
@@ -470,4 +558,47 @@ test("app-server relay 在 Router 后保持第三方供应商并隔离上游凭�
   const fork = output.find((message) => message.id === 3).result.received;
   assert.equal(fork.params.modelProvider, "deepseek");
   assert.equal(fork.params.model, "deepseek-v4-flash");
+});
+
+test("Windows relay 在没有第三方模型时于原生环境启动官方流量观察 Router", async (t) => {
+  const directory = await useTempDir(t, "codex-relay-official-observer-");
+  const fakeCodexPath = join(directory, "fake-codex.mjs");
+  const upstreamExecutable = join(
+    directory,
+    process.platform === "win32" ? "fake-node.exe" : "fake-node",
+  );
+  const providerSettingsPath = join(directory, "provider-settings.json");
+  const extraSettingsPath = join(directory, "extra-models.json");
+  const catalogPath = join(directory, "catalog.json");
+  const usagePath = join(directory, "usage.jsonl");
+  const configPath = join(directory, "relay.json");
+  await writeFile(fakeCodexPath, FAKE_CODEX);
+  await createNodeAlias(upstreamExecutable);
+  await writeFile(providerSettingsPath, JSON.stringify({ enabled: false, apiKey: "" }));
+  await writeFile(extraSettingsPath, JSON.stringify({ platforms: [] }));
+  await writeFile(catalogPath, JSON.stringify({ models: [{ slug: "official" }] }));
+  await writeFile(configPath, JSON.stringify({
+    version: 2,
+    upstreamExecutable,
+    providerSettingsPath,
+    extraModelSettingsPath: extraSettingsPath,
+    modelCatalogPath: catalogPath,
+    tokenUsageEventsPath: usagePath,
+    officialAuthMode: "oauth",
+    observeModelTraffic: true,
+  }));
+
+  const { stdout } = await runRelay({
+    configPath,
+    messages: [{ id: 1, method: "config/read", params: { includeLayers: true } }],
+    relayArguments: [fakeCodexPath, "app-server"],
+  });
+  const passthrough = JSON.parse(stdout.trim()).result;
+  const serializedArgs = JSON.stringify(passthrough.argv);
+  assert.ok(passthrough.argv.includes(`model_provider=${JSON.stringify("openai")}`));
+  assert.match(serializedArgs, /openai_base_url=.*127\.0\.0\.1/);
+  assert.match(serializedArgs, /x-codex-quota-router-token/);
+  assert.match(passthrough.env.routerToken, /^[A-Za-z0-9_-]{32,}$/);
+  assert.equal(passthrough.env.deepSeekKey, null);
+  assert.equal(passthrough.env.customKey, null);
 });

@@ -36,7 +36,6 @@ try {
     format: "cjs",
     target: "node22",
     sourcemap: false,
-    packages: "external",
   });
 
   await writeFile(

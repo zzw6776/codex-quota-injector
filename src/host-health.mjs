@@ -100,6 +100,7 @@ export async function createHostHealthTracker({
   generation,
   runtimeTarget,
   processIdentity = {},
+  claim = true,
   requiredTools = REQUIRED_CODEX_APP_TOOLS,
   graceMs = HOST_HEALTH_STARTUP_GRACE_MS,
   now = () => Date.now(),
@@ -117,7 +118,7 @@ export async function createHostHealthTracker({
     setTimer,
     clearTimer,
   });
-  await tracker.start();
+  await tracker.start({ claim });
   return tracker;
 }
 
@@ -170,11 +171,15 @@ class HostHealthTracker {
     };
   }
 
-  async start() {
+  async start({ claim = true } = {}) {
     if (!this.path) return;
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    await this.persist({ claim: true });
+    if (claim) await this.persist({ claim: true });
     this.armGraceTimer();
+  }
+
+  claim() {
+    return this.persist({ claim: true });
   }
 
   observeClientMessage(message) {

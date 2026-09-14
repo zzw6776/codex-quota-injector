@@ -3,7 +3,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +15,7 @@ import {
 } from "./host-health.mjs";
 import { RELAY_PROTOCOL_VERSION, RELAY_STATE_VERSION } from "./relay-contract.mjs";
 import { startChatCompatibilityProxy } from "./chat-compat-proxy.mjs";
+import { ModelRouterManager } from "./model-router.mjs";
 
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
 const DEEPSEEK_PROVIDER = "deepseek";
@@ -48,6 +49,10 @@ const PENDING_REQUEST_TTL_MS = 2 * 60 * 1000;
 const TURN_MODEL_TTL_MS = 15 * 60 * 1000;
 const THREAD_CONTEXT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RELAY_CLEANUP_INTERVAL_MS = 60 * 1000;
+const RELAY_OWNERSHIP_POLL_MS = 1_000;
+const RELAY_STATE_LOCK_RETRY_MS = 25;
+const RELAY_STATE_LOCK_TIMEOUT_MS = 5_000;
+const RELAY_STATE_LOCK_STALE_MS = 10_000;
 const SIDECAR_MODE_ENV = "CODEX_QUOTA_APP_SERVER_SIDECAR";
 const SIDECAR_UPSTREAM_STDIN_FD_ENV = "CODEX_QUOTA_UPSTREAM_STDIN_FD";
 const SIDECAR_UPSTREAM_STDOUT_FD_ENV = "CODEX_QUOTA_UPSTREAM_STDOUT_FD";
@@ -99,7 +104,7 @@ export async function runAppServerRelay() {
     return null;
   });
   const deepSeekEnabled = Boolean(settings?.enabled && settings?.apiKey);
-  const router = normalizeRouterConfiguration(relayConfig?.router);
+  let router = normalizeRouterConfiguration(relayConfig?.router);
   const extraModelSettingsPath = await resolveRelayPath(
     relayConfig?.extraModelSettingsPath ?? process.env.CODEX_QUOTA_EXTRA_MODEL_SETTINGS,
   );
@@ -115,6 +120,38 @@ export async function runAppServerRelay() {
       customModelProviders.set(model.id, platform.providerId);
       customModels.set(model.id, { ...model, platformName: platform.name });
     }
+  }
+  const tokenUsageEventsPath = await resolveRelayPath(
+    relayConfig?.tokenUsageEventsPath ?? process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "",
+  );
+  let localModelRouter = null;
+  let localRouterToken = null;
+  if (!router && relayConfig?.observeModelTraffic === true) {
+    localModelRouter = new ModelRouterManager({
+      officialApiBaseUrl: relayConfig?.officialApiBaseUrl || undefined,
+      officialCodexBaseUrl: relayConfig?.officialCodexBaseUrl || undefined,
+      log: (message) => console.error(message),
+    });
+    const configured = await localModelRouter.configure({
+      deepSeek: deepSeekEnabled
+        ? {
+            ...settings,
+            configured: true,
+            model: {
+              displayName: deepSeekModel.display_name,
+              reasoningEfforts: deepSeekModel.supported_reasoning_levels
+                ?.map((item) => item.effort),
+            },
+          }
+        : null,
+      extraModels: { platforms: [...customPlatforms.values()] },
+      officialAuthMode: relayConfig?.officialAuthMode,
+      observeOfficial: true,
+      usageEventPath: tokenUsageEventsPath,
+    });
+    if (!configured) throw new Error("本地模型流量观察 Router 未能启动");
+    localRouterToken = configured.token;
+    router = normalizeRouterConfiguration(configured);
   }
   const catalogPath = await resolveRelayPath(
     relayConfig?.modelCatalogPath ?? process.env.CODEX_QUOTA_MODEL_CATALOG ?? "",
@@ -193,6 +230,7 @@ export async function runAppServerRelay() {
     else delete env[envKey];
   }
   clearRelayEnvironment(env);
+  if (localRouterToken && router) env[router.tokenEnv] = localRouterToken;
   delete env.CODEX_APP_SERVER_FORCE_CLI;
   delete env.CODEX_APP_SERVER_WS_URL;
   env.CODEX_CLI_PATH = upstreamExecutable;
@@ -210,14 +248,11 @@ export async function runAppServerRelay() {
   );
   const healthPath = await resolveRelayPath(relayConfig?.hostHealthPath ?? "");
   const processIdentity = await currentRelayProcessIdentity(wslNative);
-  const usageEventWriter = createUsageEventWriter(
-    await resolveRelayPath(
-      relayConfig?.tokenUsageEventsPath ?? process.env.CODEX_QUOTA_TOKEN_USAGE_EVENTS ?? "",
-    ),
-  );
+  const usageEventWriter = createUsageEventWriter(tokenUsageEventsPath);
+  let ownsRuntimeState = sidecar;
   try {
     if (!sidecar) {
-      await writeRelayState(
+      ownsRuntimeState = await claimRelayState(
         statePath,
         relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
         processIdentity,
@@ -227,6 +262,7 @@ export async function runAppServerRelay() {
     child?.kill();
     sidecar?.close();
     await chatCompatibilityProxy?.close();
+    await localModelRouter?.close();
     throw error;
   }
   const hostHealth = await createHostHealthTracker({
@@ -241,22 +277,29 @@ export async function runAppServerRelay() {
           ? "macos-native"
           : null),
     processIdentity,
+    claim: ownsRuntimeState,
   });
   let relayCleanupTimer = null;
+  let relayOwnershipTimer = null;
+  let relayOwnershipCheck = Promise.resolve();
   let cleanedUp = false;
   const cleanup = async (detail = null) => {
     if (cleanedUp) return;
     cleanedUp = true;
     if (relayCleanupTimer) clearInterval(relayCleanupTimer);
     relayCleanupTimer = null;
+    if (relayOwnershipTimer) clearInterval(relayOwnershipTimer);
+    relayOwnershipTimer = null;
+    await relayOwnershipCheck.catch(() => undefined);
     await Promise.all([
-      removeRelayState(statePath),
+      removeRelayState(statePath, processIdentity),
       // Relay 状态一旦删除，读取端会立即把宿主能力判为断开。这里不再
       // 追加一次健康文件写入，避免 macOS sidecar 在官方进程退出后与
       // 临时 HOME/正式卸载目录回收竞争；已持久化的具体启动根因仍保留。
       hostHealth.close({ disconnected: false }),
       usageEventWriter.close(),
       chatCompatibilityProxy?.close(),
+      localModelRouter?.close(),
     ]);
   };
   if (child) {
@@ -312,6 +355,23 @@ export async function runAppServerRelay() {
   };
   relayCleanupTimer = setInterval(() => pruneRelayState(relayState), RELAY_CLEANUP_INTERVAL_MS);
   relayCleanupTimer.unref?.();
+  if (!sidecar && statePath) {
+    relayOwnershipTimer = setInterval(() => {
+      relayOwnershipCheck = relayOwnershipCheck.then(async () => {
+        if (cleanedUp) return;
+        const claimed = await claimRelayState(
+          statePath,
+          relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+          processIdentity,
+        );
+        if (claimed && !ownsRuntimeState) await hostHealth.claim();
+        ownsRuntimeState = claimed;
+      }).catch((error) => {
+        console.error(`模型中继状态所有权检查失败: ${error.message}`);
+      });
+    }, RELAY_OWNERSHIP_POLL_MS);
+    relayOwnershipTimer.unref?.();
+  }
   pipeLines(process.stdin, upstreamInput, (line) => rewriteClientLine(line, relayState));
   pipeLines(upstreamOutput, process.stdout, (line) => rewriteServerLine(line, relayState));
   if (child) pipeRaw(child.stderr, process.stderr);
@@ -1335,25 +1395,38 @@ function isWindowsPath(path) {
   return /^(?:[a-z]:[\\/]|\\\\\?\\[a-z]:[\\/])/i.test(path);
 }
 
-async function writeRelayState(path, generation, processIdentity = null) {
-  if (!path) return;
+async function claimRelayState(path, generation, processIdentity = null) {
+  if (!path) return false;
   const resolvedGeneration = generation ??
     process.env.CODEX_QUOTA_BRIDGE_GENERATION ??
     `usage-events-v${RELAY_PROTOCOL_VERSION}`;
   const identity = processIdentity ?? await currentRelayProcessIdentity(
     process.env.CODEX_QUOTA_WSL_NATIVE === "1",
   );
-  await writeFile(path, `${JSON.stringify({
-    version: RELAY_STATE_VERSION,
-    pid: identity.pid,
-    generation: resolvedGeneration,
-    processStartedAt: identity.processStartedAt,
-    ...(identity.bootId ? { bootId: identity.bootId } : {}),
-    ...(identity.processStartTicks != null
-      ? { processStartTicks: identity.processStartTicks }
-      : {}),
-    startedAt: Date.now(),
-  })}\n`, { encoding: "utf8", mode: 0o600 });
+  return withRelayStateLock(path, async () => {
+    const current = await readJson(path);
+    if (current?.generation === resolvedGeneration &&
+      current?.pid !== identity.pid && await relayStateProcessIsAlive(current)) {
+      return false;
+    }
+    const now = Date.now();
+    const state = {
+      version: RELAY_STATE_VERSION,
+      pid: identity.pid,
+      generation: resolvedGeneration,
+      processStartedAt: identity.processStartedAt,
+      ...(identity.bootId ? { bootId: identity.bootId } : {}),
+      ...(identity.processStartTicks != null
+        ? { processStartTicks: identity.processStartTicks }
+        : {}),
+      startedAt: current?.pid === identity.pid && Number.isFinite(Number(current.startedAt))
+        ? Number(current.startedAt)
+        : now,
+      updatedAt: now,
+    };
+    await writeJsonAtomically(path, state, identity.pid);
+    return true;
+  });
 }
 
 async function currentRelayProcessIdentity(wslNative) {
@@ -1415,13 +1488,103 @@ function clearRelayEnvironment(env) {
   }
 }
 
-async function removeRelayState(path) {
+async function removeRelayState(path, processIdentity = null) {
   if (!path) return;
   try {
-    const state = JSON.parse(await readFile(path, "utf8"));
-    if (state?.pid === process.pid) await unlink(path);
+    const identity = processIdentity ?? { pid: process.pid };
+    await withRelayStateLock(path, async () => {
+      const state = await readJson(path);
+      if (state?.pid === identity.pid) await unlink(path).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    });
   } catch (error) {
     if (error.code !== "ENOENT") console.error(`清理模型中继状态失败: ${error.message}`);
+  }
+}
+
+async function relayStateProcessIsAlive(state) {
+  const pid = Number(state?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  if (process.platform === "linux" && state?.bootId &&
+    Number.isSafeInteger(Number(state?.processStartTicks))) {
+    try {
+      const [bootIdText, statText] = await Promise.all([
+        readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+        readFile(`/proc/${pid}/stat`, "utf8"),
+      ]);
+      return String(bootIdText).trim() === String(state.bootId) &&
+        parseLinuxProcessStartTicks(statText) === Number(state.processStartTicks);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function withRelayStateLock(path, action) {
+  const lockPath = `${path}.lock`;
+  const deadline = Date.now() + RELAY_STATE_LOCK_TIMEOUT_MS;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  for (;;) {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+      try {
+        await writeFile(join(lockPath, "created-at"), String(Date.now()), { flag: "wx" });
+      } catch (error) {
+        await removeRelayStateLock(lockPath);
+        throw error;
+      }
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      const lockAge = await readLockAge(lockPath);
+      if (lockAge != null && lockAge >= RELAY_STATE_LOCK_STALE_MS) {
+        await removeRelayStateLock(lockPath);
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`等待状态锁超时: ${lockPath}`);
+      await new Promise((resolve) => setTimeout(resolve, RELAY_STATE_LOCK_RETRY_MS));
+    }
+  }
+  try {
+    return await action();
+  } finally {
+    await removeRelayStateLock(lockPath);
+  }
+}
+
+async function readLockAge(path) {
+  try {
+    const value = Number(await readFile(join(path, "created-at"), "utf8"));
+    return Number.isFinite(value) ? Date.now() - value : null;
+  } catch {
+    const details = await stat(path).catch(() => null);
+    return details ? Date.now() - details.mtimeMs : null;
+  }
+}
+
+async function removeRelayStateLock(path) {
+  await unlink(join(path, "created-at")).catch(() => undefined);
+  await rmdir(path).catch(() => undefined);
+}
+
+async function writeJsonAtomically(path, value, pid) {
+  const temporaryPath = `${path}.${pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await rename(temporaryPath, path);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
   }
 }
 

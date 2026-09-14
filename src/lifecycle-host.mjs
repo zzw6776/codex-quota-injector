@@ -10,6 +10,7 @@ import { evaluateHostHealth } from "./host-health.mjs";
 import {
   defaultAccountDataDir,
   isRelayStateCurrent,
+  listCodexDesktopProcessIds,
   listCodexProcessIds,
 } from "./platform.mjs";
 
@@ -116,11 +117,13 @@ export async function inspectLifecycleHost({
       relayConfig.hostHealthPath.trim()
     ? relayConfig.hostHealthPath
     : defaultHostHealthPath;
-  const [relayState, healthState, accountIndex, codexPids, injectorPids, installedVersion, debugReady] =
+  const [relayState, healthState, accountIndex, codexPids, appServerAndDesktopPids,
+    injectorPids, installedVersion, debugReady] =
     await Promise.all([
       readJson(relayStatePath),
       readJson(hostHealthPath),
       readJson(accountIndexPath),
+      listCodexDesktopProcessIds(),
       listCodexProcessIds(),
       findInjectorListenerPids(),
       readInstalledVersion(installedApp),
@@ -143,12 +146,15 @@ export async function inspectLifecycleHost({
     expectedProtocol,
     healthState,
   });
+  const desktopPidSet = new Set(codexPids);
+  const appServerPids = appServerAndDesktopPids.filter((pid) => !desktopPidSet.has(pid));
   return {
     platform: process.platform,
     arch: process.arch,
     installedApp,
     installedVersion,
     codexPids,
+    appServerPids,
     injectorPids,
     relay: {
       configVersion: Number.isInteger(relayConfig?.version) ? relayConfig.version : null,
@@ -205,13 +211,17 @@ export async function readMacAppVersion(appPath) {
   return String(stdout).trim() || null;
 }
 
-export async function readWindowsInstalledVersion() {
-  if (process.platform !== "win32") return null;
+export async function readWindowsInstalledVersion({
+  platform = process.platform,
+  execFileImpl = execFileAsync,
+} = {}) {
+  if (platform !== "win32") return null;
+  const uninstallKey = String.raw`HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex Quota Injector`;
   const script = `
-$value=(Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex Quota Injector' -ErrorAction SilentlyContinue).DisplayVersion;
+$value=(Get-ItemProperty -LiteralPath '${uninstallKey}' -ErrorAction SilentlyContinue).DisplayVersion;
 if ($value) { Write-Output $value }
 `;
-  const { stdout } = await execFileAsync(
+  const { stdout } = await execFileImpl(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
     { windowsHide: true, maxBuffer: 2 * 1024 * 1024 },

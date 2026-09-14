@@ -20,6 +20,16 @@ import { promisify } from "node:util";
 
 import { AccountManager } from "../src/account-manager.mjs";
 import {
+  commitRolloutHistoryRepair,
+  inspectRolloutHistory,
+  prepareRolloutHistoryRepair,
+} from "../src/lifecycle-history.mjs";
+import {
+  inspectThreadHistoryStore,
+  resetThreadHistoryProjection,
+} from "../src/lifecycle-history-store.mjs";
+import { requestThreadHistoryRebuild } from "../src/lifecycle-history-rebuild.mjs";
+import {
   DEFAULT_WINDOWS_INSTALL_DIR,
   findInjectorListenerPids,
   inspectLifecycleHost,
@@ -28,8 +38,10 @@ import {
   readInstalledVersion,
   readJson,
 } from "../src/lifecycle-host.mjs";
+import { waitForCodexTurnsIdle } from "../src/lifecycle-turn-gate.mjs";
 import {
   codexRunsInWindowsSubsystemForLinux,
+  defaultAccountDataDir,
   parseWindowsSubsystemSetting,
   stopCodex,
   updateWindowsSubsystemSetting,
@@ -90,6 +102,7 @@ export async function createWindowsLifecyclePlan({
     tokenRequests: host.accounts.roundTripAvailable ? 1 : 0,
     actions: [
       "验证 Windows Setup 与版本化原生/WSL 中继",
+      "等待所有 Codex 活动回合完成落盘后再执行可能中断桌面的操作",
       "备份旧安装并由 Setup 完成安全接管更新",
       "自动切换并验证 Windows 原生 Relay 的接管、单实例、重连和关闭重开",
       "自动切换并验证 WSL 原生 Relay 的接管、单实例、重连和关闭重开",
@@ -137,7 +150,9 @@ export async function inspectWslLifecyclePrerequisites({
   try {
     const { stdout } = await execFileImpl("wsl.exe", [
       "-e", "sh", "-lc",
-      "set -eu; command -v codex >/dev/null; test -r /proc/sys/kernel/random/boot_id; printf ready",
+      "set -eu; command -v codex >/dev/null; command -v node >/dev/null; " +
+        "node -e \"import('node:sqlite')\" >/dev/null 2>&1; " +
+        "test -r /proc/sys/kernel/random/boot_id; printf ready",
     ], { windowsHide: true, encoding: "utf8", timeout: 10_000 });
     if (String(stdout).trim() !== "ready") throw new Error("WSL 就绪探针没有返回 ready");
     return { status: "ready" };
@@ -188,17 +203,32 @@ export async function setWindowsRuntimeConfiguration(configuration, runtimeTarge
   const allowedHashes = new Set([
     configuration.sha256,
     ...Object.values(configuration.generatedSha256 ?? {}),
+    configuration.lastAppliedSha256,
+    configuration.restoredSha256,
   ]);
   const initialMissing = contents == null && !configuration.existed && !configuration.mutationStarted;
-  if (!initialMissing && (currentHash == null || !allowedHashes.has(currentHash))) {
+  const externalChangeAfterMutation = currentHash != null && !allowedHashes.has(currentHash) &&
+    configuration.mutationStarted &&
+    parseConfigRuntime(contents.toString("utf8")) === configuration.activeRuntime;
+  const preservingExternalContent = externalChangeAfterMutation ||
+    currentHash === configuration.lastAppliedSha256 &&
+      configuration.externalChangesPreserved === true;
+  if (!initialMissing && (currentHash == null ||
+    !allowedHashes.has(currentHash) && !externalChangeAfterMutation)) {
     throw new Error("Codex 配置在生命周期测试期间被外部修改，拒绝切换运行方式");
   }
   const updated = updateWindowsSubsystemSetting(contents?.toString("utf8") ?? "", runtimeTarget === WSL_NATIVE);
-  if (hashBytes(Buffer.from(updated)) !== configuration.generatedSha256?.[runtimeTarget]) {
+  if (!preservingExternalContent && hashBytes(Buffer.from(updated)) !==
+    configuration.generatedSha256?.[runtimeTarget]) {
     throw new Error("Codex 运行方式切换结果与测试前生成的安全版本不一致");
   }
   await writePrivateText(configuration.configPath, updated);
   configuration.mutationStarted = true;
+  configuration.activeRuntime = runtimeTarget;
+  configuration.lastAppliedSha256 = hashBytes(Buffer.from(updated));
+  configuration.restoredSha256 = null;
+  configuration.externalChangesPreserved = configuration.externalChangesPreserved === true ||
+    externalChangeAfterMutation;
   const actual = parseConfigRuntime(await readFile(configuration.configPath, "utf8"));
   if (actual !== runtimeTarget) throw new Error(`Codex 运行方式写入后仍为 ${actual}`);
   return { runtimeTarget, configSha256: hashBytes(Buffer.from(updated)) };
@@ -213,34 +243,52 @@ export async function restoreWindowsRuntimeConfiguration(configuration) {
   const allowedHashes = new Set([
     configuration.sha256,
     ...Object.values(configuration.generatedSha256 ?? {}),
+    configuration.lastAppliedSha256,
   ]);
-  if ((currentHash != null && !allowedHashes.has(currentHash)) ||
-    (currentHash == null && configuration.existed)) {
-    throw new Error("Codex 配置在生命周期测试期间被外部修改，拒绝覆盖未知内容");
-  }
-  if (configuration.existed) {
+  let restored;
+  let externalChangesPreserved = false;
+  if (currentHash != null && currentHash === configuration.restoredSha256) {
+    restored = current;
+    externalChangesPreserved = configuration.externalChangesPreserved === true;
+  } else if (currentHash != null && !allowedHashes.has(currentHash)) {
+    restored = Buffer.from(updateWindowsSubsystemSetting(
+      current.toString("utf8"),
+      configuration.originalRuntime === WSL_NATIVE,
+    ));
+    externalChangesPreserved = true;
+    await writePrivateText(configuration.configPath, restored);
+  } else if (currentHash == null && configuration.existed) {
+    throw new Error("Codex 配置在生命周期测试期间被删除，拒绝覆盖未知状态");
+  } else if (configuration.existed) {
     const original = await readFile(configuration.backupPath);
     if (hashBytes(original) !== configuration.sha256) {
       throw new Error("Codex 运行方式备份哈希不匹配，拒绝恢复未知内容");
     }
     await writePrivateText(configuration.configPath, original);
+    restored = original;
   } else {
     await rm(configuration.configPath, { force: true });
+    restored = null;
   }
+  configuration.activeRuntime = configuration.originalRuntime;
+  configuration.lastAppliedSha256 = restored ? hashBytes(restored) : null;
+  configuration.restoredSha256 = restored ? hashBytes(restored) : null;
+  configuration.externalChangesPreserved = externalChangesPreserved;
   if (!await windowsRuntimeConfigurationMatches(configuration)) {
     throw new Error("Codex 运行方式没有恢复为测试前内容");
   }
   return {
     runtimeTarget: configuration.originalRuntime,
     configRestored: true,
-    configSha256: configuration.sha256,
+    configSha256: configuration.restoredSha256,
+    externalChangesPreserved,
   };
 }
 
 export async function windowsRuntimeConfigurationMatches(configuration) {
   try {
     const contents = await readFile(configuration.configPath);
-    return configuration.existed && hashBytes(contents) === configuration.sha256;
+    return parseConfigRuntime(contents.toString("utf8")) === configuration.originalRuntime;
   } catch (error) {
     return !configuration.existed && error?.code === "ENOENT";
   }
@@ -320,6 +368,15 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
     expectedProtocol,
   });
   const verifyReady = async (options = {}) => waitForWindowsTargetHost(control, options);
+  const waitForDesktopIdle = () => waitForCodexTurnsIdle({ codexHome: control.codexHome });
+  const safeguardDesktopHistory = () => safeguardWindowsDesktopHistory(control, {
+    updateControl,
+    waitForDesktopIdle,
+  });
+  const waitForRuntimeHistory = (runtimeTarget) =>
+    waitForWindowsHistoryDurable(control, runtimeTarget);
+  const prepareRuntimeHistory = (runtimeTarget) =>
+    prepareWindowsHistoryBeforeLaunch(control, runtimeTarget);
   const restartThroughInstalledEntry = async (runtimeTarget = originalRuntimeTarget) => {
     await launchWindowsApp(control.installedApp);
     return verifyReady({ expectedRuntimeTarget: runtimeTarget });
@@ -327,13 +384,45 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
   const baselineKey = (runtimeTarget, action) =>
     `${runtimeTarget.replaceAll("-", "_")}_${action}`;
   const restoreOriginalRuntime = async () => {
+    await waitForDesktopIdle();
     await stopWindowsInjectorOwners();
     await stopCodex();
     const restored = await restoreWindowsRuntimeConfiguration(control.runtimeConfiguration);
-    const host = await restartThroughInstalledEntry(originalRuntimeTarget);
+    const candidateInstalled = Boolean(await installedWindowsCandidateEvidence(control));
+    const recoveryEntry = selectWindowsRuntimeRestoreEntry({
+      candidateInstalled,
+      initialEntry: selectWindowsRecoveryEntry(control.initialHost),
+    });
+    let host;
+    if (recoveryEntry === "candidate-package") {
+      host = await restartThroughInstalledEntry(originalRuntimeTarget);
+    } else if (recoveryEntry === "current-source") {
+      await launchWindowsSourceEntry(control.root, control.sourceRecoveryRelay);
+      host = await waitForWindowsTargetHost({
+        ...control,
+        expectedProtocol: control.initialHost?.relay?.protocol ?? control.expectedProtocol,
+      }, {
+        expectedRuntimeTarget: originalRuntimeTarget,
+        ownerCheck: (snapshot) => windowsInjectorOwnedBySource(snapshot.injectorPids, control.root),
+        ownerFailure: "rollback-source-owner",
+      });
+    } else {
+      await launchWindowsApp(control.installedApp);
+      host = await waitForWindowsTargetHost({
+        ...control,
+        expectedProtocol: control.initialHost?.relay?.protocol ?? null,
+      }, {
+        expectedRuntimeTarget: originalRuntimeTarget,
+        ownerCheck: (snapshot) => windowsInjectorOwnedByInstalledApp(
+          snapshot.injectorPids,
+          control.installedApp,
+        ),
+        ownerFailure: "rollback-installed-owner",
+      });
+    }
     await updateControl({ activeRuntimeTarget: control.runtimeConfiguration.originalRuntime,
       runtimeConfigurationRestored: true });
-    return publicHostEvidence(host, restored);
+    return publicHostEvidence(host, { ...restored, recoveryEntry });
   };
   const switchRuntimeOperation = (runtimeTarget) => ({
     replaySafe: true,
@@ -349,6 +438,7 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
         runtimeTarget,
       );
       await updateControl({ activeRuntimeTarget: runtimeTarget });
+      await waitForDesktopIdle();
       await stopWindowsInjectorOwners();
       await stopCodex();
       return { ...configured, previousRuntimeTarget: hostRuntimeTarget(before) };
@@ -359,8 +449,9 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
     replaySafe: true,
     run: async () => {
       const baseline = control.runtime?.[baselineKey(runtimeTarget, "switchBaseline")] ?? {};
+      const historyPreparation = await prepareRuntimeHistory(runtimeTarget);
       await launchWindowsApp(control.installedApp);
-      const host = await verifyReady({
+      const readyHost = await verifyReady({
         expectedRuntimeTarget: runtimeTarget,
         previousCodexPids: baseline.codexPids?.length ? baseline.codexPids : null,
         previousInjectorPids: baseline.injectorPids?.length ? baseline.injectorPids : null,
@@ -370,18 +461,37 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
         ),
         ownerFailure: "installed-package-owner",
       });
+      const host = await waitForSettledWindowsHost(control, readyHost, {
+        expectedRuntimeTarget: runtimeTarget,
+        ownerCheck: (snapshot) => windowsInjectorOwnedByInstalledApp(
+          snapshot.injectorPids,
+          control.installedApp,
+        ),
+      });
+      const history = {
+        ...await waitForRuntimeHistory(runtimeTarget),
+        rebuild: historyPreparation.rebuild,
+      };
       return publicHostEvidence(host, {
         previousCodexPids: baseline.codexPids ?? [],
         packagedOwner: true,
+        history,
       });
     },
     reconcile: async () => {
       const host = await currentHost();
       const packagedOwner = host.readiness.ready && runtimeModeMatches(host, runtimeTarget) &&
         await windowsInjectorOwnedByInstalledApp(host.injectorPids, control.installedApp);
-      return packagedOwner
-        ? { completed: true, evidence: publicHostEvidence(host, { packagedOwner }) }
-        : { completed: false, safeToRetry: true };
+      if (!packagedOwner) return { completed: false, safeToRetry: true };
+      const settled = await waitForSettledWindowsHost(control, host, {
+        expectedRuntimeTarget: runtimeTarget,
+        ownerCheck: (snapshot) => windowsInjectorOwnedByInstalledApp(
+          snapshot.injectorPids,
+          control.installedApp,
+        ),
+      });
+      const history = await waitForWindowsHistoryDurable(control, runtimeTarget);
+      return { completed: true, evidence: publicHostEvidence(settled, { packagedOwner, history }) };
     },
   });
   const repeatRuntimeOperation = (runtimeTarget) => ({
@@ -415,6 +525,7 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
     run: async () => {
       const before = await verifyReady({ expectedRuntimeTarget: runtimeTarget });
       await updateControl({ [baselineKey(runtimeTarget, "reconnectRelayPid")]: before.relay.pid });
+      await waitForDesktopIdle();
       await terminateWindowsRelay(before.relay);
       let host;
       let recovery = "automatic";
@@ -444,25 +555,40 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
     run: async () => {
       const before = await verifyReady({ expectedRuntimeTarget: runtimeTarget });
       await updateControl({ [baselineKey(runtimeTarget, "closeCodexPids")]: before.codexPids });
+      await waitForDesktopIdle();
       await stopCodex();
       const stopped = await currentHost();
       if (stopped.codexPids.length !== 0) throw new Error("Codex 关闭后仍有主进程存活");
+      const injectorShutdown = await waitForWindowsInjectorOwnersExit(before.injectorPids);
+      const historyPreparation = await prepareRuntimeHistory(runtimeTarget);
       const host = await restartThroughInstalledEntry(runtimeTarget);
       if (samePids(before.codexPids, host.codexPids)) throw new Error("Codex 重开后 PID 没有变化");
-      return publicHostEvidence(host, { previousCodexPids: before.codexPids });
+      const history = {
+        ...await waitForRuntimeHistory(runtimeTarget),
+        rebuild: historyPreparation.rebuild,
+      };
+      return publicHostEvidence(host, {
+        previousCodexPids: before.codexPids,
+        injectorShutdown,
+        history,
+      });
     },
     reconcile: async () => {
       const previous = control.runtime?.[baselineKey(runtimeTarget, "closeCodexPids")];
       if (!previous) return { completed: false, safeToRetry: true };
       const host = await currentHost();
-      return host.readiness.ready && runtimeModeMatches(host, runtimeTarget) &&
-        !samePids(previous, host.codexPids)
-        ? { completed: true, evidence: publicHostEvidence(host, { previousCodexPids: previous }) }
-        : { completed: false, safeToRetry: true };
+      if (!host.readiness.ready || !runtimeModeMatches(host, runtimeTarget) ||
+        samePids(previous, host.codexPids)) return { completed: false, safeToRetry: true };
+      const history = await waitForWindowsHistoryDurable(control, runtimeTarget);
+      return { completed: true, evidence: publicHostEvidence(host, {
+        previousCodexPids: previous,
+        history,
+      }) };
     },
   });
   const restoreOriginalAccount = async () => {
     if (!control.accounts?.available) return { skipped: true };
+    await waitForDesktopIdle();
     await stopWindowsInjectorOwners();
     const manager = new AccountManager();
     try {
@@ -498,9 +624,23 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
         }),
       }),
     },
+    "wait-desktop-idle": {
+      replaySafe: true,
+      run: waitForDesktopIdle,
+      reconcile: async () => ({ completed: false, safeToRetry: true }),
+    },
+    "repair-desktop-history": {
+      replaySafe: true,
+      run: safeguardDesktopHistory,
+      reconcile: async () => control.runtime?.desktopHistory
+        ? { completed: true, evidence: control.runtime.desktopHistory }
+        : { completed: false, safeToRetry: true },
+      rollback: async () => restartWindowsInitialEntry(control),
+    },
     "install-update": {
       replaySafe: true,
       run: async () => {
+        await waitForDesktopIdle();
         if (control.initialHost.installedPresent && !await pathExists(control.backupApp)) {
           const backupStaging = `${control.backupApp}.staging`;
           await rm(backupStaging, { recursive: true, force: true });
@@ -553,6 +693,7 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
     "switch-account": {
       run: async () => {
         if (!control.accounts?.available) throw new Error("没有两个可用于往返测试的 OAuth 账号");
+        await waitForDesktopIdle();
         await stopWindowsInjectorOwners();
         const manager = new AccountManager();
         try {
@@ -707,6 +848,402 @@ export function createWindowsLifecycleOperations(controlPath, initialControl) {
   };
 }
 
+export async function safeguardWindowsDesktopHistory(control, {
+  updateControl = async () => undefined,
+  waitForDesktopIdle = () => waitForCodexTurnsIdle({ codexHome: control.codexHome }),
+  inspectHistory = inspectRolloutHistory,
+  runStoreRequest = (runtimeTarget, request) =>
+    runWindowsHistoryStoreRequest(control, runtimeTarget, request),
+  stopInjectorOwners = stopWindowsInjectorOwners,
+  stopDesktop = stopCodex,
+  inspectHost = inspectLifecycleHost,
+  prepareRepair = prepareRolloutHistoryRepair,
+  commitRepair = commitRolloutHistoryRepair,
+} = {}) {
+  const groups = checkpointGroups(control.sessionCheckpoint);
+  if (groups.length === 0) {
+    const evidence = { status: "not-applicable", capturedTurns: 0, repairs: [] };
+    await updateControl({ desktopHistory: evidence });
+    return evidence;
+  }
+  await waitForDesktopIdle();
+  const currentRuntime = control.runtimeConfiguration?.originalRuntime ?? control.sourceRecoveryMode;
+  const inspected = [];
+  for (const group of groups) {
+    const history = await inspectHistory(group.path);
+    if (history.activeTurn) throw new Error(`Codex 任务 ${group.threadId} 仍有活动回合，拒绝关闭桌面应用`);
+    const projection = await runStoreRequest(currentRuntime, {
+      operation: "inspect",
+      threadId: group.threadId,
+      rolloutPath: group.path,
+      lastOrdinal: history.lastOrdinal,
+      turnIds: group.turnIds,
+    });
+    inspected.push({ group, history, projection });
+  }
+  const repairTargets = inspected.filter(({ history, projection }) =>
+    history.repairRequired || !projection.healthy
+  );
+  for (const { group, history, projection } of repairTargets) {
+    if (history.repairRequired && !history.repairable) {
+      throw new Error(`Codex 任务 ${group.threadId} 的历史损坏无法安全自动修复`);
+    }
+    if (!history.repairRequired &&
+      !["projection-behind", "turn-not-durable", "missing-thread"].includes(projection.reason)) {
+      throw new Error(
+        `Codex 任务 ${group.threadId} 的分页投影异常无法安全自动修复：${projection.reason}`,
+      );
+    }
+  }
+  const repairs = [];
+  if (repairTargets.length > 0) {
+    await stopInjectorOwners();
+    await stopDesktop();
+    for (const { group, history, projection } of repairTargets) {
+      const prepared = history.repairRequired
+        ? await prepareRepair({
+            path: group.path,
+            runDirectory: dirname(control.reportPath),
+            expectedSha256: history.sha256,
+            expectedSize: history.size,
+          })
+        : null;
+      const stores = [];
+      for (const runtimeTarget of [WINDOWS_NATIVE, WSL_NATIVE]) {
+        stores.push(await runStoreRequest(runtimeTarget, {
+          operation: "reset",
+          threadId: group.threadId,
+          backupDirectory: join(dirname(control.reportPath), "history-database-backups"),
+          label: runtimeTarget,
+        }));
+      }
+      const committed = prepared ? await commitRepair(prepared) : null;
+      repairs.push({
+        threadId: group.threadId,
+        reason: history.repairRequired ? "rollout-and-projection" : projection.reason,
+        sourceSha256: history.sha256,
+        repairedSha256: committed?.after.sha256 ?? history.sha256,
+        sequenceIssues: history.sequenceIssues.length,
+        insertedTerminalEvents: committed?.manifest.insertedTerminalEvents.length ?? 0,
+        conversationRecords: committed?.after.conversationRecordCount ??
+          history.conversationRecordCount,
+        backupPath: committed?.backupPath ?? null,
+        displacedPath: committed?.displacedPath ?? null,
+        stores,
+      });
+    }
+  }
+  const host = await inspectHost({
+    installedApp: control.installedApp,
+    expectedProtocol: control.expectedProtocol,
+  });
+  let currentProjection = null;
+  if (host.codexPids.length > 0 && repairs.length === 0) {
+    currentProjection = {
+      status: "durable",
+      runtimeTarget: currentRuntime,
+      threads: inspected.map(({ projection }) => publicHistoryStoreEvidence(projection)),
+    };
+  }
+  const evidence = {
+    status: repairs.length > 0 ? "repaired-awaiting-rebuild" : "durable",
+    capturedTurns: groups.reduce((count, group) => count + group.turnIds.length, 0),
+    repairs,
+    currentProjection,
+  };
+  await updateControl({ desktopHistory: evidence });
+  return evidence;
+}
+
+async function restartWindowsInitialEntry(control) {
+  const runtimeTarget = control.runtimeConfiguration?.originalRuntime ?? control.sourceRecoveryMode;
+  const current = await inspectLifecycleHost({
+    installedApp: control.installedApp,
+    expectedProtocol: control.initialHost?.relay?.protocol ?? control.expectedProtocol,
+  });
+  if (current.readiness.ready && runtimeModeMatches(current, runtimeTarget)) {
+    return publicHostEvidence(current, { recoveryEntry: "already-running" });
+  }
+  const recoveryEntry = selectWindowsRecoveryEntry(control.initialHost);
+  let ownerCheck;
+  let ownerFailure;
+  if (recoveryEntry === "current-source") {
+    await launchWindowsSourceEntry(control.root, control.sourceRecoveryRelay);
+    ownerCheck = (snapshot) => windowsInjectorOwnedBySource(snapshot.injectorPids, control.root);
+    ownerFailure = "rollback-source-owner";
+  } else {
+    await launchWindowsApp(control.installedApp);
+    ownerCheck = (snapshot) => windowsInjectorOwnedByInstalledApp(
+      snapshot.injectorPids,
+      control.installedApp,
+    );
+    ownerFailure = "rollback-installed-owner";
+  }
+  const host = await waitForWindowsTargetHost({
+    ...control,
+    expectedProtocol: control.initialHost?.relay?.protocol ?? control.expectedProtocol,
+  }, { expectedRuntimeTarget: runtimeTarget, ownerCheck, ownerFailure });
+  return publicHostEvidence(host, { recoveryEntry });
+}
+
+export async function prepareWindowsHistoryBeforeLaunch(control, runtimeTarget, {
+  requestRebuild = requestWindowsRuntimeHistoryRebuild,
+  inspectHistory = inspectRolloutHistory,
+  runStoreRequest = (target, request) => runWindowsHistoryStoreRequest(control, target, request),
+  inspectHost = inspectLifecycleHost,
+  waitForDurable = waitForWindowsHistoryDurable,
+} = {}) {
+  const groups = checkpointGroups(control.sessionCheckpoint);
+  if (groups.length === 0) {
+    return { status: "not-applicable", runtimeTarget, rebuild: null, threads: [] };
+  }
+  const host = await inspectHost({
+    installedApp: control.installedApp,
+    expectedProtocol: control.expectedProtocol,
+  });
+  if ((host.codexPids ?? []).length > 0 || (host.appServerPids ?? []).length > 0) {
+    throw new Error("Codex 桌面或 app-server 仍在运行，拒绝并发启动历史重建 app-server");
+  }
+  const latest = [];
+  for (const group of groups) {
+    const rollout = await inspectHistory(group.path);
+    if (rollout.repairRequired || rollout.activeTurn) {
+      throw new Error(`Codex 任务 ${group.threadId} 的 rollout 在启动前仍不完整`);
+    }
+    latest.push(await runStoreRequest(runtimeTarget, {
+      operation: "inspect",
+      threadId: group.threadId,
+      rolloutPath: group.path,
+      lastOrdinal: rollout.lastOrdinal,
+      turnIds: group.turnIds,
+    }));
+  }
+  if (latest.every((entry) => entry.healthy)) {
+    return {
+      status: "durable",
+      runtimeTarget,
+      rebuild: null,
+      threads: latest.map(publicHistoryStoreEvidence),
+    };
+  }
+  for (const entry of latest.filter((candidate) => !candidate.healthy)) {
+    const missingBothDatabases = entry.reason === "missing-history-database" &&
+      !entry.paths?.state && !entry.paths?.history;
+    if (!missingBothDatabases &&
+      !["projection-behind", "turn-not-durable", "missing-thread"].includes(entry.reason)) {
+      throw new Error(
+        `Codex ${runtimeTarget} 分页投影异常无法安全自动重建：${entry.reason}`,
+      );
+    }
+  }
+  const rebuild = await requestRebuild(
+    control,
+    runtimeTarget,
+    groups.map((group) => group.threadId),
+  );
+  const durable = await waitForDurable(control, runtimeTarget, {
+    inspectHistory,
+    runStoreRequest,
+  });
+  return { ...durable, rebuild };
+}
+
+export async function waitForWindowsHistoryDurable(control, runtimeTarget, {
+  timeoutMs = 60_000,
+  pollIntervalMs = 500,
+  inspectHistory = inspectRolloutHistory,
+  runStoreRequest = (target, request) => runWindowsHistoryStoreRequest(control, target, request),
+} = {}) {
+  const groups = checkpointGroups(control.sessionCheckpoint);
+  if (groups.length === 0) return { status: "not-applicable", runtimeTarget, threads: [] };
+  const deadline = Date.now() + timeoutMs;
+  let latest = [];
+  while (Date.now() < deadline) {
+    latest = [];
+    for (const group of groups) {
+      const rollout = await inspectHistory(group.path);
+      if (rollout.repairRequired || rollout.activeTurn) {
+        throw new Error(`Codex 任务 ${group.threadId} 的 rollout 在重启后仍不完整`);
+      }
+      latest.push(await runStoreRequest(runtimeTarget, {
+        operation: "inspect",
+        threadId: group.threadId,
+        rolloutPath: group.path,
+        lastOrdinal: rollout.lastOrdinal,
+        turnIds: group.turnIds,
+      }));
+    }
+    if (latest.every((entry) => entry.healthy)) {
+      return {
+        status: "durable",
+        runtimeTarget,
+        rebuild: null,
+        threads: latest.map(publicHistoryStoreEvidence),
+      };
+    }
+    await delay(pollIntervalMs);
+  }
+  throw new Error(
+    `Codex ${runtimeTarget} 会话历史未在超时内完成分页持久化：` +
+    latest.map((entry) => `${entry.thread?.id ?? "unknown"}:${entry.reason}`).join(", ") +
+    "；桌面启动后只允许只读检查，拒绝并发启动第二个 app-server",
+  );
+}
+
+export async function requestWindowsRuntimeHistoryRebuild(control, runtimeTarget, threadIds, {
+  requestHistory = requestThreadHistoryRebuild,
+} = {}) {
+  if (![WINDOWS_NATIVE, WSL_NATIVE].includes(runtimeTarget)) {
+    throw new Error(`未知 Codex 历史运行环境：${runtimeTarget}`);
+  }
+  const runDirectory = dirname(control.reportPath);
+  const relayConfigPath = join(
+    control.dataDir ?? defaultAccountDataDir(),
+    "app-server-relay-config.json",
+  );
+  const relayConfig = await readJson(relayConfigPath);
+  if (!relayConfig?.upstreamExecutable) {
+    throw new Error("当前正式包中继配置不可读，无法主动重建会话历史");
+  }
+  const rebuildConfigPath = join(runDirectory, `history-rebuild-${runtimeTarget}-relay.json`);
+  const rebuildStatePath = join(runDirectory, `history-rebuild-${runtimeTarget}-state.json`);
+  const rebuildUsagePath = join(runDirectory, `history-rebuild-${runtimeTarget}-usage.jsonl`);
+  await writePrivateJson(rebuildConfigPath, {
+    ...relayConfig,
+    relayStatePath: rebuildStatePath,
+    tokenUsageEventsPath: rebuildUsagePath,
+    generation: `${relayConfig.generation}:history-rebuild:${randomUUID()}`,
+  });
+
+  let command;
+  let args;
+  let env = { ...process.env };
+  if (runtimeTarget === WINDOWS_NATIVE) {
+    command = join(
+      control.installedApp,
+      "relay",
+      `codex-quota-relay-windows-${control.projectVersion}.exe`,
+    );
+    args = ["app-server", "--listen", "stdio://"];
+    env.CODEX_HOME = control.codexHome;
+    env.CODEX_SQLITE_HOME = control.codexHome;
+    env.CODEX_QUOTA_RELAY_CONFIG = rebuildConfigPath;
+    env.CODEX_QUOTA_WINDOWS_NATIVE = "1";
+    env.CODEX_QUOTA_WSL_NATIVE = "0";
+  } else {
+    const [relayExecutable, directories] = await Promise.all([
+      windowsPathToWsl(join(
+        control.installedApp,
+        "relay",
+        `codex-quota-relay-wsl-${control.projectVersion}`,
+      )),
+      defaultWslCodexDirectories(),
+    ]);
+    command = "wsl.exe";
+    args = [
+      "-e", "env",
+      `CODEX_HOME=${directories.codexHome}`,
+      `CODEX_SQLITE_HOME=${directories.sqliteHome}`,
+      `CODEX_QUOTA_RELAY_CONFIG=${rebuildConfigPath}`,
+      "CODEX_QUOTA_WSL_NATIVE=1",
+      "CODEX_QUOTA_WINDOWS_NATIVE=0",
+      relayExecutable,
+      "app-server", "--listen", "stdio://",
+    ];
+  }
+  const result = await requestHistory({ command, args, env, threadIds });
+  return {
+    ...result,
+    method: "thread/resume",
+    relayRuntime: runtimeTarget,
+  };
+}
+
+async function runWindowsHistoryStoreRequest(control, runtimeTarget, request) {
+  if (runtimeTarget === WINDOWS_NATIVE) {
+    const native = { ...request, sqliteHome: control.codexHome };
+    return request.operation === "reset"
+      ? resetThreadHistoryProjection(native)
+      : inspectThreadHistoryStore(native);
+  }
+  if (runtimeTarget !== WSL_NATIVE) throw new Error(`未知 Codex 历史运行环境：${runtimeTarget}`);
+  const [scriptPath, sqliteHome, rolloutPath, backupDirectory] = await Promise.all([
+    windowsPathToWsl(join(control.root, "scripts", "lifecycle-history-store.mjs")),
+    defaultWslSqliteHome(),
+    request.rolloutPath ? windowsPathToWsl(request.rolloutPath) : null,
+    request.backupDirectory ? windowsPathToWsl(request.backupDirectory) : null,
+  ]);
+  const wslRequest = {
+    ...request,
+    sqliteHome,
+    ...(rolloutPath ? { rolloutPath } : {}),
+    ...(backupDirectory ? { backupDirectory } : {}),
+  };
+  const encoded = Buffer.from(JSON.stringify(wslRequest)).toString("base64url");
+  const { stdout } = await execFileAsync("wsl.exe", [
+    "-e", "node", scriptPath, `--request=${encoded}`,
+  ], { windowsHide: true, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 120_000 });
+  return JSON.parse(String(stdout).trim());
+}
+
+async function windowsPathToWsl(path) {
+  const { stdout } = await execFileAsync("wsl.exe", ["-e", "wslpath", "-u", path], {
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  const converted = String(stdout).trim();
+  if (!converted.startsWith("/")) throw new Error(`Windows 路径无法转换到 WSL：${path}`);
+  return converted;
+}
+
+async function defaultWslSqliteHome() {
+  const { stdout } = await execFileAsync("wsl.exe", [
+    "-e", "sh", "-lc", 'printf "%s" "${CODEX_SQLITE_HOME:-$HOME/.codex/sqlite}"',
+  ], { windowsHide: true, encoding: "utf8", timeout: 10_000 });
+  const path = String(stdout).trim();
+  if (!path.startsWith("/")) throw new Error("无法确定 WSL Codex SQLite 目录");
+  return path;
+}
+
+async function defaultWslCodexDirectories() {
+  const { stdout } = await execFileAsync("wsl.exe", [
+    "-e", "sh", "-lc",
+    'printf "%s\\n%s\\n" "${CODEX_HOME:-$HOME/.codex}" "${CODEX_SQLITE_HOME:-$HOME/.codex/sqlite}"',
+  ], { windowsHide: true, encoding: "utf8", timeout: 10_000 });
+  const [codexHome, sqliteHome] = String(stdout).trim().split(/\r?\n/);
+  if (!codexHome?.startsWith("/") || !sqliteHome?.startsWith("/")) {
+    throw new Error("无法确定 WSL Codex 数据目录");
+  }
+  return { codexHome, sqliteHome };
+}
+
+function checkpointGroups(checkpoint) {
+  const groups = new Map();
+  for (const turn of checkpoint?.turns ?? []) {
+    const threadId = threadIdFromRolloutPath(turn.path);
+    if (!threadId || !turn.turnId) throw new Error("Codex 会话检查点缺少任务或回合 ID");
+    const group = groups.get(turn.path) ?? { path: turn.path, threadId, turnIds: [] };
+    group.turnIds.push(turn.turnId);
+    groups.set(turn.path, group);
+  }
+  return [...groups.values()];
+}
+
+function threadIdFromRolloutPath(path) {
+  return String(path ?? "").match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i)?.[1] ?? null;
+}
+
+function publicHistoryStoreEvidence(entry) {
+  return {
+    threadId: entry.thread?.id ?? null,
+    historyMode: entry.thread?.historyMode ?? null,
+    nextRolloutOrdinal: entry.projection?.nextRolloutOrdinal ?? null,
+    rolloutSize: entry.rolloutSize,
+    turns: entry.turns,
+  };
+}
+
 export async function installWindowsPackage(control) {
   await verifyWindowsInstaller(control.installerPath, { projectVersion: control.projectVersion });
   const existing = await installedWindowsCandidateEvidence(control);
@@ -730,12 +1267,12 @@ export async function rollbackWindowsInstallation(control) {
     installedCandidate: Boolean(installedCandidate),
     installStarted: control.runtime?.installStarted === true,
   });
+  await waitForCodexTurnsIdle({ codexHome: control.codexHome });
   await stopWindowsInjectorOwners();
   await stopCodex();
   if (rollbackAction === "restore-backup") {
     await rm(control.installedApp, { recursive: true, force: true });
     await cp(control.backupApp, control.installedApp, { recursive: true, force: true });
-    await restoreWindowsInstallRegistry(control.initialHost.installedVersion, control.installedApp);
   } else if (rollbackAction === "remove-installed") {
     await rm(control.installedApp, { recursive: true, force: true });
     await removeWindowsInstallRegistration();
@@ -745,9 +1282,10 @@ export async function rollbackWindowsInstallation(control) {
   let ownerCheck;
   let ownerFailure;
   let recoveryEntry;
-  if (rollbackAction === "remove-installed") {
+  const initialEntry = selectWindowsRecoveryEntry(control.initialHost);
+  if (initialEntry === "current-source") {
     await launchWindowsSourceEntry(control.root, control.sourceRecoveryRelay);
-    expectedProtocol = control.expectedProtocol;
+    expectedProtocol = control.initialHost?.relay?.protocol ?? control.expectedProtocol;
     ownerCheck = (snapshot) => windowsInjectorOwnedBySource(snapshot.injectorPids, control.root);
     ownerFailure = "rollback-source-owner";
     recoveryEntry = "current-source";
@@ -775,11 +1313,37 @@ export async function rollbackWindowsInstallation(control) {
     ownerCheck,
     ownerFailure,
   });
+  const restoredInstallation = rollbackAction === "restore-backup"
+    ? await restoreAndVerifyWindowsInstallation(control)
+    : null;
   return publicHostEvidence(host, {
-    installedVersion: await readInstalledVersion(control.installedApp),
+    installedVersion: restoredInstallation?.installedVersion ??
+      await readInstalledVersion(control.installedApp),
     rollbackAction,
     recoveryEntry,
   });
+}
+
+async function restoreAndVerifyWindowsInstallation(control) {
+  const version = control.initialHost.installedVersion;
+  await restoreWindowsInstallRegistry(version, control.installedApp);
+  return verifyWindowsInstallation(control.installedApp, { projectVersion: version });
+}
+
+export function selectWindowsRecoveryEntry(initialHost) {
+  const entry = initialHost?.recoveryEntry;
+  if (!["current-source", "installed-package"].includes(entry)) {
+    throw new Error("生命周期控制文件没有记录测试前的启动入口，拒绝猜测恢复方式");
+  }
+  return entry;
+}
+
+export function selectWindowsRuntimeRestoreEntry({ candidateInstalled, initialEntry } = {}) {
+  if (candidateInstalled) return "candidate-package";
+  if (!["current-source", "installed-package"].includes(initialEntry)) {
+    throw new Error("无法确认运行方式恢复后应使用的启动入口");
+  }
+  return initialEntry;
 }
 
 export function selectWindowsInstallRollbackAction({
@@ -917,6 +1481,29 @@ export async function stopWindowsInjectorOwners() {
   throw new Error("Windows 注入器单实例监听未在超时内退出");
 }
 
+export async function waitForWindowsInjectorOwnersExit(expectedPids, {
+  findPids = findInjectorListenerPids,
+  timeoutMs = 5_000,
+  pollIntervalMs = 100,
+  wait = delay,
+} = {}) {
+  const expected = [...new Set((expectedPids ?? [])
+    .map(Number)
+    .filter((pid) => Number.isInteger(pid) && pid > 0))];
+  if (expected.length === 0) throw new Error("Codex 关闭前没有可跟踪的注入器 PID");
+  const expectedSet = new Set(expected);
+  const deadline = Date.now() + timeoutMs;
+  let remaining = expected;
+  while (Date.now() < deadline) {
+    remaining = (await findPids()).filter((pid) => expectedSet.has(pid));
+    if (remaining.length === 0) {
+      return { status: "exited", previousInjectorPids: expected };
+    }
+    await wait(pollIntervalMs);
+  }
+  throw new Error(`Codex 已关闭，但旧注入器仍占用单实例监听：PID ${remaining.join(", ")}`);
+}
+
 export async function windowsInjectorOwnedByInstalledApp(pids, installDir) {
   if (!Array.isArray(pids) || pids.length !== 1) return false;
   const expected = resolve(join(installDir, "Codex Quota Injector.exe")).toLowerCase();
@@ -963,8 +1550,10 @@ export function windowsScheduledTaskScript({
   supervisorScript,
   controlPath,
   workingDirectory,
+  recovery = false,
 } = {}) {
-  const argument = `${quoteWindowsArgument(supervisorScript)} --control ${quoteWindowsArgument(controlPath)}`;
+  const modeArgument = recovery ? " --recover" : "";
+  const argument = `${quoteWindowsArgument(supervisorScript)}${modeArgument} --control ${quoteWindowsArgument(controlPath)}`;
   return `
 $ErrorActionPreference='Stop';
 $user=([System.Security.Principal.WindowsIdentity]::GetCurrent().Name);
@@ -990,11 +1579,14 @@ async function terminateWindowsRelay(relay) {
   });
 }
 
-async function assertStableWindowsHost(control, baseline, durationMs, runtimeTarget = null) {
+export async function assertStableWindowsHost(control, baseline, durationMs, runtimeTarget = null, {
+  inspectHost = inspectLifecycleHost,
+  pollIntervalMs = WAIT_INTERVAL_MS,
+} = {}) {
   const deadline = Date.now() + durationMs;
   let latest = baseline;
   while (Date.now() < deadline) {
-    latest = await inspectLifecycleHost({
+    latest = await inspectHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
     });
@@ -1004,9 +1596,44 @@ async function assertStableWindowsHost(control, baseline, durationMs, runtimeTar
     assertSamePids(baseline.injectorPids, latest.injectorPids, "重复启动产生了新的注入器");
     assertSamePids(baseline.codexPids, latest.codexPids, "重复启动意外重启了 Codex");
     if (baseline.relay.pid !== latest.relay.pid) throw new Error("重复启动意外替换了中继进程");
-    await delay(WAIT_INTERVAL_MS);
+    await delay(pollIntervalMs);
   }
   return latest;
+}
+
+export async function waitForSettledWindowsHost(control, initialHost, {
+  expectedRuntimeTarget = null,
+  ownerCheck = null,
+  stableDurationMs = 8_000,
+  timeoutMs = 45_000,
+  inspectHost = inspectLifecycleHost,
+  pollIntervalMs = WAIT_INTERVAL_MS,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let baseline = initialHost;
+  let stableSince = Date.now();
+  let latest = initialHost;
+  while (Date.now() < deadline) {
+    latest = await inspectHost({
+      installedApp: control.installedApp,
+      expectedProtocol: control.expectedProtocol,
+    });
+    const ready = latest.readiness.ready &&
+      (expectedRuntimeTarget == null || runtimeModeMatches(latest, expectedRuntimeTarget)) &&
+      (ownerCheck == null || await ownerCheck(latest));
+    const sameProcessSet = ready &&
+      samePids(baseline.injectorPids, latest.injectorPids) &&
+      samePids(baseline.codexPids, latest.codexPids) &&
+      baseline.relay.pid === latest.relay.pid;
+    if (!sameProcessSet) {
+      baseline = latest;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince >= stableDurationMs) {
+      return latest;
+    }
+    await delay(pollIntervalMs);
+  }
+  throw new Error("Windows Codex 首次启动后未在限定时间内达到稳定状态");
 }
 
 async function readWindowsProcessInfo(pid) {
@@ -1058,6 +1685,7 @@ Remove-Item -LiteralPath (Join-Path $programs 'Codex Quota Injector') -Recurse -
 function publicHostEvidence(host, extra = {}) {
   return {
     codexPids: host.codexPids,
+    appServerPids: host.appServerPids,
     injectorPids: host.injectorPids,
     relayPid: host.relay.pid,
     relayProtocol: host.relay.protocol,

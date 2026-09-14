@@ -167,6 +167,44 @@ Get-CimInstance Win32_Process |
   return [];
 }
 
+export async function listCodexDesktopProcessIds({
+  platform = process.platform,
+  executable: providedExecutable,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const executable = providedExecutable ?? await resolveCodexExecutable().catch(() => null);
+  if (!executable) return [];
+  if (platform === "darwin") {
+    const { stdout } = await execFileImpl("/bin/ps", ["-axww", "-o", "pid=,comm="]);
+    return parseProcessList(stdout, executable);
+  }
+  if (platform !== "win32") return [];
+  const expected = powershellQuote(executable.toLowerCase());
+  const cacheRoot = powershellQuote(`${windowsCodexAppCacheRoot().toLowerCase()}\\`);
+  const script = `
+$expected='${expected}';
+$cacheRoot='${cacheRoot}';
+Get-CimInstance Win32_Process |
+  Where-Object {
+    ($_.Name -eq 'ChatGPT.exe' -or $_.Name -eq 'Codex.exe') -and
+    $_.ExecutablePath -and
+    ($_.ExecutablePath.ToLowerInvariant() -eq $expected -or
+      $_.ExecutablePath.ToLowerInvariant().StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) -and
+    ($_.CommandLine -notmatch '--type=|crashpad_handler')
+  } |
+  ForEach-Object { Write-Output $_.ProcessId }
+`;
+  const { stdout } = await execFileImpl(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+  ).catch(() => ({ stdout: "" }));
+  return String(stdout)
+    .split(/\r?\n/)
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
 export async function isCodexRunning() {
   if (process.platform !== "darwin" && process.platform !== "win32") return true;
   return (await listCodexProcessIds()).length > 0;
@@ -333,24 +371,34 @@ export async function launchCodex(
     const launchableExecutable = isWindowsStoreExecutable(executable)
       ? await materializeWindowsStoreCodexExecutable(executable)
       : executable;
+    const launchEnvironment = codexLaunchEnvironment(process.env, env);
     let child;
     try {
       child = spawn(launchableExecutable, args, {
         detached: true,
         windowsHide: false,
         stdio: "ignore",
-        env: { ...process.env, ...env },
+        env: launchEnvironment,
       });
       await waitForChildSpawn(child);
       child.unref();
     } catch (error) {
       if (error?.code !== "EPERM") throw error;
-      await launchWindowsExecutableThroughShell(launchableExecutable, args, env);
+      await launchWindowsExecutableThroughShell(launchableExecutable, args, launchEnvironment);
     }
     return;
   }
 
   throw new Error("Codex 启动仅支持 macOS 和 Windows");
+}
+
+export function codexLaunchEnvironment(environment = {}, overrides = {}) {
+  const result = { ...environment, ...overrides };
+  // Codex Desktop creates a fresh app-tools pipe for each process. A launcher
+  // invoked from an existing Codex task otherwise carries that task's dead pipe
+  // into the replacement desktop and prevents codex_app from registering.
+  delete result.CODEX_APP_TOOLS_PIPE_PATH;
+  return result;
 }
 
 export async function restartCodex(port, options = {}) {
@@ -925,7 +973,7 @@ async function launchWindowsExecutableThroughShell(executable, args, env) {
     detached: true,
     windowsHide: true,
     stdio: "ignore",
-    env: { ...process.env, ...env },
+    env,
   });
   await waitForChildSpawn(child);
   child.unref();

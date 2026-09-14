@@ -223,6 +223,8 @@ export async function prepareCodexLaunch({
       : {
           version: RELAY_CONFIG_VERSION,
           upstreamExecutable,
+          officialAuthMode: officialCatalog.officialAuthMode,
+          observeModelTraffic: true,
           providerSettingsPath: deepSeekManager.settingsPath,
           extraModelSettingsPath: runtime.settingsPath,
           modelCatalogPath: staticModelCatalog ? runtime.path : null,
@@ -282,6 +284,7 @@ export async function prepareCodexLaunch({
 
 export function selectBridgeMode({ platform, staticModelCatalog, customRoutingRequired }) {
   if (platform !== "darwin" && platform !== "win32") return "unsupported";
+  if (platform === "win32") return "windows-relay";
   if (!staticModelCatalog) return "direct";
   if (platform === "darwin") {
     return customRoutingRequired ? "macos-router" : "macos-shim";

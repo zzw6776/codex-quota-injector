@@ -239,6 +239,105 @@ export async function runLifecycleReport({
   }
 }
 
+export async function recoverLifecycleRollbacks({
+  reportPath,
+  operations,
+  now = () => new Date(),
+  ownerPid = process.pid,
+} = {}) {
+  if (!reportPath) throw new Error("缺少生命周期报告路径");
+  const releaseLock = await acquireLifecycleLock(`${reportPath}.lock`, ownerPid);
+  let report;
+  try {
+    report = await readLifecycleReport(reportPath);
+    if (report.status !== "rollback-failed") {
+      throw new Error(`生命周期报告状态为 ${report.status}，没有可恢复的失败回滚`);
+    }
+    const failedSteps = [...report.steps].reverse()
+      .filter((step) => step.rollback?.status === "failed");
+    if (failedSteps.length === 0) {
+      throw new Error("生命周期报告没有可恢复的失败回滚");
+    }
+
+    const startedAt = now().toISOString();
+    report.ownerPid = ownerPid;
+    report.recovery = {
+      status: "running",
+      attempts: Number(report.recovery?.attempts ?? 0) + 1,
+      startedAt,
+      finishedAt: null,
+      error: null,
+    };
+    report.updatedAt = startedAt;
+    await writeLifecycleReport(reportPath, report);
+
+    let recoveryFailed = false;
+    for (const step of failedSteps) {
+      const operation = operations?.[step.id];
+      if (typeof operation?.rollback !== "function") {
+        recoveryFailed = true;
+        step.rollback = {
+          ...step.rollback,
+          status: "failed",
+          recoveryAttempts: Number(step.rollback?.recoveryAttempts ?? 0) + 1,
+          recoveryFinishedAt: now().toISOString(),
+          error: publicError(new Error(`生命周期步骤 ${step.id} 没有回滚实现`)),
+        };
+        report.updatedAt = step.rollback.recoveryFinishedAt;
+        await writeLifecycleReport(reportPath, report);
+        continue;
+      }
+
+      step.rollback = {
+        ...step.rollback,
+        status: "running",
+        recoveryAttempts: Number(step.rollback?.recoveryAttempts ?? 0) + 1,
+        recoveryStartedAt: now().toISOString(),
+        recoveryFinishedAt: null,
+      };
+      report.updatedAt = step.rollback.recoveryStartedAt;
+      await writeLifecycleReport(reportPath, report);
+      try {
+        const evidence = await operation.rollback(createContext(reportPath, report, step));
+        step.rollback = {
+          ...step.rollback,
+          status: "passed",
+          recoveryFinishedAt: now().toISOString(),
+          evidence: evidence ?? null,
+          error: null,
+        };
+      } catch (error) {
+        recoveryFailed = true;
+        step.rollback = {
+          ...step.rollback,
+          status: "failed",
+          recoveryFinishedAt: now().toISOString(),
+          error: publicError(error),
+        };
+      }
+      report.updatedAt = step.rollback.recoveryFinishedAt;
+      await writeLifecycleReport(reportPath, report);
+    }
+
+    const finishedAt = now().toISOString();
+    report.status = recoveryFailed ? "rollback-failed" : "failed";
+    report.ownerPid = null;
+    report.recovery = {
+      ...report.recovery,
+      status: recoveryFailed ? "failed" : "passed",
+      finishedAt,
+      error: recoveryFailed
+        ? publicError(new Error("一个或多个生命周期回滚仍未恢复"))
+        : null,
+    };
+    report.updatedAt = finishedAt;
+    await writeLifecycleReport(reportPath, report);
+    return report;
+  } finally {
+    await releaseLock();
+  }
+}
+
 export function validateLifecycleReport(report) {
   if (!report || ![1, LIFECYCLE_REPORT_VERSION].includes(report.version)) {
     throw new Error("生命周期报告版本不受支持");

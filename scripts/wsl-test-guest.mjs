@@ -37,6 +37,10 @@ try {
   if (options.expectedCliSha256 && options.expectedCliSha256 !== cliSha256) {
     throw new Error("WSL 官方 CLI 已变化；请重新运行完整 A 批");
   }
+  const browserSha256 = options.browser ? await hashFile(options.browser) : null;
+  if (options.expectedBrowserSha256 && options.expectedBrowserSha256 !== browserSha256) {
+    throw new Error("Windows 测试浏览器已变化；请重新运行完整 A 批");
+  }
   workspace = await mkdtemp(join(tmpdir(), "codex-quota-wsl-suite-"));
   await copyProject(options.sourceRoot, workspace);
   phase = "dependencies";
@@ -85,6 +89,9 @@ try {
     node: { path: process.execPath, version: process.version, sha256: await hashFile(process.execPath) },
     cli: { path: cli, sha256: cliSha256 },
     relay: { path: relay, sha256: relaySha256, kind: "linux-elf-sea" },
+    ...(options.browser ? {
+      browser: { path: options.browser, sha256: browserSha256, platform: "win32" },
+    } : {}),
     dependencies: { platform: "linux", root: workspace, cache: npmCache },
   };
 
@@ -108,6 +115,13 @@ try {
       CODEX_TEST_RELAY_EXECUTABLE: relay,
       CODEX_HOME: accountCodexHome,
       CODEX_QUOTA_DATA_DIR: accountDataDir,
+      ...(options.browser ? {
+        CODEX_TEST_BROWSER: options.browser,
+        CODEX_TEST_BROWSER_PLATFORM: "win32",
+        CODEX_TEST_BROWSER_TEMP_ROOT: options.browserTempRoot,
+        CODEX_TEST_BROWSER_BRIDGE_NODE: options.browserBridgeNode,
+        CODEX_TEST_BROWSER_BRIDGE_SCRIPT: options.browserBridgeScript,
+      } : {}),
       ...(options.liveProfile ? {
         CODEX_TEST_LIVE_APPROVED: "current-run",
         CODEX_TEST_LIVE_PROFILE: options.liveProfile,
@@ -216,6 +230,11 @@ function parseOptions(args) {
     else if (key === "--expected-relay-sha256") values.expectedRelaySha256 = value;
     else if (key === "--cli") values.cli = resolve(value);
     else if (key === "--relay") values.relay = resolve(value);
+    else if (key === "--browser") values.browser = resolve(value);
+    else if (key === "--expected-browser-sha256") values.expectedBrowserSha256 = value;
+    else if (key === "--browser-temp-root") values.browserTempRoot = resolve(value);
+    else if (key === "--browser-bridge-node") values.browserBridgeNode = resolve(value);
+    else if (key === "--browser-bridge-script") values.browserBridgeScript = resolve(value);
     else throw new Error(`未知参数 ${key}`);
   }
   if (!values.sourceRoot || !values.resultDir || !values.manifest || !values.sourceSha256 ||
@@ -224,6 +243,10 @@ function parseOptions(args) {
   }
   if (values.liveProfile && (!values.codexHome || !values.dataDir)) {
     throw new Error("WSL 真实测试缺少账号配置目录");
+  }
+  if (values.browser && (!values.expectedBrowserSha256 || !values.browserTempRoot ||
+    !values.browserBridgeNode || !values.browserBridgeScript)) {
+    throw new Error("WSL Windows 浏览器桥接参数不完整");
   }
   for (const stage of values.stages) {
     if (!stage?.id || !Array.isArray(stage.files) || !stage.eventFile) {

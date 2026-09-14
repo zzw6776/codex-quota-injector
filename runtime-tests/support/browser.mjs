@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { CdpClient } from "../../src/cdp-client.mjs";
 import { widgetInstallExpression, widgetUpdateExpression } from "../../src/widget.mjs";
 import { waitFor } from "../../test/helpers.mjs";
 import { isolatedEnv, sandboxCommand, stopChild, ROOT } from "./offline-runtime.mjs";
+
+const execFileAsync = promisify(execFile);
 
 export const SHADOW = 'document.getElementById("codex-quota-injector-root").shadowRoot';
 export function fixtureData(overrides = {}) {
@@ -73,16 +77,86 @@ export function browserLaunchArguments(directory, platform = process.platform) {
   ];
 }
 
+export function browserEnvironment(directory, platform = process.platform, environment = process.env,
+  hostPlatform = process.platform) {
+  const overrides = platform === "win32" && hostPlatform === "win32" && environment.USERPROFILE
+    ? { USERPROFILE: environment.USERPROFILE }
+    : platform === "win32" && hostPlatform === "linux"
+      ? Object.fromEntries(["WSL_INTEROP", "WSL_DISTRO_NAME", "WSLENV"]
+        .filter((name) => environment[name])
+        .map((name) => [name, environment[name]]))
+      : {};
+  return isolatedEnv(directory, overrides);
+}
+
+export function browserPlatform(environment = process.env, hostPlatform = process.platform) {
+  const platform = environment.CODEX_TEST_BROWSER_PLATFORM || hostPlatform;
+  assert.ok(["darwin", "linux", "win32"].includes(platform),
+    `无效的 CODEX_TEST_BROWSER_PLATFORM ${platform}`);
+  return platform;
+}
+
+export async function browserLaunchDirectory(directory, platform = browserPlatform(), {
+  hostPlatform = process.platform,
+  convertPath = async path => (await execFileAsync("wslpath", ["-w", path], { encoding: "utf8" })).stdout,
+} = {}) {
+  if (hostPlatform !== "linux" || platform !== "win32") return directory;
+  const converted = String(await convertPath(directory)).trim();
+  assert.match(converted, /^[a-zA-Z]:[\\\\/]/, `WSL 浏览器用户目录无法转换为 Windows 路径：${converted || "空"}`);
+  return converted;
+}
+
+export async function wslWindowsHostAddress({
+  readRoute = async () => (await execFileAsync("ip", ["-4", "route", "show", "default"], { encoding: "utf8" })).stdout,
+} = {}) {
+  const route = String(await readRoute());
+  const address = route.match(/\bdefault\s+via\s+(\d{1,3}(?:\.\d{1,3}){3})\b/)?.[1];
+  assert.ok(address && address.split(".").every((part) => Number(part) >= 0 && Number(part) <= 255),
+    `无法从 WSL 默认路由确定 Windows 地址：${route.trim() || "空"}`);
+  return address;
+}
+
+export function bridgeWebSocketUrl(webSocketDebuggerUrl, bridge) {
+  const url = new URL(webSocketDebuggerUrl);
+  url.hostname = bridge.host;
+  url.port = String(bridge.port);
+  return url.href;
+}
+
 export async function startBrowser(t) {
   const executable = await browserExecutable();
-  const directory = await mkdtemp(join(tmpdir(), "quota-browser-fixture-"));
+  const platform = browserPlatform();
+  const crossWindowsBrowser = process.platform === "linux" && platform === "win32";
+  const directory = await mkdtemp(join(process.env.CODEX_TEST_BROWSER_TEMP_ROOT || tmpdir(), "quota-browser-fixture-"));
+  const launchDirectory = await browserLaunchDirectory(directory, platform);
   let stderr = "";
   // macOS cannot nest Chromium's renderer sandbox inside this test's Seatbelt
   // network sandbox. This disposable browser also uses Chromium's macOS mock
   // keychain so a temporary profile never reads or prompts for the user's keychain.
-  const launchArguments = browserLaunchArguments(directory);
-  const command = sandboxCommand(executable, launchArguments);
-  const child = spawn(command.executable, command.args, { env: isolatedEnv(directory), stdio: ["ignore", "ignore", "pipe"] });
+  const launchArguments = browserLaunchArguments(launchDirectory, platform);
+  let endpointHost = "127.0.0.1";
+  let launchExecutable = executable;
+  let effectiveArguments = launchArguments;
+  if (crossWindowsBrowser) {
+    assert.ok(process.env.CODEX_TEST_BROWSER_BRIDGE_NODE && process.env.CODEX_TEST_BROWSER_BRIDGE_SCRIPT,
+      "WSL Windows 浏览器缺少桥接执行器");
+    endpointHost = await wslWindowsHostAddress();
+    const [windowsBrowser, windowsBridgeScript] = await Promise.all([
+      browserLaunchDirectory(executable, platform),
+      browserLaunchDirectory(process.env.CODEX_TEST_BROWSER_BRIDGE_SCRIPT, platform),
+    ]);
+    launchExecutable = process.env.CODEX_TEST_BROWSER_BRIDGE_NODE;
+    effectiveArguments = [
+      windowsBridgeScript,
+      `--browser=${windowsBrowser}`,
+      `--profile=${launchDirectory}`,
+      `--listen-host=${endpointHost}`,
+      "--",
+      ...launchArguments,
+    ];
+  }
+  const command = sandboxCommand(launchExecutable, effectiveArguments);
+  const child = spawn(command.executable, command.args, { env: browserEnvironment(directory, platform), stdio: ["pipe", "ignore", "pipe"] });
   child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-8000); });
   const clients = [];
   t.after(async () => {
@@ -94,21 +168,42 @@ export async function startBrowser(t) {
         if (screenshot) { await writeFile(target, Buffer.from(screenshot.data, "base64")); t.diagnostic(`浏览器证据 ${target}`); }
       }
     } finally {
+      if (clients[0]?.isConnected) await clients[0].request("Browser.close").catch(() => undefined);
       for (const client of clients) client.close();
+      if (crossWindowsBrowser && child.exitCode == null) {
+        child.stdin.end();
+        await Promise.race([
+          once(child, "exit"),
+          new Promise(resolve => setTimeout(resolve, 2_000)),
+        ]);
+      }
       await stopChild(child);
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
     }
     if (stderr) {
       await mkdir(join(ROOT, ".runtime/test-results"), { recursive: true });
       await writeFile(join(ROOT, `.runtime/test-results/browser-${createHash("sha256").update(t.name).digest("hex").slice(0, 12)}.log`), stderr);
     }
   });
-  const port = await waitFor(async () => {
+  const endpoint = await waitFor(async () => {
     if (child.exitCode != null) throw new Error(`测试浏览器退出：${stderr}`);
-    try { return Number((await readFile(join(directory, "DevToolsActivePort"), "utf8")).split("\n")[0]); } catch { return null; }
+    try {
+      if (crossWindowsBrowser) {
+        const bridge = JSON.parse(await readFile(join(directory, "CodexBrowserBridge.json"), "utf8"));
+        return Number.isInteger(bridge.port) && bridge.port > 0 && bridge.host === endpointHost
+          ? bridge
+          : null;
+      }
+      const port = Number((await readFile(join(directory, "DevToolsActivePort"), "utf8")).split("\n")[0]);
+      return Number.isInteger(port) && port > 0 ? { host: endpointHost, port } : null;
+    } catch { return null; }
   }, { timeoutMs: 10000 });
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(r => r.json());
-  const client = new CdpClient(targets.find(x => x.type === "page" && x.url === "about:blank").webSocketDebuggerUrl);
+  const targets = await fetch(`http://${endpoint.host}:${endpoint.port}/json/list`).then(r => r.json());
+  const pageTarget = targets.find(x => x.type === "page" && x.url === "about:blank");
+  assert.ok(pageTarget?.webSocketDebuggerUrl, "测试浏览器没有 about:blank 调试目标");
+  const client = new CdpClient(crossWindowsBrowser
+    ? bridgeWebSocketUrl(pageTarget.webSocketDebuggerUrl, endpoint)
+    : pageTarget.webSocketDebuggerUrl);
   await client.connect();
   clients.push(client);
   t.diagnostic(`测试浏览器 ${(await client.request("Browser.getVersion")).product}`);
@@ -122,7 +217,7 @@ export async function startBrowser(t) {
   const settled = () => client.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))");
   await settled();
   const nodeExpression = (selector, shadow = true) => `${shadow ? SHADOW : "document"}.querySelector(${JSON.stringify(selector)})`;
-  return { client, child, port, directory, launchArguments, settled,
+  return { client, child, port: endpoint.port, directory, launchArguments, settled,
     async click(selector, { shadow = true } = {}) {
       const rect = await client.evaluate(`(() => { const el=${nodeExpression(selector,shadow)}; if(!el)throw Error('missing '+${JSON.stringify(selector)}); el.scrollIntoView({block:'nearest'}); const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,width:r.width,height:r.height,disabled:el.disabled}; })()`);
       assert.ok(rect.width > 0 && rect.height > 0, `不可点击 ${selector}`);

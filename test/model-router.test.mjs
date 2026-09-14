@@ -103,6 +103,64 @@ function routerSettings(origin, overrides = {}) {
   };
 }
 
+test("Router 可在没有第三方模型时单独观察官方请求并记录生成明细", async (t) => {
+  const directory = await useTempDir(t, "official-observer-");
+  const usageEventPath = join(directory, "usage.jsonl");
+  const upstream = await startHttpServer(t, async (request, response) => {
+    assert.equal(request.url, "/v1/responses");
+    assert.equal(request.headers.authorization, "Bearer sk-official-fixture");
+    await readJsonRequest(request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "resp_official_observer",
+      status: "completed",
+      output: [{ id: "msg-1", type: "message", content: [{ type: "output_text", text: "ok" }] }],
+      usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+    }));
+  });
+  const manager = new ModelRouterManager({ officialApiBaseUrl: `${upstream.origin}/v1/` });
+  t.after(() => manager.close());
+  const config = await manager.configure({
+    deepSeek: { enabled: false, configured: false, apiKey: "" },
+    extraModels: { platforms: [] },
+    officialAuthMode: "apiKey",
+    observeOfficial: true,
+    usageEventPath,
+  });
+  assert.ok(config);
+  assert.deepEqual(config.routedModels, []);
+
+  const response = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer sk-official-fixture",
+      [MODEL_ROUTER_TOKEN_HEADER]: config.token,
+      "turn-id": "turn-official-observer",
+    },
+    body: JSON.stringify({
+      model: "official-model",
+      input: "observe",
+      client_metadata: { thread_id: "thread-official-observer" },
+    }),
+  });
+  assert.equal(response.status, 200);
+  await response.arrayBuffer();
+  await waitFor(async () => {
+    try {
+      return (await readFile(usageEventPath, "utf8")).includes('"type":"generation"');
+    } catch {
+      return false;
+    }
+  });
+  const events = (await readFile(usageEventPath, "utf8")).trim()
+    .split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.ok(events.some((event) => event.type === "generation" &&
+    event.threadId === "thread-official-observer" &&
+    event.turnId === "turn-official-observer" &&
+    event.generation?.responseId === "resp_official_observer"));
+});
+
 async function readEvents(path) {
   const content = await readFile(path, "utf8");
   return content.trim().split("\n").map((line) => JSON.parse(line));

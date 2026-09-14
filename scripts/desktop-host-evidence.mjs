@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { findOfficialAppServerUrl } from "../live-tests/web-search-contract.mjs";
 import { defaultAccountDataDir } from "../src/platform.mjs";
 
-export const DESKTOP_HOST_REPORT_VERSION = 4;
+export const DESKTOP_HOST_REPORT_VERSION = 7;
 
 export function desktopBatch(profile) {
   if (profile === "official") return "B1-official";
@@ -98,25 +98,35 @@ export function parseDesktopRollout(content, {
   const execMarker = `EXEC_${marker}`;
   const failureMarker = `FAIL_${marker}`;
   const execCall = calls.find((call) => isExecCall(call) && call.input.includes(execMarker));
-  const failureCall = calls.find((call) => isExecCall(call) && call.input.includes(failureMarker));
+  const failureAttempts = calls.filter((call) =>
+    isExecCall(call) && call.input.includes(failureMarker));
+  const failureCall = failureAttempts.find((call) => {
+    const output = outputs.get(call.id)?.text ?? "";
+    return output.includes(failureMarker) && hasExitCode(output, 23);
+  }) ?? failureAttempts[0];
   const execOutput = execCall ? outputs.get(execCall.id)?.text ?? "" : "";
   const failureOutputRecord = failureCall ? outputs.get(failureCall.id) : null;
   const failureOutput = failureOutputRecord?.text ?? "";
   const continuedAfterFailure = Boolean(failureOutputRecord && calls.some((call) =>
     call.recordIndex > failureOutputRecord.recordIndex &&
-    (isCodexAppCall(call) || isWebCall(call) || isComputerUseCall(call) ||
-      isUserInputCall(call))));
+    (isCodexAppCall(call) || isWebCall(call) || isComputerUseCall(call))));
   const currentThreadId = session.threadId ?? threadIdFromPath(path);
   const codexAppListCall = calls.find(isCodexAppListThreadsCall);
   const codexAppListOutput = codexAppListCall ? outputs.get(codexAppListCall.id) : null;
-  const codexAppReadCall = calls.find((call) => isCodexAppReadThreadCall(call) &&
+  const codexAppReadAttempts = calls.filter((call) => isCodexAppReadThreadCall(call) &&
     (!codexAppListOutput || call.recordIndex > codexAppListOutput.recordIndex));
+  const matchingCodexAppReadCall = codexAppReadAttempts.find((call) =>
+    currentThreadId && call.input.includes(currentThreadId));
+  const codexAppReadCall = matchingCodexAppReadCall ?? codexAppReadAttempts[0];
   const codexAppReadOutput = codexAppReadCall ? outputs.get(codexAppReadCall.id)?.text ?? "" : "";
+  const codexAppReadEvidence = inspectCodexAppReadOutput(codexAppReadOutput, {
+    marker,
+    threadId: currentThreadId,
+  });
   const codexAppListSucceeded = Boolean(codexAppListCall && codexAppListOutput &&
-    currentThreadId && codexAppListOutput.text.includes(currentThreadId));
-  const codexAppReadSucceeded = Boolean(codexAppReadCall && currentThreadId &&
-    codexAppReadCall.input.includes(currentThreadId) &&
-    isSuccessfulCodexAppOutput(codexAppReadOutput));
+    isSuccessfulCodexAppOutput(codexAppListOutput.text));
+  const codexAppReadSucceeded = Boolean(matchingCodexAppReadCall && currentThreadId &&
+    isSuccessfulCodexAppOutput(codexAppReadOutput) && codexAppReadEvidence.threadMatched);
   const codexAppListProjectsCall = calls.find(isCodexAppListProjectsCall);
   const codexAppListProjectsOutput = codexAppListProjectsCall
     ? outputs.get(codexAppListProjectsCall.id)?.text ?? ""
@@ -134,24 +144,19 @@ export function parseDesktopRollout(content, {
   const webResultOutputs = [webOpenCall, webFindCall]
     .map((call) => call ? outputs.get(call.id)?.text ?? "" : "").join("\n");
   const computerCalls = calls.filter(isComputerUseCall);
-  const computerInputs = computerCalls.map((call) => call.input).join("\n");
-  const userInputCall = calls.find(isUserInputCall);
-  const userInputOutput = userInputCall ? outputs.get(userInputCall.id) : null;
-  const successfulToolUserInput = Boolean(userInputOutput &&
-    isSuccessfulUserInputOutput(userInputOutput.text));
-  const directUserInput = records.slice((userInputOutput?.recordIndex ?? startIndex) + 1)
-    .map((record, offset) => ({ record, recordIndex: (userInputOutput?.recordIndex ?? startIndex) + 1 + offset }))
-    .find(({ record }) => isDirectUserInputRecord(record));
-  const userInputRecordIndex = successfulToolUserInput
-    ? userInputOutput.recordIndex
-    : directUserInput?.recordIndex ?? null;
-  const continuedAfterUserInput = Number.isInteger(userInputRecordIndex) &&
-    records.slice(userInputRecordIndex + 1).some((record) =>
-      record.type === "response_item" && record.payload?.type === "message" &&
-      record.payload?.role === "assistant");
+  const successfulComputerCalls = computerCalls.filter((call) =>
+    isSuccessfulComputerUseOutput(outputs.get(call.id)?.text));
+  const computerInputCalls = computerCalls.filter(isComputerInputCall);
+  const computerSubmitCalls = computerCalls.filter(isComputerSubmitCall);
+  const computerScreenshotCalls = computerCalls.filter(isComputerScreenshotCall);
+  const computerUseFailure = computerCalls
+    .map((call) => classifyComputerUseFailure(outputs.get(call.id)?.text))
+    .find(Boolean) ?? null;
   const modelMatches = matchesProfileModel(profile, currentModel, customModels);
-  const turnCompleted = records.slice(startIndex).some((record) =>
+  const taskComplete = records.slice(startIndex).findLast((record) =>
     record.type === "event_msg" && record.payload?.type === "task_complete");
+  const turnCompleted = Boolean(taskComplete);
+  const taskError = normalizeTaskError(taskComplete?.payload?.error);
 
   return {
     path,
@@ -163,7 +168,9 @@ export function parseDesktopRollout(content, {
     cwd: session.cwd,
     markerFound: true,
     modelMatches,
+    computerUseFailure,
     turnCompleted,
+    taskError,
     callIds: {
       functionsExecSuccess: execCall?.id ?? null,
       functionsExecFailure: failureCall?.id ?? null,
@@ -173,16 +180,18 @@ export function parseDesktopRollout(content, {
       codexAppGetUsageLimits: codexAppGetUsageLimitsCall?.id ?? null,
       webRun: webCalls.map((call) => call.id).filter(Boolean),
       computerUse: computerCalls.map((call) => call.id).filter(Boolean),
-      userInput: userInputCall?.id ?? null,
+      computerInput: computerInputCalls.map((call) => call.id).filter(Boolean),
+      computerSubmit: computerSubmitCalls.map((call) => call.id).filter(Boolean),
+      computerScreenshot: computerScreenshotCalls.map((call) => call.id).filter(Boolean),
     },
-    userInputMode: successfulToolUserInput ? "tool" : directUserInput ? "direct-follow-up" : null,
     checks: {
       functionsExec: Boolean(execCall && execOutput.includes(execMarker)),
       functionsExecFailure: Boolean(failureCall && failureOutput.includes(failureMarker) &&
         hasExitCode(failureOutput, 23) && continuedAfterFailure),
       codexAppListThreads: codexAppListSucceeded,
       codexAppReadThread: codexAppListSucceeded && codexAppReadSucceeded,
-      codexAppReadMarker: codexAppReadOutput.includes(marker),
+      codexAppReadContent: codexAppReadEvidence.hasMessageItems,
+      codexAppReadMarker: codexAppReadEvidence.markerInMessageItems,
       codexAppListProjects: Boolean(codexAppListProjectsCall &&
         isSuccessfulCodexAppOutput(codexAppListProjectsOutput)),
       codexAppGetUsageLimits: Boolean(codexAppGetUsageLimitsCall &&
@@ -191,9 +200,10 @@ export function parseDesktopRollout(content, {
       webOpen: Boolean(webSearchCall && webOpenCall),
       webFind: Boolean(webOpenCall && webFindCall),
       webResult: hasOfficialCodexSource(webResultOutputs) && /thread\/fork/i.test(webResultOutputs),
-      computerUse: computerCalls.length > 0,
-      computerScreenshot: /(?:screenshot|captureScreenshot|emitImage)/i.test(computerInputs),
-      userInput: Boolean((successfulToolUserInput || directUserInput) && continuedAfterUserInput),
+      computerUse: successfulComputerCalls.length > 0,
+      computerInput: computerInputCalls.some((call) => successfulComputerCalls.includes(call)),
+      computerSubmit: computerSubmitCalls.some((call) => successfulComputerCalls.includes(call)),
+      computerScreenshot: computerScreenshotCalls.some((call) => successfulComputerCalls.includes(call)),
     },
   };
 }
@@ -204,14 +214,41 @@ export function evaluateDesktopHostEvidence({
   runtimeBinding,
   rollout,
   toolInventory = null,
+  upstreamAttributions = {},
   triggerMode = "direct",
   httpEvidence = {},
+  nativeComputerUseEvidence = null,
+  computerUseKind = "loopback-http",
   sourceCurrent = true,
 } = {}) {
-  const submissions = Array.isArray(httpEvidence.submissions) ? httpEvidence.submissions : [];
-  const invalidSubmissions = Number(httpEvidence.invalidSubmissions ?? 0);
+  const normalizedHttpEvidence = httpEvidence ?? {};
+  const submissions = Array.isArray(normalizedHttpEvidence.submissions)
+    ? normalizedHttpEvidence.submissions
+    : [];
+  const invalidSubmissions = Number(normalizedHttpEvidence.invalidSubmissions ?? 0);
+  const nativeSubmissions = Array.isArray(nativeComputerUseEvidence?.submissions)
+    ? nativeComputerUseEvidence.submissions
+    : [];
+  const nativeComputerUsePassed = nativeComputerUseEvidence?.schemaVersion === 1 &&
+    nativeComputerUseEvidence?.launchCount === 1 &&
+    nativeSubmissions.length === 1 && nativeSubmissions[0]?.value === marker;
+  const computerUsePassed = computerUseKind === "windows-native"
+    ? nativeComputerUsePassed
+    : invalidSubmissions === 0 && submissions.length === 1 && submissions[0]?.value === marker;
+  const wslComputerUseBlockedUpstream = runtimeBinding?.expected?.runtimeTarget === "wsl-native" &&
+    rollout?.computerUseFailure === "sandbox-cwd-not-local-file-uri";
+  const computerScreenshotUpstream = verifiedComputerScreenshotUpstreamAttribution(
+    upstreamAttributions?.["computer-screenshot"],
+    {
+      runtimeTarget: runtimeBinding?.expected?.runtimeTarget,
+      failure: rollout?.computerUseFailure,
+    },
+  );
   const readThreadPassed = rollout?.checks?.codexAppReadThread === true &&
-    (triggerMode === "delegated" || rollout?.checks?.codexAppReadMarker === true);
+    rollout?.checks?.codexAppReadContent === true;
+  const readThreadUpstream = verifiedReadThreadUpstreamAttribution(
+    upstreamAttributions?.["codex-app-read-thread"],
+  );
   const standaloneWebRun = toolInventory?.offers?.webRun;
   const hostedWebSearch = toolInventory?.offers?.hostedWebSearch;
   const webOffered = profile === "deepseek"
@@ -227,14 +264,15 @@ export function evaluateDesktopHostEvidence({
     check("runtime", "桌面版本、中继协议与运行环境", runtimeBinding?.status === "passed"),
     check("model", profile === "deepseek" ? "任务实际使用 DeepSeek" : "任务实际使用 Codex 官方模型",
       rollout?.modelMatches === true),
+    check("model-turn", "目标模型任务正常结束",
+      rollout?.turnCompleted === true && !rollout?.taskError),
     check("functions-exec", "functions.exec 成功命令与真实输出", rollout?.checks?.functionsExec === true),
     check("functions-exec-failure", "functions.exec 失败退出码及任务续接",
       rollout?.checks?.functionsExecFailure === true),
     check("codex-app-list-threads", "codex_app list_threads 返回当前任务",
       rollout?.checks?.codexAppListThreads === true),
-    check("codex-app-read-thread", triggerMode === "delegated"
-      ? "codex_app read_thread 成功读取当前任务"
-      : "codex_app read_thread 读取当前任务标记", readThreadPassed),
+    capabilityCheck("codex-app-read-thread", "codex_app read_thread 读取当前任务且完成回合内容完整",
+      readThreadPassed, readThreadUpstream ? "blocked-upstream" : null),
     check("codex-app-list-projects", "codex_app list_projects 返回项目目录",
       rollout?.checks?.codexAppListProjects === true),
     check("codex-app-get-usage-limits", "codex_app get_usage_limits 返回账号用量",
@@ -246,36 +284,86 @@ export function evaluateDesktopHostEvidence({
     capabilityCheck("web-find", "web.run find 及官方正文",
       rollout?.checks?.webFind === true && rollout?.checks?.webResult === true,
       webOffered === false ? webUnavailableStatus : null),
-    check("computer-use", "computer use 打开、输入并单次提交",
-      rollout?.checks?.computerUse === true && invalidSubmissions === 0 &&
-      submissions.length === 1 && submissions[0]?.value === marker),
-    check("computer-screenshot", "computer use 截图", rollout?.checks?.computerScreenshot === true),
-    check("download", "浏览器下载测试产物", Number(httpEvidence.artifactRequests ?? 0) >= 1),
-    check("user-input", "用户补充输入回到当前任务", rollout?.checks?.userInput === true),
+    capabilityCheck("computer-use", "computer use 打开、输入并单次提交",
+      rollout?.checks?.computerUse === true && rollout?.checks?.computerInput === true &&
+      rollout?.checks?.computerSubmit === true && computerUsePassed,
+      wslComputerUseBlockedUpstream ? "blocked-upstream" : null),
+    capabilityCheck("computer-screenshot", "computer use 截图",
+      rollout?.checks?.computerScreenshot === true,
+      wslComputerUseBlockedUpstream || computerScreenshotUpstream
+        ? "blocked-upstream"
+        : null),
+    ...(computerUseKind === "windows-native" ? [] : [
+      check("download", "浏览器下载测试产物",
+        Number(normalizedHttpEvidence.artifactRequests ?? 0) >= 1),
+    ]),
   ];
   let status = checks.every((item) => item.status === "passed") ? "passed" : "incomplete";
-  const hardFailure = !sourceCurrent || runtimeBinding?.status === "failed" || invalidSubmissions > 0 ||
-    submissions.length > 1 || (rollout && rollout.modelMatches === false);
+  const invalidComputerUse = computerUseKind === "windows-native"
+    ? Number(nativeComputerUseEvidence?.launchCount ?? 0) > 1 || nativeSubmissions.length > 1 ||
+      nativeSubmissions.some((submission) => submission?.value !== marker)
+    : invalidSubmissions > 0 || submissions.length > 1;
+  const hardFailure = !sourceCurrent || runtimeBinding?.status === "failed" || invalidComputerUse ||
+    (rollout && (rollout.modelMatches === false || rollout.taskError));
   if (hardFailure) status = "failed";
-  const completed = rollout?.modelMatches === true && rollout.turnCompleted &&
-    rollout?.checks?.userInput === true;
+  const completed = rollout?.modelMatches === true && rollout.turnCompleted;
   if (!hardFailure && completed) {
     for (const item of checks) {
       if (item.status !== "not-run") continue;
       item.status = checkWasAttempted(item.id, rollout) ? "failed" : "not-executed";
     }
     if (checks.some((item) => item.status === "failed")) status = "failed";
-    else if (checks.some((item) => ["unsupported", "not-executed"].includes(item.status))) status = "blocked";
+    else if (checks.some((item) => ["blocked-upstream", "unsupported", "not-executed"].includes(item.status))) {
+      status = "blocked";
+    }
     else status = "passed";
   }
-  const unavailable = checks.filter((item) => ["unsupported", "not-executed"].includes(item.status));
+  const unavailable = checks.filter((item) =>
+    ["blocked-upstream", "unsupported", "not-executed"].includes(item.status));
   return {
     status,
     checks,
+    upstreamReason: [
+      readThreadUpstream?.reason,
+      wslComputerUseBlockedUpstream
+        ? "WSL 官方 Computer Use 在执行 JavaScript 前拒绝非本地 Windows file URI：sandboxCwd is not a local file URI"
+        : null,
+      computerScreenshotUpstream?.reason,
+    ].filter(Boolean).join("；") || null,
     blockedReason: status === "blocked"
       ? `目标模型任务已结束，能力不可用或未执行：${unavailable.map((item) => `${item.label}(${item.status})`).join("、")}`
       : null,
   };
+}
+
+function verifiedComputerScreenshotUpstreamAttribution(attribution, {
+  runtimeTarget,
+  failure,
+} = {}) {
+  const control = attribution?.controls?.officialNoRelay;
+  const relayControl = attribution?.controls?.productionRelay;
+  if (runtimeTarget !== "windows-native" || failure !== "windows-capture-interface-unsupported" ||
+    attribution?.status !== "blocked-upstream" ||
+    attribution?.layer !== "official-windows-computer-use-screenshot" ||
+    typeof attribution?.reason !== "string" || !attribution.reason.trim() ||
+    control?.relayRemoved !== true || control?.runtimeTarget !== "windows-native" ||
+    control?.failure !== failure || relayControl?.runtimeTarget !== "windows-native" ||
+    relayControl?.failure !== failure) return null;
+  return attribution;
+}
+
+function verifiedReadThreadUpstreamAttribution(attribution) {
+  if (attribution?.status !== "blocked-upstream" ||
+    attribution?.layer !== "official-codex-desktop-read-thread-wrapper" ||
+    typeof attribution?.reason !== "string" || !attribution.reason.trim()) return null;
+  const official = attribution?.controls?.officialNoRelay?.completedItemCounts;
+  const relay = attribution?.controls?.productionRelay?.completedItemCounts;
+  const desktop = attribution?.controls?.desktopReadThread?.completedItemCounts;
+  if (![official, relay, desktop].every((counts) => Array.isArray(counts) && counts.length > 0) ||
+    JSON.stringify(official) !== JSON.stringify(relay) ||
+    official.some((count) => !Number.isInteger(count) || count <= 0) ||
+    desktop.length !== official.length || desktop.some((count) => count !== 0)) return null;
+  return attribution;
 }
 
 export function parseRequestToolInventory(content, {
@@ -349,7 +437,15 @@ export async function findDesktopRolloutEvidence({
   return parsed.sort((left, right) => evidenceScore(right) - evidenceScore(left))[0] ?? null;
 }
 
-export function desktopHostPrompt({ profile, marker, fixtureUrl, runId, root, triggerMode = "direct" }) {
+export function desktopHostPrompt({
+  profile,
+  marker,
+  fixtureUrl,
+  nativeExecutablePath,
+  runId,
+  root,
+  triggerMode = "direct",
+}) {
   const label = profile === "deepseek" ? "DeepSeek" : "Codex 官方模型";
   const execMarker = `EXEC_${marker}`;
   const failureMarker = `FAIL_${marker}`;
@@ -357,14 +453,15 @@ export function desktopHostPrompt({ profile, marker, fixtureUrl, runId, root, tr
     `这是 ${label} 的真实桌面入口验收，验收编号 ${runId}，标记 ${marker}。`,
     `必须在当前这个桌面任务中完成，不创建另一个模型任务。`,
     `1. 用 functions.exec 在项目 ${root} 执行 node -e "process.stdout.write('${execMarker}')"，并读取真实输出和退出码 0。`,
-    `2. 再用 functions.exec 执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`,
-    triggerMode === "delegated"
-      ? `3. 调用四个常用只读 codex_app 入口：先用 list_threads 找到当前含标记 ${marker} 的任务，再用返回的当前任务 ID 调用 read_thread 并确认调用成功；跨任务委托模式不要求 read_thread 摘要重复返回当前活动输入，标记由 rollout 独立绑定。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`
-      : `3. 调用四个常用只读 codex_app 入口：先用 list_threads 找到当前含标记 ${marker} 的任务，再用返回的当前任务 ID 调用 read_thread 并确认真实输出含同一标记；随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
+    nativeExecutablePath
+      ? `2. 再用 functions.exec 在同一段 PowerShell 脚本中执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"，下一行紧接 exit $LASTEXITCODE；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`
+      : `2. 再用 functions.exec 执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`,
+    `3. 调用四个常用只读 codex_app 入口：先调用 list_threads 并确认正常返回；若发起者在本提示后附带当前任务 ID，必须用该 ID，否则从返回结果识别当前任务。再调用 read_thread 并确认返回的是当前任务；返回页中每个 completed 回合都必须同时含真实 userMessage 和 agentMessage，当前 inProgress 回合可以为空。本轮标记由 rollout 独立绑定，不要求 read_thread 重复返回尚未完成的当前输入。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
     "4. 用实际 web.run 搜索 OpenAI 官方 Codex app-server 文档，open 命中页面，再 find `thread/fork`；不能用 shell 或普通 fetch 代替。",
-    `5. 用实际 computer use 打开 ${fixtureUrl}，读取页面标记，原样输入并只提交一次；随后截图并点击下载测试产物。`,
-    "6. 用 request_user_input 询问是否继续本次桌面验收，收到答复后继续；若当前任务模式明确拒绝该工具，则直接询问用户并在下一轮收到答复后继续；审批允许/拒绝不属于测试项。",
-    `7. 收到补充输入后正常结束任务。运行中的监视器会自动更新验收编号 ${runId} 的报告，不要编辑报告文件。`,
+    nativeExecutablePath
+      ? `5. 用实际 computer use 启动 Windows 原生应用 ${nativeExecutablePath}。用本轮可执行文件路径和标题中可见的 ${marker} 前缀唯一定位窗口；Windows 可能截断标题，必须从辅助功能树读取并核对完整标记后才能输入。聚焦 Marker input，原样输入并只提交一次，同时对该窗口调用一次真实截图。正确提交后应用会自动关闭。不能使用浏览器、HTTP 页面、shell 输入或辅助驱动代替。`
+      : `5. 用实际 computer use 打开 ${fixtureUrl}，读取页面标记，原样输入并只提交一次；随后截图并点击下载测试产物。`,
+    `6. 正常结束任务。运行中的监视器会自动更新验收编号 ${runId} 的报告，不要编辑报告文件。`,
     "不要在回复中伪造通过；报告只采信 rollout、运行时状态和材料服务记录。",
   ].join("\n");
 }
@@ -380,7 +477,7 @@ export function desktopHostProgressHtml(report) {
   body{font:15px system-ui;max-width:980px;margin:34px auto;padding:0 22px;color:#202124;background:#f6f7fb}
   main{background:#fff;border:1px solid #ddd;border-radius:16px;padding:24px;box-shadow:0 8px 30px #0001}
   h1{margin-top:0}code,pre{background:#f0f2f7;border-radius:8px;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere}
-  table{width:100%;border-collapse:collapse}td{padding:9px;border-bottom:1px solid #eee}.passed{color:#17833d}.failed,.blocked,.stale{color:#c62828}.unsupported,.not-executed,.not-run,.incomplete,.running{color:#9a6500}
+  table{width:100%;border-collapse:collapse}td{padding:9px;border-bottom:1px solid #eee}.passed{color:#17833d}.failed,.blocked,.stale{color:#c62828}.blocked-upstream,.unsupported,.not-executed,.not-run,.incomplete,.running{color:#9a6500}
   .meta{color:#666}.status{font-size:20px;font-weight:700}.footer{margin-top:18px;color:#777}</style><main>
   <h1>${escape(report.batch)} 桌面入口验收</h1><p class="status ${escape(report.status)}">${escape(report.status)}</p>
   <p class="meta">${escape(report.platform)}/${escape(report.arch)} · ${escape(report.runtimeTarget)} · v${escape(report.projectVersion)} · ${escape(report.sourceSnapshot?.sha256)}</p>
@@ -402,6 +499,7 @@ function capabilityCheck(id, label, passed, unavailableStatus) {
 function checkWasAttempted(id, rollout) {
   const callIds = rollout?.callIds ?? {};
   if (id === "functions-exec") return Boolean(callIds.functionsExecSuccess);
+  if (id === "model-turn") return Boolean(rollout?.turnCompleted);
   if (id === "functions-exec-failure") return Boolean(callIds.functionsExecFailure);
   if (id === "codex-app-list-threads") return Boolean(callIds.codexAppListThreads);
   if (id === "codex-app-read-thread") return Boolean(callIds.codexAppReadThread);
@@ -409,9 +507,9 @@ function checkWasAttempted(id, rollout) {
   if (id === "codex-app-get-usage-limits") return Boolean(callIds.codexAppGetUsageLimits);
   if (["web-search", "web-open", "web-find"].includes(id)) return (callIds.webRun?.length ?? 0) > 0;
   if (["computer-use", "computer-screenshot", "download"].includes(id)) {
+    if (id === "computer-screenshot") return (callIds.computerScreenshot?.length ?? 0) > 0;
     return (callIds.computerUse?.length ?? 0) > 0;
   }
-  if (id === "user-input") return Boolean(callIds.userInput || rollout?.userInputMode);
   return false;
 }
 
@@ -430,6 +528,13 @@ function nonEmptyString(value) {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return normalized || null;
+}
+
+function normalizeTaskError(value) {
+  if (!value || typeof value !== "object") return null;
+  const code = nonEmptyString(value.codex_error_info ?? value.code);
+  const message = nonEmptyString(value.message);
+  return code || message ? { code, message } : null;
 }
 
 function matchesProfileModel(profile, model, customModels) {
@@ -474,21 +579,68 @@ function isSuccessfulCodexAppOutput(value) {
   return Boolean(text) && !/"isError"\s*:\s*true|tool call (?:failed|error)|工具调用失败/i.test(text);
 }
 
-function isDirectUserInputRecord(record) {
-  if (record?.type !== "response_item") return false;
-  const payload = record.payload;
-  if (payload?.type === "message" && payload.role === "user") return true;
-  if (
-    payload?.type !== "function_call_output"
-    || String(payload.call_id ?? "").trim()
-    || payload.name !== "send_message_to_thread"
-    || payload.namespace !== "codex_app"
-  ) {
-    return false;
+function inspectCodexAppReadOutput(value, { marker, threadId } = {}) {
+  const text = String(value ?? "");
+  const documents = collectJsonDocuments(value);
+  let threadMatched = false;
+  let completedTurnCount = 0;
+  let completedTurnsWithMessages = 0;
+  let markerInMessageItems = false;
+  for (const document of documents) {
+    walkJson(document, (candidate) => {
+      if (candidate?.thread?.id === threadId) threadMatched = true;
+      if (!Array.isArray(candidate?.turns)) return;
+      for (const turn of candidate.turns) {
+        if (!Array.isArray(turn?.items)) continue;
+        const messageItems = turn.items.filter((item) =>
+          item?.type === "userMessage" || item?.type === "agentMessage");
+        if (turn.status === "completed") {
+          completedTurnCount += 1;
+          if (messageItems.some((item) => item?.type === "userMessage") &&
+            messageItems.some((item) => item?.type === "agentMessage")) {
+            completedTurnsWithMessages += 1;
+          }
+        }
+        if (messageItems.some((item) => stringifyPayload(item).includes(marker))) {
+          markerInMessageItems = true;
+        }
+      }
+    });
   }
-  return /^\s*<codex_delegation>[\s\S]*<input>[\s\S]*<\/input>\s*<\/codex_delegation>\s*$/.test(
-    String(payload.output ?? ""),
-  );
+  return {
+    threadMatched: threadMatched || Boolean(threadId && text.includes(threadId)),
+    hasMessageItems: completedTurnCount > 0 &&
+      completedTurnsWithMessages === completedTurnCount,
+    markerInMessageItems,
+  };
+}
+
+function collectJsonDocuments(value) {
+  const documents = [];
+  const queue = [value];
+  const seen = new Set();
+  while (queue.length > 0 && documents.length < 32) {
+    const candidate = queue.shift();
+    if (candidate == null) continue;
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (!/^[{\[]/.test(trimmed)) continue;
+      try { queue.push(JSON.parse(trimmed)); } catch {}
+      continue;
+    }
+    if (typeof candidate !== "object" || seen.has(candidate)) continue;
+    seen.add(candidate);
+    documents.push(candidate);
+    for (const nested of Object.values(candidate)) queue.push(nested);
+  }
+  return documents;
+}
+
+function walkJson(value, visit, seen = new Set()) {
+  if (value == null || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  visit(value);
+  for (const nested of Object.values(value)) walkJson(nested, visit, seen);
 }
 
 function isWebCall(call) {
@@ -496,19 +648,41 @@ function isWebCall(call) {
 }
 
 function isComputerUseCall(call) {
+  const value = `${call.name}\n${call.input}`;
   return /(?:cua|computer.?use)/i.test(call.name) ||
-    (call.name === "js" && /(?:\bcua\.|createBrowserTab|getTab\(|getState\(|\.(?:get)?screenshot\(|getAXStateAndScreenshot\(|emitImage\()/i.test(call.input));
+    /(?:mcp__node_repl__js|\bjs\b)/i.test(call.name) &&
+      /(?:@oai\/sky|\bsky\.|\bcua\.|createBrowserTab|getTab\(|getState\(|get_window_state\(|\.(?:get)?screenshot\(|getAXStateAndScreenshot\(|emitImage\()/i.test(call.input) ||
+    /tools\.mcp__node_repl__js/i.test(value) &&
+      /(?:@oai\/sky|\bsky\.|\bcua\.|createBrowserTab|get_window_state\()/i.test(value);
 }
 
-function isUserInputCall(call) {
-  return /request_user_input/i.test(call.name) || /tools\.request_user_input|request_user_input\s*\(/i.test(call.input);
+function isComputerInputCall(call) {
+  return /(?:\bsky\.(?:type_text|set_value)\s*\(|\.typeText\s*\(|\.setValue\s*\()/i.test(call.input);
 }
 
-function isSuccessfulUserInputOutput(output) {
+function isComputerSubmitCall(call) {
+  return /(?:\bsky\.click\s*\(|\bsky\.press_key\s*\([\s\S]*(?:Return|Enter)|\.click\s*\()/i.test(call.input);
+}
+
+function isComputerScreenshotCall(call) {
+  return /(?:include_screenshot\s*:\s*true|screenshot|captureScreenshot|emitImage)/i.test(call.input);
+}
+
+function isSuccessfulComputerUseOutput(output) {
   const value = String(output ?? "").trim();
   return Boolean(value) &&
-    !/request_user_input[^\n]*(?:unavailable|not available|failed|error)/i.test(value) &&
-    !/["']?isError["']?\s*:\s*true/i.test(value);
+    !/["']?isError["']?\s*:\s*true|tool call (?:failed|error)|Mcp error|Script (?:failed|error)|Computer Use has been stopped|SetIsBorderRequired failed|coordinate input geometry is unavailable/i.test(value);
+}
+
+function classifyComputerUseFailure(output) {
+  const value = String(output ?? "");
+  if (/sandboxCwd is not a local file URI/i.test(value)) {
+    return "sandbox-cwd-not-local-file-uri";
+  }
+  if (/SetIsBorderRequired failed:[\s\S]*(?:0x80004002|不支持此接口)/i.test(value)) {
+    return "windows-capture-interface-unsupported";
+  }
+  return null;
 }
 
 function hasWebOperation(input, operation) {

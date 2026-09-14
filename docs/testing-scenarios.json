@@ -11,6 +11,7 @@
         "test/testing-boundaries.test.mjs",
         "test/desktop-host-evidence.test.mjs",
         "runtime-tests/desktop-fixture.test.mjs",
+        "runtime-tests/browser-runtime.test.mjs",
         "runtime-tests/official-workflows.test.mjs"
       ],
       "note": "临时配置、测试凭据、本地测试端点及仅回收自己创建的子进程；请求未到本地端点或出现外网/认证错误时直接失败。日常客户端关闭后的存活另见 HAR-02。"
@@ -28,10 +29,11 @@
       "free": [
         "test/lifecycle-runner.test.mjs",
         "test/lifecycle-host.test.mjs",
-        "test/lifecycle-progress.test.mjs"
+        "test/lifecycle-progress.test.mjs",
+        "test/lifecycle-turn-gate.test.mjs"
       ],
       "live": "lifecycle",
-      "note": "免费批次验证外部监督、检查点、目标协议、单实例、账号回滚和独立可视进度契约；真实关闭、重启、正式包更新与账号往返由当前平台 lifecycle 报告验收。"
+      "note": "免费批次验证外部监督、检查点、活动回合落盘门禁、目标协议、桌面主进程单实例、账号回滚和独立可视进度契约；真实关闭、重启、正式包更新与账号往返由当前平台 lifecycle 报告验收。"
     },
     {
       "ids": [
@@ -52,6 +54,8 @@
         "LCH-04"
       ],
       "free": [
+        "test/lifecycle-history.test.mjs",
+        "test/lifecycle-history-store.test.mjs",
         "test/runtime-contracts.test.mjs",
         "test/model-configuration.test.mjs",
         "test/host-health.test.mjs",
@@ -59,7 +63,7 @@
         "test/lifecycle-host.test.mjs",
         "runtime-tests/widget-browser.test.mjs"
       ],
-      "note": "就绪、失效状态与参数契约；codex_app 启动通知、状态列表、超时、必需工具、状态所有权和 UI 降级均有免费回归，实际客户端启动恢复随 LCH-01 处理。"
+      "note": "就绪、失效状态与参数契约；codex_app 启动通知、状态列表、超时、必需工具、状态所有权和 UI 降级均有免费回归；生命周期回归复现重复 ordinal、缺失回合终态和分页投影停滞，验证对话内容不变、目标任务定向重建及数据库备份；实际客户端启动恢复随 LCH-01 处理。"
     },
     {
       "ids": [
@@ -155,11 +159,12 @@
         "test/host-health.test.mjs",
         "runtime-tests/browser-host.test.mjs",
         "runtime-tests/desktop-fixture.test.mjs",
+        "runtime-tests/windows-computer-use-fixture.test.mjs",
         "runtime-tests/official-interactions.test.mjs",
         "test/chat-protocol-tools.test.mjs"
       ],
       "live": "host",
-      "note": "A 执行自有网页/浏览器适配器、动态工具共享契约及 codex_app 健康状态机，并覆盖状态文件原子替换事件、防抖、正常/异常自适应兜底与监听错误回退；实际 codex_app list_threads/read_thread/list_projects/get_usage_limits、functions.exec、web.run、computer use 必须在 B 桌面宿主单独验收，computer use 材料通过仅绑定本机的 HTTP 地址提供。"
+      "note": "A 执行自有网页/浏览器适配器、Windows 非浏览器原生材料、动态工具共享契约及 codex_app 健康状态机，并覆盖状态文件原子替换事件、防抖、正常/异常自适应兜底与监听错误回退；实际 codex_app list_threads/read_thread/list_projects/get_usage_limits、functions.exec、web.run、computer use 必须在 B 桌面宿主单独验收，read_thread 返回页中的每个完成回合都必须同时有用户和助手消息，任一完成回合的 items 为空都不能通过。Windows computer use 使用每轮动态生成的 WinForms 应用和独立提交证据，macOS 使用仅绑定本机的 HTTP 材料；Relay 阻断必须与无 Relay 官方基线对照后归因。"
     },
     {
       "ids": [
@@ -169,8 +174,8 @@
         "test/desktop-host-evidence.test.mjs",
         "runtime-tests/official-interactions.test.mjs"
       ],
-      "live": "backend+host",
-      "note": "Plan 用户输入的请求、回答、取消与续接；MCP elicitation 在 never 策略下直接终结。桌面实际呈现属于 B。"
+      "live": "backend",
+      "note": "Plan 用户输入的请求、回答、取消与续接；MCP elicitation 在 never 策略下直接终结。该场景不纳入固定 B 桌面验收，需要时单独执行。"
     },
     {
       "ids": [
@@ -182,7 +187,7 @@
         "runtime-tests/official-extensions.test.mjs"
       ],
       "live": "host",
-      "note": "认证刷新、attestation 和设备验证双向契约；当前 macOS 构建的 userVerification/status 已在隔离 shim 中明确返回 providerUnavailable，注册、删除和生物识别签名未自动执行，真实宿主未触发时不可标为成功。"
+      "note": "认证刷新、attestation 和设备验证双向契约；已审核 CLI 提供 userVerification 时，隔离 shim 明确返回 providerUnavailable；Windows 0.153.4 尚未提供这些实验请求并返回 unknown variant。注册、删除和生物识别签名未自动执行，真实宿主未触发时不可标为成功。"
     },
     {
       "ids": [

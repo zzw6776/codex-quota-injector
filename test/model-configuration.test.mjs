@@ -15,14 +15,17 @@ import { useTempDir } from "./helpers.mjs";
 const execFileAsync = promisify(execFile);
 const PLATFORM_ID = "123e4567-e89b-42d3-a456-426614174010";
 
-test("桥接策略只在模型目录需要注入时接管官方 app-server", () => {
-  for (const platform of ["darwin", "win32"]) {
-    assert.equal(selectBridgeMode({
-      platform,
-      staticModelCatalog: false,
-      customRoutingRequired: false,
-    }), "direct");
-  }
+test("桥接策略在 Windows 持续观察模型流量，macOS 仅在模型目录需要注入时接管", () => {
+  assert.equal(selectBridgeMode({
+    platform: "darwin",
+    staticModelCatalog: false,
+    customRoutingRequired: false,
+  }), "direct");
+  assert.equal(selectBridgeMode({
+    platform: "win32",
+    staticModelCatalog: false,
+    customRoutingRequired: false,
+  }), "windows-relay");
   assert.equal(selectBridgeMode({
     platform: "darwin",
     staticModelCatalog: true,
@@ -267,31 +270,23 @@ test("损坏或未来版本的上下文存储只读保护，不会被覆盖", as
   assert.equal(await readFile(storePath, "utf8"), original);
 });
 
-test("官方模型目录探测为 OAuth 隔离 refresh token，为 API Key 使用 CLI 输出", {
-  skip: process.platform === "win32" ? "Windows 不能直接执行测试用 mjs 假 CLI" : false,
-}, async (t) => {
+test("官方模型目录探测为 OAuth 隔离 refresh token，为 API Key 使用 CLI 输出", async (t) => {
   const directory = await useTempDir(t);
-  const executable = join(directory, "fake-codex.mjs");
+  const executable = "fixture-codex";
   const capturePath = join(directory, "capture.json");
-  await writeFile(executable, `#!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-const auth = JSON.parse(await readFile(join(process.env.CODEX_HOME, "auth.json"), "utf8"));
-await writeFile(process.env.CATALOG_CAPTURE, JSON.stringify({ auth, args: process.argv.slice(2) }));
-const catalog = { models: [{ slug: "catalog-model" }] };
-if (auth.tokens) await writeFile(join(process.env.CODEX_HOME, "models_cache.json"), JSON.stringify(catalog));
-process.stdout.write(JSON.stringify(catalog));
-`);
-  await chmod(executable, 0o755);
-  const previousCapture = process.env.CATALOG_CAPTURE;
-  process.env.CATALOG_CAPTURE = capturePath;
-  t.after(() => {
-    if (previousCapture == null) delete process.env.CATALOG_CAPTURE;
-    else process.env.CATALOG_CAPTURE = previousCapture;
-  });
+  const catalog = { models: [{ slug: "catalog-model" }] };
+  const runCli = async (receivedExecutable, args, options) => {
+    const auth = JSON.parse(await readFile(join(options.env.CODEX_HOME, "auth.json"), "utf8"));
+    await writeFile(capturePath, JSON.stringify({ executable: receivedExecutable, auth, args }));
+    if (auth.tokens) {
+      await writeFile(join(options.env.CODEX_HOME, "models_cache.json"), JSON.stringify(catalog));
+    }
+    return { stdout: JSON.stringify(catalog), stderr: "" };
+  };
 
   const oauth = await fetchOfficialModelCatalog({
     executable,
+    runCli,
     account: {
       authMode: "oauth",
       accountId: "account",
@@ -300,11 +295,13 @@ process.stdout.write(JSON.stringify(catalog));
   });
   assert.equal(oauth.source, "online");
   let captured = JSON.parse(await readFile(capturePath, "utf8"));
+  assert.equal(captured.executable, executable);
   assert.equal(captured.auth.tokens.refresh_token, "");
   assert.deepEqual(captured.args, ["-c", "cli_auth_credentials_store=\"file\"", "debug", "models"]);
 
   const apiKey = await fetchOfficialModelCatalog({
     executable,
+    runCli,
     account: { authMode: "apiKey", openaiApiKey: "sk-local" },
   });
   assert.equal(apiKey.source, "bundled");
@@ -313,9 +310,9 @@ process.stdout.write(JSON.stringify(catalog));
   assert.equal(captured.auth.auth_mode, "apikey");
 });
 
-test("macOS shim 将 RPC 中继放到 sidecar 并让官方 app-server 保持桌面直系子进程", {
-  skip: process.platform !== "darwin",
-}, async (t) => {
+if (process.platform === "darwin") test(
+  "macOS shim 将 RPC 中继放到 sidecar 并让官方 app-server 保持桌面直系子进程",
+  async (t) => {
   const directory = await useTempDir(t, "codex-shim-test-");
   const shim = join(directory, "shim");
   const fakeCodex = join(directory, "fake-codex.mjs");
@@ -367,7 +364,8 @@ await writeFile(process.env.SHIM_RELAY_CAPTURE, JSON.stringify({
 const upstream = createReadStream(null, {
   fd: Number(process.env.CODEX_QUOTA_UPSTREAM_STDOUT_FD),
   autoClose: true,
-});
+  },
+);
 upstream.pipe(process.stdout);
 `);
   await chmod(fakeRelay, 0o755);

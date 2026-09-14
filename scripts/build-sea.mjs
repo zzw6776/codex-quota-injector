@@ -1,10 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 
 import { build } from "esbuild";
-import { Data, NtExecutable, NtExecutableResource, Resource } from "resedit";
+import { assertSuccessfulPostject, stripWindowsAuthenticode } from "./windows-sea-support.mjs";
 
 const options = parseOptions(process.argv.slice(2));
 const root = resolve(import.meta.dirname, "..");
@@ -50,7 +50,7 @@ if (process.platform === "darwin") {
     stdio: "ignore",
   });
 } else if (process.platform === "win32") {
-  await replaceWindowsIcon(output, resolve(root, "assets", "AppIcon.ico"));
+  await stripWindowsAuthenticode(output);
 }
 
 const postjectCli = resolve(root, "node_modules", "postject", "dist", "cli.js");
@@ -65,7 +65,19 @@ const postjectArgs = [
 if (process.platform === "darwin") {
   postjectArgs.push("--macho-segment-name", "NODE_SEA");
 }
-execFileSync(process.execPath, postjectArgs, { cwd: root, stdio: "inherit" });
+if (process.platform === "win32") {
+  const postjectResult = spawnSync(process.execPath, postjectArgs, {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (postjectResult.stdout) process.stdout.write(postjectResult.stdout);
+  if (postjectResult.stderr) process.stderr.write(postjectResult.stderr);
+  assertSuccessfulPostject(postjectResult);
+} else {
+  execFileSync(process.execPath, postjectArgs, { cwd: root, stdio: "inherit" });
+}
 
 if (process.platform === "darwin") {
   await chmod(output, 0o755);
@@ -102,26 +114,4 @@ async function patchWindowsGuiSubsystem(path) {
   }
   image.writeUInt16LE(2, optionalHeaderOffset + 68);
   await writeFile(path, image);
-}
-
-async function replaceWindowsIcon(executablePath, iconPath) {
-  const executable = NtExecutable.from(await readFile(executablePath), { ignoreCert: true });
-  const resources = NtExecutableResource.from(executable);
-  const iconFile = Data.IconFile.from(await readFile(iconPath));
-  const icons = iconFile.icons.map((item) => item.data);
-  const iconGroups = Resource.IconGroupEntry.fromEntries(resources.entries);
-  const targets = iconGroups.length > 0
-    ? iconGroups.map(({ id, lang }) => ({ id, lang }))
-    : [{ id: 1, lang: 1033 }];
-
-  for (const { id, lang } of targets) {
-    Resource.IconGroupEntry.replaceIconsForResource(
-      resources.entries,
-      id,
-      lang,
-      icons,
-    );
-  }
-  resources.outputResource(executable);
-  await writeFile(executablePath, Buffer.from(executable.generate()));
 }

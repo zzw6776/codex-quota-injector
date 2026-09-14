@@ -15,7 +15,11 @@ import {
   parseDesktopRollout,
   parseRequestToolInventory,
 } from "../scripts/desktop-host-evidence.mjs";
-import { readDesktopWidgetState } from "../scripts/test-desktop-host.mjs";
+import {
+  desktopRuntimeInfrastructureReady,
+  readDesktopWidgetState,
+  retryDesktopRuntimeInspection,
+} from "../scripts/test-desktop-host.mjs";
 import { useTempDir } from "./helpers.mjs";
 
 const marker = "BHOST_0123456789abcdef";
@@ -37,7 +41,36 @@ test("[A HAR-04 UI-01] 桌面版本门禁从 Widget 的 Shadow DOM 读取实际�
   });
 });
 
-test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06 INT-02] 桌面报告从真实任务记录和独立 HTTP 证据判定供应商及工具链", () => {
+test("[A HAR-04 ENV-03] 桌面运行时轮换期间等待同代 Relay 恢复后再判定", async () => {
+  const results = [
+    { status: "failed", actual: { host: { readiness: { ready: false } } } },
+    { status: "failed", actual: { host: { readiness: { ready: false } } } },
+    { status: "passed", actual: { host: { readiness: { ready: true } } } },
+  ];
+  let calls = 0;
+  const result = await retryDesktopRuntimeInspection(
+    async () => results[Math.min(calls++, results.length - 1)],
+    { attempts: 6, intervalMs: 0, wait: async () => undefined },
+  );
+  assert.equal(result.status, "passed");
+  assert.equal(calls, 3);
+});
+
+test("[A HAR-04 ENV-03 TOOL-05] 桌面启动前检查不绑定发起任务的 codex_app 会话", () => {
+  const readiness = {
+    ready: false,
+    codexRunning: true,
+    debugReady: true,
+    singleInjector: true,
+    relayReady: true,
+    protocolMatches: true,
+    hostToolsReady: false,
+  };
+  assert.equal(desktopRuntimeInfrastructureReady(readiness), true);
+  assert.equal(desktopRuntimeInfrastructureReady({ ...readiness, relayReady: false }), false);
+});
+
+test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独立 HTTP 证据判定供应商及工具链", () => {
   const rollout = parseDesktopRollout(fixtureRollout("deepseek-v4-flash"), {
     marker,
     profile: "deepseek",
@@ -52,6 +85,7 @@ test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06 INT-02] 桌面报告从真实任务记�
     functionsExecFailure: true,
     codexAppListThreads: true,
     codexAppReadThread: true,
+    codexAppReadContent: true,
     codexAppReadMarker: true,
     codexAppListProjects: true,
     codexAppGetUsageLimits: true,
@@ -60,8 +94,9 @@ test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06 INT-02] 桌面报告从真实任务记�
     webFind: true,
     webResult: true,
     computerUse: true,
+    computerInput: true,
+    computerSubmit: true,
     computerScreenshot: true,
-    userInput: true,
   });
   assert.ok(!JSON.stringify(rollout).includes("SECRET_RESULT_BODY"), "报告不能复制工具正文");
 
@@ -79,6 +114,40 @@ test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06 INT-02] 桌面报告从真实任务记�
   });
   assert.equal(result.status, "passed");
   assert.ok(result.checks.every(check => check.status === "passed"));
+});
+
+test("[A HAR-04 TOOL-06] Windows 桌面报告只接受原生应用的独立启动与提交证据", () => {
+  const rollout = parseDesktopRollout(fixtureRollout("gpt-6-astra"), {
+    marker,
+    profile: "official",
+  });
+  const shared = {
+    profile: "official",
+    marker,
+    runtimeBinding: { status: "passed" },
+    rollout,
+    httpEvidence: null,
+    computerUseKind: "windows-native",
+    nativeComputerUseEvidence: {
+      schemaVersion: 1,
+      marker,
+      launchCount: 1,
+      submissions: [{ value: marker }],
+    },
+  };
+  const passed = evaluateDesktopHostEvidence(shared);
+  assert.equal(passed.status, "passed");
+  assert.equal(passed.checks.some((item) => item.id === "download"), false);
+
+  const repeated = evaluateDesktopHostEvidence({
+    ...shared,
+    nativeComputerUseEvidence: {
+      ...shared.nativeComputerUseEvidence,
+      launchCount: 2,
+    },
+  });
+  assert.equal(repeated.status, "failed");
+  assert.equal(repeated.checks.find((item) => item.id === "computer-use").status, "not-run");
 });
 
 test("[A HAR-04 MOD-03] B1/B2 桌面证据不能继承其他模型、旧源码或另一组件结果", () => {
@@ -114,6 +183,18 @@ test("[A HAR-04 TOOL-04] 失败命令之后没有真实工具调用时不得声�
   assert.equal(rollout.checks.functionsExecFailure, false);
 });
 
+test("[A HAR-04 TOOL-04] Windows 失败命令重试后采信真实保留的退出码", () => {
+  const records = fixtureRollout("gpt-6-astra").trim().split("\n").map(JSON.parse);
+  const exactFailureIndex = records.findIndex((record) =>
+    record.type === "response_item" && record.payload?.input?.includes(`FAIL_${marker}`));
+  records.splice(exactFailureIndex, 0,
+    functionTool("exec-normalized", "exec", `node -e \"process.stderr.write('FAIL_${marker}');process.exit(23)\"`),
+    functionOutput("exec-normalized", JSON.stringify({ exit_code: 1, output: `FAIL_${marker}` })),
+  );
+  const rollout = parseDesktopRollout(records.map(JSON.stringify).join("\n"), { marker, profile: "official" });
+  assert.equal(rollout.checks.functionsExecFailure, true);
+});
+
 test("[A HAR-04 TOOL-04] 常用只读入口返回工具错误时不得通过桌面验收", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replace('"output":"rateLimits: available"',
@@ -123,72 +204,151 @@ test("[A HAR-04 TOOL-04] 常用只读入口返回工具错误时不得通过桌�
   assert.equal(rollout.checks.codexAppGetUsageLimits, false);
 });
 
+test("[A HAR-04 TOOL-04] 委托任务按自身 ID 重试 read_thread，不要求 list_threads 立即列出它", () => {
+  const records = fixtureRollout("gpt-6-astra").trim().split("\n").map(JSON.parse);
+  const listOutput = records.find((record) => record.payload?.call_id === "codex-list" &&
+    record.payload?.type === "function_call_output");
+  listOutput.payload.output = JSON.stringify({ schemaVersion: 4, threads: [] });
+  const correctReadIndex = records.findIndex((record) => record.payload?.call_id === "codex-read" &&
+    record.payload?.type === "function_call");
+  records.splice(correctReadIndex, 0,
+    functionTool("codex-read-wrong", "read_thread", '{"threadId":"another-thread"}', "mcp__codex_app"),
+    functionOutput("codex-read-wrong", readThreadOutput(marker)),
+  );
+  const rollout = parseDesktopRollout(records.map(JSON.stringify).join("\n"), { marker, profile: "official" });
+  assert.equal(rollout.checks.codexAppListThreads, true);
+  assert.equal(rollout.callIds.codexAppReadThread, "codex-read");
+  assert.equal(rollout.checks.codexAppReadThread, true);
+});
+
 test("[A HAR-04 TOOL-06] 当前 computer use 的 getScreenshot 调用会计入真实截图证据", () => {
   const content = fixtureRollout("gpt-6-astra").replace("await tab.screenshot();", "await tab.getScreenshot();");
   const rollout = parseDesktopRollout(content, { marker, profile: "official" });
   assert.equal(rollout.checks.computerScreenshot, true);
 });
 
-test("[A HAR-04 INT-02] 用户输入工具失败不能通过，直接补充输入并续接可以通过", () => {
-  const failedTool = fixtureRollout("gpt-6-astra")
-    .replace('"output":"继续"', '"output":"request_user_input is unavailable in Default mode"');
-  const failed = parseDesktopRollout(failedTool, { marker, profile: "official" });
-  assert.equal(failed.checks.userInput, false);
-  assert.equal(failed.userInputMode, null);
+test("[A HAR-04 TOOL-06] Computer Use 截图调用失败不能因调用发生而通过", () => {
+  const content = fixtureRollout("gpt-6-astra")
+    .replace('"output":"SECRET_RESULT_BODY"',
+      '"output":"tool call error: SetIsBorderRequired failed: 0x80004002"');
+  const rollout = parseDesktopRollout(content, { marker, profile: "official" });
+  assert.equal(rollout.checks.computerUse, false);
+  assert.equal(rollout.checks.computerScreenshot, false);
+  assert.equal(rollout.callIds.computerScreenshot.length, 1);
+});
 
-  const records = failedTool.trim().split("\n").map(JSON.parse);
-  records.push({ type: "response_item", payload: {
-    type: "message", role: "user", content: [{ type: "input_text", text: "继续验收" }],
-  } });
-  records.push({ type: "response_item", payload: {
-    type: "message", role: "assistant", content: [{ type: "output_text", text: "继续执行" }],
-  } });
-  const continued = parseDesktopRollout(records.map(JSON.stringify).join("\n"), {
+test("[A HAR-04 TOOL-06] Windows 截图仅在官方无 Relay 对照一致时标记上游阻断", () => {
+  const records = fixtureRollout("gpt-6-astra")
+    .replace(" await tab.screenshot();", "")
+    .trim().split("\n").map(JSON.parse);
+  records.splice(-2, 0,
+    functionTool("cua-screenshot", "js",
+      "await sky.get_window_state({window,include_screenshot:true})"),
+    functionOutput("cua-screenshot",
+      "SetIsBorderRequired failed: 不支持此接口 (0x80004002)"),
+  );
+  const rollout = parseDesktopRollout(records.map(JSON.stringify).join("\n"), {
     marker,
     profile: "official",
   });
-  assert.equal(continued.checks.userInput, true);
-  assert.equal(continued.userInputMode, "direct-follow-up");
+  assert.equal(rollout.computerUseFailure, "windows-capture-interface-unsupported");
+  assert.equal(rollout.checks.computerUse, true);
+  assert.equal(rollout.checks.computerScreenshot, false);
+  const shared = {
+    profile: "official",
+    marker,
+    runtimeBinding: { status: "passed", expected: { runtimeTarget: "windows-native" } },
+    rollout,
+    computerUseKind: "windows-native",
+    nativeComputerUseEvidence: {
+      schemaVersion: 1,
+      marker,
+      launchCount: 1,
+      submissions: [{ value: marker }],
+    },
+  };
+  const attribution = {
+    status: "blocked-upstream",
+    layer: "official-windows-computer-use-screenshot",
+    reason: "同版本官方无 Relay Computer Use 返回相同截图接口错误",
+    controls: {
+      officialNoRelay: {
+        relayRemoved: true,
+        runtimeTarget: "windows-native",
+        failure: "windows-capture-interface-unsupported",
+      },
+      productionRelay: {
+        runtimeTarget: "windows-native",
+        failure: "windows-capture-interface-unsupported",
+      },
+    },
+  };
+  const blocked = evaluateDesktopHostEvidence({
+    ...shared,
+    upstreamAttributions: { "computer-screenshot": attribution },
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.checks.find((item) => item.id === "computer-use").status, "passed");
+  assert.equal(blocked.checks.find((item) => item.id === "computer-screenshot").status,
+    "blocked-upstream");
+
+  const unverified = structuredClone(attribution);
+  unverified.controls.officialNoRelay.relayRemoved = false;
+  const failed = evaluateDesktopHostEvidence({
+    ...shared,
+    upstreamAttributions: { "computer-screenshot": unverified },
+  });
+  assert.equal(failed.status, "failed");
 });
 
-test("[A HAR-04 INT-02] Codex 跨任务委托记录可作为真实补充输入且必须在随后续接", () => {
-  const content = fixtureRollout("deepseek-v4-flash")
-    .replace('"output":"继续"', '"output":"request_user_input is unavailable in Default mode"');
-  const records = content.trim().split("\n").map(JSON.parse);
-  records.push({ type: "response_item", payload: {
-    type: "function_call_output",
-    id: "fco_delegation",
-    name: "send_message_to_thread",
-    namespace: "codex_app",
-    output: [
-      "<codex_delegation>",
-      "  <source_thread_id>thread-source</source_thread_id>",
-      "  <input>继续本次桌面验收</input>",
-      "</codex_delegation>",
-    ].join("\n"),
-  } });
-  const withoutContinuation = parseDesktopRollout(records.map(JSON.stringify).join("\n"), {
+test("[A HAR-04 TOOL-06] WSL 官方 sandboxCwd 阻断单独标记为上游能力阻断", () => {
+  const content = fixtureRollout("gpt-6-astra")
+    .replace('"output":"SECRET_RESULT_BODY"',
+      '"output":"Mcp error: sandboxCwd is not a local file URI: file:///mnt/d/project"');
+  const rollout = parseDesktopRollout(content, { marker, profile: "official" });
+  assert.equal(rollout.computerUseFailure, "sandbox-cwd-not-local-file-uri");
+  const shared = {
+    profile: "official",
     marker,
-    profile: "deepseek",
+    rollout,
+    computerUseKind: "windows-native",
+  };
+  const blocked = evaluateDesktopHostEvidence({
+    ...shared,
+    runtimeBinding: { status: "passed", expected: { runtimeTarget: "wsl-native" } },
   });
-  assert.equal(withoutContinuation.checks.userInput, false);
+  assert.equal(blocked.status, "blocked");
+  assert.match(blocked.upstreamReason, /sandboxCwd/);
+  assert.equal(blocked.checks.find((item) => item.id === "computer-use").status,
+    "blocked-upstream");
 
-  records.push({ type: "response_item", payload: {
-    type: "message", role: "assistant", content: [{ type: "output_text", text: "已继续" }],
-  } });
-  const continued = parseDesktopRollout(records.map(JSON.stringify).join("\n"), {
-    marker,
-    profile: "deepseek",
+  const windowsFailure = evaluateDesktopHostEvidence({
+    ...shared,
+    runtimeBinding: { status: "passed", expected: { runtimeTarget: "windows-native" } },
   });
-  assert.equal(continued.checks.userInput, true);
-  assert.equal(continued.userInputMode, "direct-follow-up");
+  assert.equal(windowsFailure.status, "failed");
 });
 
-test("[A HAR-04 TOOL-04] 跨任务委托只放宽 read_thread 活动输入回显，直接模式仍要求标记", () => {
+test("[A HAR-04 TOOL-06] functions.exec 编排的官方 node_repl Computer Use 仍按真实结果留证", () => {
+  const content = fixtureRollout("gpt-6-astra")
+    .replace('"name":"js","arguments":"let tab=await cua.createBrowserTab(\'iab\',\'http://127.0.0.1\'); await tab.screenshot();"',
+      '"name":"exec","input":"await tools.mcp__node_repl__js({code: \\"await sky.type_text({window,text: marker}); await sky.press_key({window,key: \\\'Return\\\'}); await sky.get_window_state({window,include_screenshot:true})\\"})"');
+  const rollout = parseDesktopRollout(content, { marker, profile: "official" });
+  assert.equal(rollout.checks.computerUse, true);
+  assert.equal(rollout.checks.computerInput, true);
+  assert.equal(rollout.checks.computerSubmit, true);
+  assert.equal(rollout.checks.computerScreenshot, true);
+});
+
+test("[A HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定，不依赖活动输入回显", () => {
   const content = fixtureRollout("deepseek-v4-flash")
-    .replace(`current task contains ${marker}`, "items: []");
+    .replace(
+      JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
+      JSON.stringify(functionOutput("codex-read", readThreadOutput(marker, { items: [] }))),
+    );
   const rollout = parseDesktopRollout(content, { marker, profile: "deepseek" });
   assert.equal(rollout.checks.codexAppReadThread, true);
+  assert.equal(rollout.checks.codexAppReadContent, false);
   assert.equal(rollout.checks.codexAppReadMarker, false);
   const shared = {
     profile: "deepseek",
@@ -199,7 +359,118 @@ test("[A HAR-04 TOOL-04] 跨任务委托只放宽 read_thread 活动输入回显
     httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
   };
   assert.equal(evaluateDesktopHostEvidence({ ...shared, triggerMode: "direct" }).status, "failed");
-  assert.equal(evaluateDesktopHostEvidence({ ...shared, triggerMode: "delegated" }).status, "passed");
+  assert.equal(evaluateDesktopHostEvidence({ ...shared, triggerMode: "delegated" }).status, "failed");
+
+  const partiallyEmptyContent = fixtureRollout("deepseek-v4-flash")
+    .replace(
+      JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
+      JSON.stringify(functionOutput("codex-read", readThreadOutput(marker, { turns: [
+        { id: "turn-empty", status: "completed", items: [] },
+        { id: "turn-full", status: "completed", items: [
+          { type: "userMessage", content: [{ type: "text", text: marker }] },
+          { type: "agentMessage", text: "reply" },
+        ] },
+      ] }))),
+    );
+  const partiallyEmpty = parseDesktopRollout(partiallyEmptyContent, {
+    marker,
+    profile: "deepseek",
+  });
+  assert.equal(partiallyEmpty.checks.codexAppReadContent, false);
+  assert.equal(evaluateDesktopHostEvidence({
+    ...shared,
+    rollout: partiallyEmpty,
+    triggerMode: "delegated",
+  }).status, "failed");
+
+  const delegatedContent = fixtureRollout("deepseek-v4-flash")
+    .replace(
+      JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
+      JSON.stringify(functionOutput("codex-read", readThreadOutput("older-message"))),
+    );
+  const delegatedRollout = parseDesktopRollout(delegatedContent, {
+    marker,
+    profile: "deepseek",
+  });
+  assert.equal(delegatedRollout.checks.codexAppReadContent, true);
+  assert.equal(delegatedRollout.checks.codexAppReadMarker, false);
+  assert.equal(evaluateDesktopHostEvidence({
+    ...shared,
+    rollout: delegatedRollout,
+    triggerMode: "direct",
+  }).status, "passed");
+  assert.equal(evaluateDesktopHostEvidence({
+    ...shared,
+    rollout: delegatedRollout,
+    triggerMode: "delegated",
+  }).status, "passed");
+});
+
+test("[A HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且桌面封装清空时标记上游阻断", () => {
+  const content = fixtureRollout("gpt-6-astra")
+    .replace(
+      JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
+      JSON.stringify(functionOutput("codex-read", readThreadOutput(marker, { turns: [
+        { id: "turn-large-1", status: "completed", items: [] },
+        { id: "turn-large-2", status: "completed", items: [] },
+      ] }))),
+    );
+  const rollout = parseDesktopRollout(content, { marker, profile: "official" });
+  const attribution = {
+    status: "blocked-upstream",
+    layer: "official-codex-desktop-read-thread-wrapper",
+    reason: "官方桌面 read_thread 封装将大回合 items 清空",
+    controls: {
+      officialNoRelay: { completedItemCounts: [79, 140] },
+      productionRelay: { completedItemCounts: [79, 140] },
+      desktopReadThread: { completedItemCounts: [0, 0] },
+    },
+  };
+  const shared = {
+    profile: "official",
+    marker,
+    runtimeBinding: { status: "passed", expected: { runtimeTarget: "windows-native" } },
+    rollout,
+    toolInventory: { offers: { webRun: true } },
+    httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
+  };
+  const blocked = evaluateDesktopHostEvidence({
+    ...shared,
+    upstreamAttributions: { "codex-app-read-thread": attribution },
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.checks.find((item) => item.id === "codex-app-read-thread").status,
+    "blocked-upstream");
+  assert.match(blocked.upstreamReason, /read_thread/);
+
+  const mismatchedControl = structuredClone(attribution);
+  mismatchedControl.controls.productionRelay.completedItemCounts = [0, 0];
+  const failed = evaluateDesktopHostEvidence({
+    ...shared,
+    upstreamAttributions: { "codex-app-read-thread": mismatchedControl },
+  });
+  assert.equal(failed.status, "failed");
+});
+
+test("[A HAR-04 NET-05] 目标模型用量失败必须保留官方错误并判定失败", () => {
+  const content = fixtureRollout("gpt-6-astra").replace(
+    '"type":"task_complete"',
+    '"type":"task_complete","error":{"message":"usage exhausted","codex_error_info":"usage_limit_exceeded"}',
+  );
+  const rollout = parseDesktopRollout(content, { marker, profile: "official" });
+  assert.deepEqual(rollout.taskError, {
+    code: "usage_limit_exceeded",
+    message: "usage exhausted",
+  });
+  const result = evaluateDesktopHostEvidence({
+    profile: "official",
+    marker,
+    runtimeBinding: { status: "passed" },
+    rollout,
+    httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.checks.find((item) => item.id === "model-turn").status, "not-run");
 });
 
 test("[A HAR-04 OBS-04] 请求工具清单只保留脱敏标识并能确认 web 能力是否下发", () => {
@@ -283,6 +554,7 @@ test("[A HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", ()
   assert.match(prompt, /get_usage_limits/);
   assert.match(prompt, /web\.run/);
   assert.match(prompt, /computer use/);
+  assert.doesNotMatch(prompt, /request_user_input|用户补充输入/);
   const html = desktopHostProgressHtml({
     batch: "B1-official",
     status: "incomplete",
@@ -298,6 +570,18 @@ test("[A HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", ()
   assert.match(html, /B1-official/);
   assert.doesNotMatch(html, /<unsafe>/);
   assert.match(html, /&lt;unsafe&gt;/);
+
+  const windowsPrompt = desktopHostPrompt({
+    profile: "official",
+    marker,
+    nativeExecutablePath: String.raw`D:\\fixture\\computer-use.exe`,
+    runId: "20260913010101-native",
+    root: String.raw`D:\\project`,
+  });
+  assert.match(windowsPrompt, /Windows 原生应用/);
+  assert.match(windowsPrompt, /Marker input/);
+  assert.doesNotMatch(windowsPrompt, /点击下载测试产物/);
+  assert.doesNotMatch(windowsPrompt, /request_user_input|用户补充输入/);
 });
 
 test("[A HAR-04 ENV-03] 自动发现只读取本次标记所在的近期 rollout", async t => {
@@ -382,7 +666,7 @@ function fixtureRollout(model, testMarker = marker) {
     functionTool("codex-list", "list_threads", '{"limit":10}', "mcp__codex_app"),
     functionOutput("codex-list", "current task thread-desktop"),
     functionTool("codex-read", "read_thread", '{"threadId":"thread-desktop"}', "mcp__codex_app"),
-    functionOutput("codex-read", `current task contains ${testMarker}`),
+    functionOutput("codex-read", readThreadOutput(testMarker)),
     functionTool("codex-projects", "list_projects", "{}", "mcp__codex_app"),
     functionOutput("codex-projects", "projects: []"),
     functionTool("codex-usage", "get_usage_limits", "{}", "mcp__codex_app"),
@@ -393,16 +677,29 @@ function fixtureRollout(model, testMarker = marker) {
     output("web-2", "OpenAI Codex app-server"),
     tool("web-3", "exec", "await tools.web__run({find:[{ref_id:'page',pattern:'thread/fork'}]})"),
     output("web-3", "thread/fork https://github.com/openai/codex/tree/main/codex-rs/app-server"),
-    functionTool("cua-1", "js", "let tab=await cua.createBrowserTab('iab','http://127.0.0.1'); await tab.screenshot();"),
+    functionTool("cua-1", "js", "let tab=await cua.createBrowserTab('iab','http://127.0.0.1'); await sky.type_text({window,text:marker}); await sky.press_key({window,key:'Return'}); await tab.screenshot();"),
     functionOutput("cua-1", "SECRET_RESULT_BODY"),
-    functionTool("input-1", "request_user_input_async", "是否继续"),
-    functionOutput("input-1", "继续"),
     { type: "response_item", payload: {
       type: "message", role: "assistant", content: [{ type: "output_text", text: "验收结束" }],
     } },
     { type: "event_msg", payload: { type: "task_complete" } },
   ];
   return records.map(JSON.stringify).join("\n") + "\n";
+}
+
+function readThreadOutput(value, { items = null, turns = null } = {}) {
+  return JSON.stringify({
+    schemaVersion: 1,
+    thread: { id: "thread-desktop" },
+    turns: turns ?? [{
+      id: "turn-read",
+      status: "completed",
+      items: items ?? [
+        { type: "userMessage", content: [{ type: "text", text: value }] },
+        { type: "agentMessage", text: "reply" },
+      ],
+    }],
+  });
 }
 
 function tool(id, name, input) {

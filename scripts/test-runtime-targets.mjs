@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -164,14 +164,21 @@ export async function runWslTestSuite({
   expectedCliSha256 = null,
   expectedRelaySha256 = null,
   existingRelayPath = null,
+  browserPath = null,
+  expectedBrowserSha256 = null,
 } = {}) {
   if (process.platform !== "win32") throw new Error("WSL 测试监督器只能从 Windows 启动");
   await mkdir(resultDirectory, { recursive: true });
-  const [guestScript, sourceRoot, guestResultDirectory, guestRelayPath] = await Promise.all([
+  const [guestScript, sourceRoot, guestResultDirectory, guestRelayPath, guestBrowserPath,
+    guestBrowserTempRoot, guestBrowserBridgeNode, guestBrowserBridgeScript] = await Promise.all([
     toWslPath(join(root, "scripts", "wsl-test-guest.mjs")),
     toWslPath(root),
     toWslPath(resultDirectory),
     existingRelayPath ? toWslPath(existingRelayPath) : Promise.resolve(null),
+    browserPath ? toWslPath(browserPath) : Promise.resolve(null),
+    browserPath ? toWslPath(tmpdir()) : Promise.resolve(null),
+    browserPath ? toWslPath(process.execPath) : Promise.resolve(null),
+    browserPath ? toWslPath(join(root, "scripts", "windows-cdp-bridge.mjs")) : Promise.resolve(null),
   ]);
   const guestCodexHome = liveProfile ? await toWslPath(join(homedir(), ".codex")) : null;
   const guestDataDir = liveProfile ? await toWslPath(defaultAccountDataDir()) : null;
@@ -192,6 +199,11 @@ export async function runWslTestSuite({
     ...(expectedCliSha256 ? [`--expected-cli-sha256=${expectedCliSha256}`] : []),
     ...(expectedRelaySha256 ? [`--expected-relay-sha256=${expectedRelaySha256}`] : []),
     ...(guestRelayPath ? [`--relay=${guestRelayPath}`] : []),
+    ...(guestBrowserPath ? [`--browser=${guestBrowserPath}`] : []),
+    ...(expectedBrowserSha256 ? [`--expected-browser-sha256=${expectedBrowserSha256}`] : []),
+    ...(guestBrowserTempRoot ? [`--browser-temp-root=${guestBrowserTempRoot}`] : []),
+    ...(guestBrowserBridgeNode ? [`--browser-bridge-node=${guestBrowserBridgeNode}`] : []),
+    ...(guestBrowserBridgeScript ? [`--browser-bridge-script=${guestBrowserBridgeScript}`] : []),
   ];
   const child = spawn("wsl.exe", guestArgs, {
     cwd: root,

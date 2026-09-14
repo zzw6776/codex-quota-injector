@@ -240,6 +240,8 @@ async function runWslComponent(files) {
       stages: [stage],
       sourceSha256: snapshot.sha256,
       kind: "offline",
+      browserPath: report.runtimeSnapshot.browser?.path,
+      expectedBrowserSha256: report.runtimeSnapshot.browser?.sha256,
     });
     const events = await readEvents(join(RESULTS, stage.eventFile), id, WSL_NATIVE, stage.id);
     allEvents.push(...events);

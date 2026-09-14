@@ -34,6 +34,15 @@ import {
   isDesktopSessionTerminal,
   parseDesktopRollout,
 } from "./desktop-host-evidence.mjs";
+import {
+  prepareWindowsComputerUseFixture,
+  readWindowsComputerUseFixture,
+} from "./test-computer-use-windows.mjs";
+export {
+  findWindowsNodeExecutable,
+  isWslRuntime,
+  toWindowsPath,
+} from "./windows-test-host.mjs";
 
 const execFileAsync = promisify(execFile);
 const DESKTOP_RESULTS = join(RESULTS, "desktop-host");
@@ -61,7 +70,7 @@ export function desktopFixture({ artifactHref, evidenceEndpoint } = {}) {
 
 export async function startDesktopFixtureServer({ onEvidence } = {}) {
   const fixture = desktopFixture({ artifactHref: "/artifact", evidenceEndpoint: "/submission" });
-  const evidence = { submissions: [], invalidSubmissions: 0, artifactRequests: 0 };
+  const evidence = { pageRequests: 0, submissions: [], invalidSubmissions: 0, artifactRequests: 0 };
   const notify = () => Promise.resolve(onEvidence?.(structuredClone(evidence))).catch(() => undefined);
   const server = createServer((request, response) => {
     void handleFixtureRequest(request, response, { fixture, evidence, notify }).catch((error) => {
@@ -81,9 +90,12 @@ export async function startDesktopFixtureServer({ onEvidence } = {}) {
   return {
     fixture,
     url,
+    submitUrl: new URL("submission", url).href,
     artifactUrl: new URL("artifact", url).href,
+    evidenceUrl: new URL("evidence", url).href,
     server,
     getEvidence: () => structuredClone(evidence),
+    evidence: () => structuredClone(evidence),
     async close() {
       if (closed) return;
       closed = true;
@@ -97,6 +109,8 @@ async function handleFixtureRequest(request, response, { fixture, evidence, noti
   const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
   const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
   if (request.method === "GET" && pathname === "/") {
+    evidence.pageRequests++;
+    void notify();
     response.writeHead(200, {
       ...headers,
       "content-type": "text/html; charset=utf-8",
@@ -116,6 +130,11 @@ async function handleFixtureRequest(request, response, { fixture, evidence, noti
     response.end(fixture.artifact);
     return;
   }
+  if (request.method === "GET" && pathname === "/evidence") {
+    response.writeHead(200, { ...headers, "content-type": "application/json; charset=utf-8" });
+    response.end(`${JSON.stringify(evidence)}\n`);
+    return;
+  }
   if (request.method === "POST" && pathname === "/submission") {
     const body = await readRequestBody(request, 4_096);
     let value = "";
@@ -133,6 +152,11 @@ async function handleFixtureRequest(request, response, { fixture, evidence, noti
     response.end('{"ok":true}');
     return;
   }
+  if (pathname === "/submission") {
+    response.writeHead(405, { ...headers, allow: "POST" });
+    response.end("Method Not Allowed");
+    return;
+  }
   if (!["GET", "POST"].includes(request.method ?? "")) {
     response.writeHead(405, { ...headers, allow: "GET, POST" });
     response.end("Method Not Allowed");
@@ -140,6 +164,32 @@ async function handleFixtureRequest(request, response, { fixture, evidence, noti
   }
   response.writeHead(404, headers);
   response.end("Not Found");
+}
+
+export function verifyDesktopFixtureEvidence({ marker, evidence }) {
+  if (!marker || !evidence || !Array.isArray(evidence.submissions)) {
+    throw new Error("桌面宿主证据格式无效");
+  }
+  if (!Number.isInteger(evidence.pageRequests) || evidence.pageRequests < 1) {
+    throw new Error("没有观察到实际页面请求");
+  }
+  if (evidence.submissions.length !== 1) {
+    throw new Error(`预期恰好一次提交，实际 ${evidence.submissions.length} 次`);
+  }
+  if (evidence.submissions[0]?.value !== marker) {
+    throw new Error("提交值与本轮随机标记不一致");
+  }
+  if (Number(evidence.invalidSubmissions ?? 0) !== 0) {
+    throw new Error(`观察到 ${evidence.invalidSubmissions} 次错误提交`);
+  }
+  if (evidence.artifactRequests !== 1) {
+    throw new Error(`预期恰好一次产物请求，实际 ${evidence.artifactRequests} 次`);
+  }
+  return {
+    pageRequests: evidence.pageRequests,
+    submissionCount: evidence.submissions.length,
+    artifactRequests: evidence.artifactRequests,
+  };
 }
 
 async function readRequestBody(request, limit) {
@@ -241,8 +291,9 @@ async function desktopPlan(profile, runtimeTarget, triggerMode = "direct") {
       "实际 functions.exec 成功输出和失败续接",
       "实际 codex_app 四个常用只读入口读取任务、项目与用量",
       "实际 web.run search/open/find",
-      "实际 computer use 打开、输入、单次提交、截图和下载",
-      "实际用户补充输入并继续任务",
+      process.platform === "win32"
+        ? "实际 computer use 操作 Windows 原生非浏览器应用并留下单次启动、提交和截图证据"
+        : "实际 computer use 打开、输入、单次提交、截图和下载",
       "记录模型请求实际收到的脱敏工具清单，并区分不支持、未执行和执行失败",
     ],
     note: "后台 B 与桌面入口报告分别保存；两者属于同一源码、平台、运行环境和供应商且都通过时，B 总状态才是 passed。",
@@ -253,18 +304,27 @@ async function runDesktopSession(plan) {
   const free = await requireFreeResult({ runtimeTarget: plan.runtimeTarget });
   const backend = await requireBackendReport(plan, free.snapshot.sha256);
   const runtimeBinding = await inspectDesktopRuntime(plan);
+  const upstreamAttributions = await readDesktopUpstreamAttributions(plan.runtimeTarget);
   const customModels = (await liveProfiles()).filter((profile) => profile.id !== "official")
     .map((profile) => profile.model).filter(Boolean);
   const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
   const runDirectory = join(DESKTOP_RESULTS, runId);
   await mkdir(runDirectory, { recursive: true, mode: 0o700 });
   let report;
-  const hosted = await startDesktopFixtureServer({
+  const nativeFixture = process.platform === "win32"
+    ? await prepareWindowsComputerUseFixture({
+        resultDirectory: DESKTOP_RESULTS,
+        runId,
+        marker: `BHOST_${randomBytes(8).toString("hex")}`,
+      })
+    : null;
+  const hosted = nativeFixture ? null : await startDesktopFixtureServer({
     onEvidence: (httpEvidence) => {
       if (!report) return;
       report.httpEvidence = httpEvidence;
     },
   });
+  const marker = nativeFixture?.marker ?? hosted.fixture.marker;
   report = {
     ...plan,
     runId,
@@ -281,14 +341,25 @@ async function runDesktopSession(plan) {
       component: backendComponentId(plan.profile, plan.runtimeTarget),
     },
     runtimeBinding,
+    upstreamAttributions,
     customModels,
-    fixture: { url: hosted.url, marker: hosted.fixture.marker },
-    httpEvidence: hosted.getEvidence(),
+    fixture: nativeFixture
+      ? {
+          kind: "windows-native",
+          marker,
+          executablePath: nativeFixture.executablePath,
+          evidencePath: nativeFixture.evidencePath,
+          manifestPath: nativeFixture.manifestPath,
+        }
+      : { kind: "loopback-http", url: hosted.url, marker },
+    httpEvidence: hosted?.getEvidence() ?? null,
+    nativeComputerUseEvidence: null,
   };
   report.prompt = desktopHostPrompt({
     profile: plan.profile,
-    marker: hosted.fixture.marker,
-    fixtureUrl: hosted.url,
+    marker,
+    fixtureUrl: hosted?.url,
+    nativeExecutablePath: nativeFixture?.executablePath,
     runId,
     root: ROOT,
     triggerMode: plan.triggerMode,
@@ -304,7 +375,7 @@ async function runDesktopSession(plan) {
       progressPath: report.progressPath,
     });
   } catch (error) {
-    await hosted.close().catch(() => undefined);
+    await hosted?.close().catch(() => undefined);
     throw error;
   }
   if (!plan.noOpen) {
@@ -320,7 +391,7 @@ async function runDesktopSession(plan) {
         await persistDesktopReport(report);
         await updateBackendReport(backend.path, report);
       } finally {
-        await hosted.close();
+        await hosted?.close();
       }
       throw error;
     }
@@ -331,7 +402,7 @@ async function runDesktopSession(plan) {
     component: report.component,
     reportPath: report.reportPath,
     progressPath: report.progressPath,
-    fixtureUrl: hosted.url,
+    fixture: report.fixture,
     status: report.status,
     prompt: report.prompt,
   }, null, 2));
@@ -341,7 +412,7 @@ async function runDesktopSession(plan) {
       await persistDesktopReport(report);
       await updateBackendReport(backend.path, report);
     } finally {
-      await hosted.close();
+      await hosted?.close();
     }
     process.exitCode = 1;
     return;
@@ -413,10 +484,21 @@ async function runDesktopSession(plan) {
     await persistDesktopReport(report).catch(() => undefined);
     await updateBackendReport(backend.path, report).catch(() => undefined);
   } finally {
-    await hosted.close();
+    await hosted?.close();
   }
   console.log(`桌面入口报告：${report.reportPath}；${report.component}: ${report.status}；${report.batch}: ${report.overallStatus}`);
   if (report.status !== "passed") process.exitCode = 1;
+}
+
+async function readDesktopUpstreamAttributions(runtimeTarget) {
+  const path = join(DESKTOP_RESULTS, `upstream-attributions-${runtimeTarget}.json`);
+  try {
+    const value = JSON.parse(await readFile(path, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    throw new Error(`桌面上游归因文件不可读：${path}：${error.message}`);
+  }
 }
 
 async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerminal = false } = {}) {
@@ -446,6 +528,10 @@ async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerm
     model: rollout.model,
     startedAt: Date.parse(report.startedAt),
   }) : null;
+  if (report.fixture.kind === "windows-native") {
+    const native = await readWindowsComputerUseFixture(report.fixture);
+    report.nativeComputerUseEvidence = native?.evidence ?? null;
+  }
   report.rollout = rollout ? publicRolloutEvidence(rollout) : null;
   report.toolInventory = toolInventory;
   report.evaluation = evaluateDesktopHostEvidence({
@@ -454,8 +540,11 @@ async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerm
     runtimeBinding: report.runtimeBinding,
     rollout,
     toolInventory,
+    upstreamAttributions: report.upstreamAttributions,
     triggerMode: report.triggerMode,
     httpEvidence: report.httpEvidence,
+    nativeComputerUseEvidence: report.nativeComputerUseEvidence,
+    computerUseKind: report.fixture.kind,
     sourceCurrent,
   });
   const previous = report.status;
@@ -485,6 +574,32 @@ async function requireBackendReport(plan, sourceSha256) {
 }
 
 async function inspectDesktopRuntime(plan) {
+  return retryDesktopRuntimeInspection(() => inspectDesktopRuntimeOnce(plan));
+}
+
+export async function retryDesktopRuntimeInspection(inspect, {
+  attempts = 6,
+  intervalMs = 2_000,
+  wait = (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds)),
+} = {}) {
+  let result = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    result = await inspect();
+    if (result?.status === "passed") return result;
+    if (attempt + 1 < attempts) await wait(intervalMs);
+  }
+  return result;
+}
+
+export function desktopRuntimeInfrastructureReady(readiness = {}) {
+  return readiness.codexRunning === true &&
+    readiness.debugReady === true &&
+    readiness.singleInjector === true &&
+    readiness.relayReady === true &&
+    readiness.protocolMatches === true;
+}
+
+async function inspectDesktopRuntimeOnce(plan) {
   const expected = {
     projectVersion: plan.projectVersion,
     relayProtocol: plan.expectedRelayProtocol,
@@ -498,7 +613,7 @@ async function inspectDesktopRuntime(plan) {
       (plan.runtimeTarget === WSL_NATIVE ? host.relay.wslNative : !host.relay.wslNative);
     const versionPattern = new RegExp(`(?:^|\\s)v${escapeRegex(plan.projectVersion)}(?:\\.dev)?(?:$|\\s)`);
     const versionMatches = versionPattern.test(widget.footerText ?? "");
-    const passed = host.readiness.ready && runtimeMatches &&
+    const passed = desktopRuntimeInfrastructureReady(host.readiness) && runtimeMatches &&
       widget.runtimeVersion === plan.expectedWidgetRuntime && versionMatches;
     return {
       status: passed ? "passed" : "failed",
@@ -619,9 +734,11 @@ function publicRolloutEvidence(rollout) {
     cliVersion: rollout.cliVersion,
     cwd: rollout.cwd,
     modelMatches: rollout.modelMatches,
+    computerUseFailure: rollout.computerUseFailure,
     callIds: rollout.callIds,
     checks: rollout.checks,
     turnCompleted: rollout.turnCompleted,
+    taskError: rollout.taskError,
   };
 }
 

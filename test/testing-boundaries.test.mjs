@@ -9,6 +9,7 @@ import {
   ROOT,
 } from "../runtime-tests/support/offline-runtime.mjs";
 import {
+  liveSandboxConfigLines,
   liveProfiles,
   liveRouterConfiguration,
   publicProfile,
@@ -33,6 +34,20 @@ test("[A HAR-01 HAR-04] 桌面付费计划在无支持运行环境的平台只�
     platform: "linux",
     allowUnsupportedCurrent: true,
   }), /没有完整测试运行环境/);
+});
+
+test("[A HAR-04] Windows 原生真实测试显式启用可写的受限令牌沙箱", () => {
+  assert.deepEqual(liveSandboxConfigLines("windows-native"), [
+    'sandbox_mode="workspace-write"',
+    'approval_policy="never"',
+    'windows.sandbox="unelevated"',
+  ]);
+  for (const runtimeTarget of ["wsl-native", "macos-native"]) {
+    assert.deepEqual(liveSandboxConfigLines(runtimeTarget), [
+      'sandbox_mode="workspace-write"',
+      'approval_policy="never"',
+    ]);
+  }
 });
 
 test("[A RPC-02 HAR-04] 完整场景清单绑定证据文件，未执行与真实宿主不能自动变成通过", async () => {

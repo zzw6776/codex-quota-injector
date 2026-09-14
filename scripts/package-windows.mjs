@@ -5,6 +5,7 @@ import process from "node:process";
 
 import { assertValidWslRelayExecutable } from "../src/relay-artifact.mjs";
 import { assertValidWindowsRelayExecutable } from "../src/windows-artifact.mjs";
+import { windowsInstallerArguments } from "./windows-installer-command.mjs";
 
 const options = parseOptions(process.argv.slice(2));
 const root = resolve(import.meta.dirname, "..");
@@ -20,16 +21,16 @@ const output = resolve(
 );
 await mkdir(outputDir, { recursive: true });
 
-execFileSync(options.makensis, [
-  `/DVERSION=${packageJson.version}`,
-  `/DINPUT_EXE=${resolve(options.inputExecutable)}`,
-  `/DWINDOWS_RELAY_EXE=${windowsRelayExecutable}`,
-  `/DWSL_RELAY_EXE=${wslRelayExecutable}`,
-  `/DAPP_ICON=${resolve(root, "assets", "AppIcon.ico")}`,
-  `/DNODE_LICENSE=${resolve(options.nodeLicense)}`,
-  `/DOUTPUT_EXE=${output}`,
-  resolve(root, "installer", "windows-installer.nsi"),
-], { stdio: "inherit" });
+execFileSync(options.makensis, windowsInstallerArguments({
+  version: packageJson.version,
+  inputExecutable: resolve(options.inputExecutable),
+  windowsRelayExecutable,
+  wslRelayExecutable,
+  appIcon: resolve(root, "assets", "AppIcon.ico"),
+  nodeLicense: resolve(options.nodeLicense),
+  outputExecutable: output,
+  scriptPath: resolve(root, "installer", "windows-installer.nsi"),
+}), { stdio: "inherit" });
 
 console.log(output);
 

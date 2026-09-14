@@ -89,6 +89,14 @@ export function liveRouterConfiguration(route) {
   };
 }
 
+export function liveSandboxConfigLines(runtimeTarget) {
+  return [
+    'sandbox_mode="workspace-write"',
+    'approval_policy="never"',
+    ...(runtimeTarget === WINDOWS_NATIVE ? ['windows.sandbox="unelevated"'] : []),
+  ];
+}
+
 function argumentShape(value) {
   if (value === null) return { kind: "null" };
   if (Array.isArray(value)) return { kind: "array" };
@@ -250,7 +258,7 @@ export async function startLiveRuntime(t, profile, budget) {
   await writeFile(join(env.CODEX_HOME, "config.toml"), [
     'cli_auth_credentials_store="ephemeral"', 'mcp_oauth_credentials_store="file"', 'model_provider="openai"',
     ...(route ? [`openai_base_url=${JSON.stringify(route.baseUrl)}`] : []), `model_catalog_json=${JSON.stringify(catalogPath)}`,
-    'sandbox_mode="workspace-write"', 'approval_policy="never"', 'features.guardian_approval=false', 'features.multi_agent=false',
+    ...liveSandboxConfigLines(runtimeTarget), 'features.guardian_approval=false', 'features.multi_agent=false',
     'features.multi_agent_v2=false', 'features.shell_snapshot=false', 'web_search="disabled"',
     '[mcp_servers.fixture]', `command=${JSON.stringify(process.execPath)}`, `args=${JSON.stringify([mcp, cwd])}`,
   ].join("\n"));

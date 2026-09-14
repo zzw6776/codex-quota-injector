@@ -6,6 +6,8 @@ import { readLifecycleReport, writeLifecycleReport } from "./lifecycle-runner.mj
 
 const STEP_LABELS = new Map([
   ["verify-package", "验证正式包签名、架构与哈希"],
+  ["wait-desktop-idle", "等待 Codex 活动回合完成并落盘"],
+  ["repair-desktop-history", "检查并修复 Codex 会话历史"],
   ["install-update", "安装当前版本并保留回滚副本"],
   ["switch-windows-runtime", "切换到 Windows 原生运行方式"],
   ["launch-windows-native", "Windows 原生 Relay：正式入口接管"],
@@ -44,7 +46,9 @@ export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {})
   const rollbackFailed = report.steps.some((step) => step.rollback?.status === "failed");
   const rolledBack = report.steps.some((step) => step.rollback?.status === "passed");
   const finished = Boolean(report.finishedAt);
-  const headline = report.status === "passed"
+  const headline = report.recovery?.status === "running"
+    ? "正在恢复上一次生命周期测试未能回滚的状态"
+    : report.status === "passed"
     ? "生命周期测试全部通过"
     : report.status === "rollback-failed" || rollbackFailed
       ? "测试失败，且有状态未能自动恢复"
@@ -59,7 +63,8 @@ export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {})
         : currentIndex >= 0
           ? `正在执行 ${currentIndex + 1}/${report.steps.length}：${stepLabel(report.steps[currentIndex].id)}`
           : "等待外部监督器开始";
-  const tone = report.status === "passed" ? "passed"
+  const tone = report.recovery?.status === "running" ? "running"
+    : report.status === "passed" ? "passed"
     : ["failed", "rollback-failed"].includes(report.status) ? "failed" : "running";
   const rows = report.steps.map((step, index) => {
     const rollback = step.rollback
@@ -85,6 +90,11 @@ export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {})
   const components = componentRows
     ? `<section class="components"><h2>分项结果</h2><table><tbody>${componentRows}</tbody></table></section>`
     : "";
+  const completionNotification = report.completionNotification
+    ? `<span>结束置前：${escapeHtml(report.completionNotification.status === "activated"
+        ? "Codex 窗口已置前"
+        : "Codex 窗口未能自动置前")}</span>`
+    : "";
   const failure = failed?.error?.message ?? report.error?.message ?? null;
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -101,7 +111,7 @@ h1{font-size:24px;margin:0 0 8px}.sub{color:#667085;margin-bottom:24px}.banner{p
 <h1>Codex 生命周期测试</h1>
 <div class="sub">运行编号 ${escapeHtml(report.runId)} · 正式版本 ${escapeHtml(report.projectVersion)} · 目标中继协议 ${escapeHtml(report.targetRelayProtocol)}</div>
 <section class="banner ${tone}"><strong>${escapeHtml(headline)}</strong>${failure ? `<div class="failure">${escapeHtml(failure)}</div>` : ""}</section>
-<div class="summary"><span>已通过 ${passedCount}/${report.steps.length}</span><span>总体状态：${escapeHtml(statusLabel(report.status))}</span>${report.ownerPid ? `<span>监督器 PID：${escapeHtml(report.ownerPid)}</span>` : ""}<span>最近更新：${escapeHtml(report.updatedAt ?? report.createdAt ?? "未知")}</span></div>
+<div class="summary"><span>已通过 ${passedCount}/${report.steps.length}</span><span>总体状态：${escapeHtml(statusLabel(report.status))}</span>${report.ownerPid ? `<span>监督器 PID：${escapeHtml(report.ownerPid)}</span>` : ""}${completionNotification}<span>最近更新：${escapeHtml(report.updatedAt ?? report.createdAt ?? "未知")}</span></div>
 ${components}
 <ol class="steps">${rows}</ol>
 <div class="footer">本页每秒从脱敏报告重新加载。Codex 在测试中会关闭或重启，本页留在${report.platform === "win32" ? "默认浏览器" : " Safari"}中继续显示；页面不参与测试判定。</div>
@@ -151,17 +161,24 @@ export async function startLifecycleProgressRenderer({
   onError = (error) => console.error(`[lifecycle-progress] ${error.message}`),
 } = {}) {
   let lastUpdatedAt = await writeLifecycleProgressPage(reportPath, outputPath);
-  let writing = false;
+  let updatePromise = null;
   let stopped = false;
   const update = async (force = false) => {
-    if (writing || stopped && !force) return;
-    writing = true;
-    try {
+    if (updatePromise) {
+      await updatePromise;
+      if (!force) return;
+    }
+    if (stopped && !force) return;
+    const task = (async () => {
       const report = JSON.parse(await readFile(reportPath, "utf8"));
       if (!force && report.updatedAt === lastUpdatedAt) return;
       lastUpdatedAt = await writeLifecycleProgressPage(reportPath, outputPath);
+    })();
+    updatePromise = task;
+    try {
+      await task;
     } finally {
-      writing = false;
+      if (updatePromise === task) updatePromise = null;
     }
   };
   const timer = setInterval(() => {

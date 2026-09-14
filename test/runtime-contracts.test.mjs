@@ -9,6 +9,7 @@ import { WebSocketServer } from "ws";
 
 import { CdpClient, findCodexTarget, isCodexDebugPortReady } from "../src/cdp-client.mjs";
 import {
+  codexLaunchEnvironment,
   isRelayConfigCurrent,
   isRelayStateCurrent,
   parseWindowsSubsystemSetting,
@@ -28,6 +29,7 @@ import {
   WIDGET_RUNTIME_VERSION,
   averageGenerationNetworkLatency,
   calculatePopoverMaxHeight,
+  calculateScrollbarEndPadding,
   createGenerationToolRow,
   formatConversationUsageSummary,
   formatGenerationDetailTitle,
@@ -98,6 +100,19 @@ test("[A LCH-05] Windows 关闭 Codex 先请求主窗口正常退出", async () 
   assert.deepEqual(invocation.options, {
     windowsHide: true,
     maxBuffer: 2 * 1024 * 1024,
+  });
+});
+
+test("[A LCH-02 TOOL-04] Windows 启动新桌面不会继承旧任务的 app-tools 管道", () => {
+  assert.deepEqual(codexLaunchEnvironment({
+    Path: "C:\\Windows",
+    CODEX_APP_TOOLS_PIPE_PATH: "\\\\.\\pipe\\stale",
+  }, {
+    CODEX_QUOTA_RELAY_EXECUTABLE: "D:\\relay.exe",
+    CODEX_APP_TOOLS_PIPE_PATH: "\\\\.\\pipe\\also-stale",
+  }), {
+    Path: "C:\\Windows",
+    CODEX_QUOTA_RELAY_EXECUTABLE: "D:\\relay.exe",
   });
 });
 
@@ -513,13 +528,24 @@ test("请求分层保留中间说明和最终回复阶段，工具单项不重�
   const source = widgetInstallExpression();
   assert.ok(source.includes("max-height:240px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable"));
   assert.ok(source.includes("max-height:180px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable"));
-  assert.ok(source.includes("padding-right:16px"), "outer request metrics keep clear of overlay scrollbars");
-  assert.ok(source.includes("padding:4px 16px 4px 5px"), "expanded tool durations keep clear of overlay scrollbars");
+  assert.ok(source.includes("data-codex-scrollbar-container"));
   assert.ok(source.includes("display:flex;flex-wrap:wrap"));
   assert.ok(source.includes('name.style.cssText = "min-width:0;color:var(--color-token-text-tertiary,#9a9aa4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"'),
     "request tool names stay on one line and ellipsize within their grid column");
   assert.equal(source.includes("name.title = title;"), false, "truncated request tool names do not show a hover tooltip");
   assert.equal(source.includes('split(" → ")'), false);
+});
+
+test("请求明细只在覆盖式滚动条下补右侧保护间距", () => {
+  assert.equal(calculateScrollbarEndPadding(394, 379), 1,
+    "Windows 实测 15px 经典滚动条后只补足剩余的 1px");
+  assert.equal(calculateScrollbarEndPadding(394, 394), 16,
+    "macOS 覆盖式滚动条没有 gutter，保留内容保护间距");
+  assert.equal(calculateScrollbarEndPadding(394, 393, 1), 16,
+    "容器边框不能被误算成滚动条宽度");
+  assert.equal(calculateScrollbarEndPadding(394, 374), 0,
+    "宽滚动条已经超过目标保护间距时不再增加空白");
+  assert.equal(calculateScrollbarEndPadding(undefined, undefined), 16);
 });
 
 test("截图请求的标题保留首字速率延时，展开补齐最后输出到工具调用完成的 141ms", () => {

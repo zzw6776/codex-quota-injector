@@ -94,7 +94,7 @@ test("[A SES-03 MOD-05 SES-07] 官方 steer 保留追加指令，设置更新和
 test("[A EXT-01] 官方 Hooks 从隔离配置加载并执行，真实文件与开发者上下文可核对", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "custom", prepare: async ({ env, cwd }) => {
     const script = join(env.CODEX_HOME, "hook.mjs");
-    await writeFile(script, `import {appendFileSync} from "node:fs";let input="";for await(const chunk of process.stdin)input+=chunk;appendFileSync(${JSON.stringify(join(cwd,"hook-events.jsonl"))},input+"\\n");console.log("HOOK_CONTEXT_MARKER");`);
+    await writeFile(script, `import {appendFileSync} from "node:fs";let input="";process.stdin.on("data",chunk=>{input+=chunk;try{JSON.parse(input);}catch{return;}appendFileSync(${JSON.stringify(join(cwd,"hook-events.jsonl"))},input+"\\n");process.stdout.write("HOOK_CONTEXT_MARKER\\n",()=>process.exit(0));});`);
     const hookCommand = process.platform === "win32"
       ? `& '${process.execPath.replaceAll("'", "''")}' '${script.replaceAll("'", "''")}'`
       : `'${process.execPath.replaceAll("'", "'\\''")}' '${script.replaceAll("'", "'\\''")}'`;

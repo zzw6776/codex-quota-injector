@@ -4,13 +4,25 @@
 
 最近一次完整 A：2026-09-13，macOS arm64，`codex-cli 0.154.0-alpha.6.2`、Chrome `153.0.8010.36`、Node `26.7.0`，**301 项通过，0 失败、0 跳过**；`A-common` 271 项、`A-macos-native-relay` 30 项，汇总测试时长约 77.7 秒。代码摘要为 `9cae108f67b627f9b15c3a891622e1c6737f7365bac5d2cc8158d1a5242c010a`，属于当前 `0.1.216` 源码；本次选择、当前运行环境与 macOS 全部支持环境均为 `passed`。全部 69 项索引仍按各自适用条件保留真实 B/C 验收要求；免费证据不等于真实桌面任务、模型或生命周期验收完成。
 
-此前绑定 `0.1.203` 源码的 B 后台按四个独立阶段完成真实测试。官方配置各阶段起始选择 `gpt-5.6-luna`，文件/命令/补丁与 MCP、历史恢复与分叉、显式压缩与压缩后续接、动态网页/浏览器适配、识图、原生 `webSearch` 和用户输入回调均通过，共观测 337,757 Token、11 个常规轮次。历史阶段的最小 `thread/fork` RPC 未携带模型参数，分叉首轮由 app-server 选择当时的官方默认 `gpt-6-astra`；因此该项证明官方分叉和历史保留可用，不把它表述为 Luna 精确继承。DeepSeek `deepseek-v4-flash` 的同类适用场景均通过，共观测 639,731 Token、9 个常规轮次，恢复、分叉和压缩后请求均继续路由到 DeepSeek；该模型不声明图片能力，也不运行官方专属 `webSearch`。TokenHub Responses、TokenHub Chat 按本机环境限制未运行，结果保持 `NOT_RUN`，既不计为通过也不计为失败。这些 B 结果不自动继承为 `0.1.216`、Windows 原生或 WSL 原生的通过结论。
+Windows x64 的最近一次完整 A 于 2026-09-13 针对 `0.1.219` 运行：`A-common` 322 项、`A-windows-native-relay` 33 项、`A-wsl-native-relay` 33 项，共 **388 项通过，0 失败、0 跳过**；代码摘要为 `adce0c69780ab1941817fd109a97a12e36eaf56e083f7cf98321c64110c6b49e`。当前 WSL 原生运行环境与 Windows 全部支持环境均为 `passed`，桌面主入口仍按 B/C 独立裁决。
+
+此前绑定 `0.1.203` 源码的 B 后台按四个独立阶段完成真实测试。官方配置各阶段起始选择 `gpt-5.6-luna`，文件/命令/补丁与 MCP、历史恢复与分叉、显式压缩与压缩后续接、动态网页/浏览器适配、识图、原生 `webSearch` 和用户输入回调均通过，共观测 337,757 Token、11 个常规轮次。历史阶段的最小 `thread/fork` RPC 未携带模型参数，分叉首轮由 app-server 选择当时的官方默认 `gpt-6-astra`；因此该项证明官方分叉和历史保留可用，不把它表述为 Luna 精确继承。DeepSeek `deepseek-v4-flash` 的同类适用场景均通过，共观测 639,731 Token、9 个常规轮次，恢复、分叉和压缩后请求均继续路由到 DeepSeek；该模型不声明图片能力，也不运行官方专属 `webSearch`。TokenHub Responses、TokenHub Chat 按本机环境限制未运行，结果保持 `NOT_RUN`，既不计为通过也不计为失败。这些 B 结果不自动继承为 `0.1.219`、Windows 原生或 WSL 原生的通过结论。
 
 真实 OAuth 账号还通过隔离的官方 app-server 完成一次最小唤醒请求并取得预期回复。该辅助链不切换账号、不写入日常配置，也不替代主入口验收。
 
 此前的 macOS 桌面主入口还实际完成了 `web.run` 的 search/open/find、Codex App 的项目与额度只读调用、一次不占用当前任务的独立自动化调度、真实图片生成，以及 computer use 对回环 HTTP 材料的读取、输入、单次提交、截图和下载事件；自动化与服务端产物的随机标记均由独立文件核对，图片产物也已直接查看。临时自动化在首次成功后已经暂停并删除，没有重复运行。该宿主证据确认当时相应工具可调用，但不能据此宣称当前源码或 Windows 桌面主入口全部通过。详见 `.runtime/test-results/desktop-host.md`。
 
-首次生命周期实测把正式包 `0.1.202` 和中继协议 `52` 加载进日常 Codex；正式包验签与更新、进程接管、重复启动单实例、中继自动重连、关闭后重开均通过。切换到第二个 OAuth 账号后，唯一一次最小模型冒烟收到该账号的用量上限错误，因此整批保留为失败；监督器随后成功回切原账号、恢复安装前 `0.1.167`，并从当时源码重新启动。当前源码为 `0.1.216`、中继协议为 `57`；macOS sidecar、宿主健康门禁和 Windows/WSL 改动仍必须由各平台 lifecycle 报告验证正式包实际加载、目标协议及完整重连链路。
+2026-09-13 的 Windows 非浏览器 Computer Use 复测使用每轮动态编译的原生 WinForms 材料。无 Relay 官方基线和 Windows 原生 Relay 都实际完成应用启动、唯一窗口选择、辅助功能读取随机标记、输入及标准 Enter 单次提交；两份独立清单都证明 `launchCount = 1`、正确提交恰好一次。对同一材料调用截图和按元素点击时，两条链路都分别返回 `SetIsBorderRequired ... 0x80004002` 与 `coordinate input geometry is unavailable`，因此基础交互通过，截图和坐标点击子能力记 `BLOCKED_UPSTREAM`，不能归因于注入器。浏览器子链也已用同一个隔离 Chrome 窗口、同一回环页面和同一 `@oai/sky` 分别执行官方无 Relay 与 Relay 对照，两边逐字返回相同的 Windows URL 可信度安全终止；该结果保留为 `BLOCKED_UPSTREAM` 历史证据，不作为 Windows TOOL-06 的验收范围。完整证据和裁决见 `.runtime/test-results/desktop-host.md`。
+
+2026-09-13 使用 `codex-cli 0.153.4` 对 Windows Hooks 建立了同版本原生 direct 对照。`UserPromptSubmit` 在官方事件中从 `hook/started` 进入 `hook/completed`，但完成事件的 `entries` 为空，钩子 stdout 未进入随后发送给模型的输入；Windows Relay 对照同样缺少该上下文。因此 Windows 的 EXT-01 Hook 上下文注入当前记为 `BLOCKED_UPSTREAM`，不修改 Relay 或测试材料绕过；WSL 原生结果独立裁决，不能继承此结论。
+
+2026-09-13 的 `20260913115517-a602e775` 报告把 `0.1.211` 的 Windows 原生、WSL 原生、运行方式恢复、账号往返和官方冒烟都记录为通过，但该版本没有验收发起任务的历史存活。事后审计确认更早的 C 在活动回合尚未终止时关闭 Codex，rollout 留下重复 ordinal 和三个缺失的中断终态；Windows 与 WSL 的官方分页投影都停在 ordinal `9410`，所以后续重启持续显示旧索引。原始消息仍完整保存在 rollout，同版本官方无 Relay app-server 在隔离副本上经结构修复和目标任务投影重建后可检索缺失消息。该报告的 C 通过结论因此作废，审计见 `.runtime/test-results/lifecycle/20260913115517-a602e775/history-audit.json`；只有加入历史门禁后的新 C 真机报告才能重新给出通过结论。
+
+Windows C 报告 `20260913145459-aaa2312f` 曾在 `0.1.212`、中继协议 `55` 上把 18 个步骤记录为通过。事后审计发现它在 `launch-windows-native` 已启动桌面后，仍通过正式 Relay 发送 `thread/resume` 启动第二个 app-server 重建历史；这违反桌面历史写入的单实例边界，也使该报告不能证明重启后的会话读取可靠，因此原通过结论作废。当前实现把需要的重建移到桌面启动前，重建进程退出后才启动桌面；启动后的门禁只读检查投影和消息内容。当前合并源码为 `0.1.219`、中继协议 `58`，若要重新给出 C 通过结论，必须取得本次重启同意后执行当前版本 C。
+
+2026-09-14 对 B1 WSL 桌面报告的 `read_thread` 空 `items` 重新逐层对照。rollout 和 WSL SQLite 中两个完成回合内容完整；本轮实际运行的官方 `codex-cli 0.154.0-alpha.6.2` 在隔离目录中无 Relay 直连返回 79/140 个 item，同一数据经正式 WSL Relay 仍返回 79/140，但官方 Codex Desktop 的 `read_thread` 封装对同两个回合返回 0/0，较小的旧回合可正常返回。因此该项定位为官方桌面 `read_thread` 封装层的上游阻断，不归因于 Relay，也不通过修改项目数据绕过。报告中的 `0.153.4` 来自长期任务创建时的 `session_meta`；官方桌面日志证明该报告运行前已启动 `0.154.0-alpha.6.2`，故对照必须以实际进程版本为准。当前机器可读证据为 `.runtime/probes/official-read-thread-wrapper-20260914.json`。
+
+2026-09-14 新建的 Windows 原生 B1 桌面任务实际完成 `functions.exec` 成功与退出码 23 失败续接、`codex_app` 四个只读入口、`web.run` 以及 WinForms Computer Use 的唯一窗口选择、标记输入和单次提交。截图返回 `SetIsBorderRequired ... 0x80004002`；同一官方 CLI、同一 `@oai/sky`、正确 Windows cwd 且完全移除 Relay 的独立对照返回相同错误，机器可读证据为 `.runtime/official-computer-use-screenshot-control-windows.json`，因此截图仍为 `BLOCKED_UPSTREAM`。该轮正式报告没有通过：新任务启动了第二个 app-server Relay，第二实例覆盖共享状态后在退出时删除状态，使仍存活的主 Relay 被误报为断开。中继协议 59 改为由一个存活实例持有状态，其他实例退出不再清理主实例，并在所有者退出后自动接管；修复已通过并发实例定向测试和 Windows SEA 构建，但尚未经用户同意重启桌面加载，B1 正式桌面报告仍需重跑。
 
 ## 日常怎么运行
 
@@ -31,10 +43,11 @@
 | `npm run test:desktop -- --profile=official\|deepseek --confirm-token-use` | 后台组件通过后打开实时报告，并由目标模型的真实 Codex 桌面任务调用 functions.exec、web.run、computer use 和用户输入；跨任务委托驱动时追加 `--trigger-mode=delegated` |
 | `npm run test:desktop -- --status=<run-id>` | 读取并刷新一次已有桌面报告 |
 | `npm run test:lifecycle -- --plan` | 只读列出 C 批的本机 Codex、注入器、正式包、中继协议、账号条件和预计一次官方冒烟；不重启、不切换、不发模型请求 |
-| `npm run test:lifecycle -- --confirm-restart` | 完整 A 属于当前源码并获得 C 当次明确同意后，构建并验证正式包；Windows 自动切到 Windows 原生、再切到 WSL 原生，逐套执行重启、接管、单实例与断线恢复，最后精确恢复原设置并执行账号往返 |
-| `npm run test:lifecycle -- --status` | 读取最近一次持久化报告；也可追加 `=<run-id>` 指定报告。监督器中断后用 `--resume=<run-id>` 按检查点恢复，并重新打开进度页 |
+| `npm run test:lifecycle -- --confirm-restart` | 完整 A 属于当前源码并获得 C 当次明确同意后，构建并验证正式包；Windows 记录发起任务和回合，在首次关闭前检查 rollout 连续性、回合终态及分页投影，备份后自动修复可证明不改变对话内容的已知损坏并定向重建 Windows/WSL 目标任务投影；每套运行环境只在桌面停止期间由对应正式 Relay 显式恢复落后的目标任务，重建退出后才启动桌面，启动后仅以只读门禁验证投影和消息内容；随后逐套验证 Windows 原生、WSL 原生的重启、接管、桌面主进程单实例和断线恢复；最后恢复测试前的运行方式、保留 Codex 同期写入的其他设置并执行账号往返 |
+| `npm run test:lifecycle -- --status` | 读取最近一次持久化报告；也可追加 `=<run-id>` 指定报告。监督器中断后用 `--resume=<run-id>` 按检查点恢复；回滚失败后用 `--recover=<run-id>` 只重试失败的回滚。两者都会重新打开进度页 |
+| `npm run test:lifecycle -- --recover=<run-id>` | 由外部监督器只重试该次 C 报告里失败的回滚；恢复成功后原 C 仍保留为失败，不会改写成通过 |
 
-代码、配置、测试或规则改动完成后先判断是否影响 A 覆盖的业务契约、执行器、被测逻辑、测试场景或平台行为；只有确实影响时才自动执行对应平台完整 A。局部免费用例只用于开发中快速定位。A 通过后必须主动展示 B1、B2、C 三份计划并询问用户分别执行哪些批次。B1、B2 或 C 失败后保留首次证据，不自动重试收费或重启场景。
+代码、配置、测试或规则改动后不自动执行或重跑 A；只有用户明确要求执行 A 时才运行用户指定的范围。局部免费用例只用于开发中快速定位。A 通过后必须主动展示 B1、B2、C 三份计划并询问用户分别执行哪些批次。B1、B2 或 C 失败后保留首次证据，不自动重试收费或重启场景。
 
 ## A 实际执行了什么
 
@@ -65,7 +78,7 @@ A 中官方 CLI 使用临时 HOME、CODEX_HOME、XDG/APPDATA 目录和测试凭�
 | [任务状态](../runtime-tests/official-task-state.test.mjs) | 目标实际执行文件任务并完成、官方自动压缩、时间线分页、分组/删除、会话式文件搜索 |
 | [扩展](../runtime-tests/official-extensions.test.mjs) | 默认和实验协议 Schema 摘要核对；当前平台设备验证状态的实际只读判定；本地插件实际安装/停用/卸载；Git 真实差异审查 |
 | [Widget 浏览器](../runtime-tests/widget-browser.test.mjs) | 真实 DOM 注入/替换/销毁、点击/输入、全部面板动作、表单到配置管理器、不同尺寸/主题/任务节点变化、原生输入及工具按钮仍可操作 |
-| [工具宿主组合](../runtime-tests/browser-host.test.mjs)、[桌面材料](../runtime-tests/desktop-fixture.test.mjs) | 同一桌面宿主的浏览器契约由公共组件运行一次；原生组件另行覆盖各自官方 CLI/app-server 的动态工具往返。这里执行本地网页/浏览器、data URL 导航、输入、点击、下载及模型续接；CDP 断开后仍回收测试浏览器；不冒充桌面 web.run/CUA |
+| [工具宿主组合](../runtime-tests/browser-host.test.mjs)、[桌面材料](../runtime-tests/desktop-fixture.test.mjs)、[Windows 原生 Computer Use 材料](../runtime-tests/windows-computer-use-fixture.test.mjs) | 同一桌面宿主的浏览器契约由公共组件运行一次；原生组件另行覆盖各自官方 CLI/app-server 的动态工具往返。Windows 还动态编译非浏览器 WinForms 材料并验证随机标记、单次提交和独立证据；CDP 断开后仍回收测试浏览器；免费材料不冒充真实桌面 web.run/CUA |
 | [协议回归](../test/relay-protocol.test.mjs)、[Chat 工具契约](../test/chat-tool-contracts.test.mjs)、[新增格式](../test/chat-protocol-tools.test.mjs)、[路由恢复](../test/model-router-recovery.test.mjs) | 双向请求/ID/分页/大消息，Responses Lite/custom/namespace，历史关联、指定工具、预热/断流/错误/取消、不同供应商隔离与观察故障 |
 | [账号可靠性](../test/account-reliability.test.mjs)、[OAuth](../test/account-oauth.test.mjs)、[账号迁移](../test/account-transfer.test.mjs)、[唤醒进程](../test/wakeup-client.test.mjs) | 并发/写入和 rename 失败/损坏数据保护；测试 OAuth 的 PKCE/state、端口冲突/超时/取消，以及迁移前刷新、源端状态、目标接管和恢复；真实子进程的最低价选择、刷新、异常和清理 |
 | [基础测试目录](../test)、[测试边界](../test/testing-boundaries.test.mjs) | 原有账号、模型配置、计价、计量、CDP、单实例等契约继续执行；未授权 B 不读取账号或启动模型，场景索引不能漏项 |
@@ -82,7 +95,7 @@ B1 只选择 Codex 官方模型，B2 只选择已配置的 DeepSeek 模型；两
 
 每个隔离阶段的默认停止阈值为观察到 500,000 Token 或启动 40 个常规轮次；可用 `CODEX_TEST_LIVE_MAX_TOKENS`、`CODEX_TEST_LIVE_MAX_TURNS` 调低。它们是停止条件，**不是预估费用或严格账单上限**，在途请求、压缩与工具费用可能超出；实际唤醒单独增加一次最小请求。每次运行前都必须展示对应计划并取得当次明确同意；B1 的同意不覆盖 B2，B1/B2 的同意也不覆盖 C。
 
-后台进程没有桌面特有的 web.run、computer use、Apps、语音、自动化和远程宿主。每个 B 批固定拆为 `B*-backend/<runtime>` 和 `B*-desktop/<runtime>`：后台组件通过而桌面组件未运行时，整批保持 `incomplete`；只有两者绑定同一源码、平台、运行环境和供应商且都通过时才是 `passed`。桌面组件由[桌面入口执行器](testing-desktop-host.md)核对实际模型与工具调用 ID、模型请求层的脱敏工具清单、当前中继/Widget，以及独立 HTTP 材料记录。B1 必须实际完成 web 搜索；B2 缺少独立 `web.run` 时记录 `unsupported`，不能把 DeepSeek 会忽略的 Hosted `web_search` 请求描述当作已支持。条件能力缺少配置或权限时必须写明原因，不能把未执行改成通过。
+后台进程没有桌面特有的 web.run、computer use、Apps、语音、自动化和远程宿主。每个 B 批固定拆为 `B*-backend/<runtime>` 和 `B*-desktop/<runtime>`：后台组件通过而桌面组件未运行时，整批保持 `incomplete`；只有两者绑定同一源码、平台、运行环境和供应商且都通过时才是 `passed`。桌面组件由[桌面入口执行器](testing-desktop-host.md)核对实际模型与工具调用 ID、模型请求层的脱敏工具清单、当前中继/Widget，以及独立平台材料记录；Windows 使用原生 WinForms 清单，macOS 使用本机 HTTP 材料。B1 必须实际完成 web 搜索；B2 缺少独立 `web.run` 时记录 `unsupported`，不能把 DeepSeek 会忽略的 Hosted `web_search` 请求描述当作已支持。条件能力缺少配置或权限时必须写明原因，不能把未执行改成通过。
 
 ## 报告和以后怎么防止漏测
 
@@ -94,7 +107,7 @@ B1 只选择 Codex 官方模型，B2 只选择已配置的 DeepSeek 模型；两
 - [场景索引](testing-scenarios.json)逐一对应[69 项矩阵](codex-compatibility-test-plan.md)。`free-evidence-passed` 只表示列出的免费证据通过，仍保留 `liveStatus: not-run` 和每项限制；不能把它当完整验收。
 - [协议清单](testing-protocol-inventory.json)覆盖当前 CLI 的默认及实验协议。字段、方法或类型变化会使 A 失败，要求重新审核清单和补测试，不能默默复用上次绿灯。
 - B 启动前核对本次平台、源码/测试文件摘要及实际 CLI/浏览器摘要。旧代码、运行时升级或测试期间文件改变的报告无效。
-- A/B/C 不依赖当前对话在失败后继续作答。后台模型测试由 Node 控制程序落盘；生命周期测试由 macOS launchd 或 Windows 任务计划程序托管的一次性 Node 监督器落盘，并由独立浏览器页面展示同一份脱敏报告。Windows 计划任务带登录触发和失败重启策略；页面无法打开时不调度重启。步骤开始前写检查点，已核实完成的副作用不重复，模型请求结果未知时拒绝自动重放并先恢复原账号；存在未完成或回滚失败的 C 时，新任务只展示恢复命令，不覆盖现场。
+- A/B/C 不依赖当前对话在失败后继续作答。后台模型测试由 Node 控制程序落盘；生命周期测试由 macOS launchd 或 Windows 任务计划程序托管的一次性 Node 监督器落盘，并由独立浏览器页面展示同一份脱敏报告。Windows 计划任务带登录触发和失败重启策略；页面无法打开时不调度重启。C 到达通过、失败或回滚失败终态后，监督器会重试将 Codex 窗口置前，并把窗口激活结果和发起任务 ID 写入报告；窗口激活不会启动新的模型回合，失败也不会改写测试结论。任何可能中断 Windows 桌面的步骤都先读取官方 rollout 事件，等待活动回合出现 `task_complete` 或 `turn_aborted` 并稳定落盘，超时则拒绝关闭；固定启动延时不承担会话保护。关闭 Codex 后还要等关闭前的注入器释放单实例监听，才能启动正式入口，避免重开请求被即将退出的旧进程吞掉。安装回滚在恢复入口重新就绪后才写回安装版本，并重新核对主程序、对应版本的两套 Relay 和注册表，文件与安装元数据不一致时不能标为回滚通过。Windows 还会检查发起回合所在 rollout 的 ordinal 连续性和分页投影进度：已知的重复 ordinal 或缺失中断终态在停止相关进程、备份原文件和两套 SQLite 后自动修复，只重建目标任务投影；内容摘要不一致或结构未知时保持阻塞。每套运行环境只在桌面停止期间通过对应正式 Relay 发送不启动回合的 `thread/resume` 来恢复落后的目标任务，并使用独立状态文件；重建进程退出后才启动桌面。启动后的门禁只读等待 SQLite 追平，同时要求发起回合已成为 `completed` 或 `interrupted`、首条用户消息存在，且完成回合的最终助手消息存在；不会再并发启动第二个 app-server。步骤开始前写检查点，已核实完成的副作用不重复，模型请求结果未知时拒绝自动重放并先恢复原账号；存在未完成或回滚失败的 C 时，新任务只展示恢复命令，不覆盖现场。
 
 ## 补测发现并修复的问题
 
@@ -102,4 +115,4 @@ B1 只选择 Codex 官方模型，B2 只选择已配置的 DeepSeek 模型；两
 
 MCP 回归固定 `never` 下写入拒绝无副作用和只读工具实际执行两条路径，宿主 URL 使用明确的回环 HTTP 契约；网页来源回归同时固定官方正例和仿冒/无关反例；第三方历史回归实际经过官方 app-server 和内置 DeepSeek 路由，覆盖真实推理项、工具历史、恢复、分叉和压缩。修复针对共享数据流和测试边界，并有实际失效断言。
 
-发布版本为 `0.1.216`，Widget 运行时 `127`，中继协议 `57`；账号新增临时与已转出状态及迁移时间，因此账号存储版本为 `3`。源码版本和日常 Codex 实际加载版本分别记录，只有 lifecycle 报告中的正式包哈希及中继 generation 能证明本次加载。
+发布版本为 `0.1.219`，Widget 运行时 `128`，中继协议 `58`；账号新增临时与已转出状态及迁移时间，因此账号存储版本为 `3`。源码版本和日常 Codex 实际加载版本分别记录，只有 lifecycle 报告中的正式包哈希及中继 generation 能证明本次加载。

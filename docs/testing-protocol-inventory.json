@@ -6,6 +6,188 @@
   "cliVersion": "0.154.0-alpha.6.2",
   "source": "installed official desktop Resources/codex",
   "generator": "codex app-server generate-json-schema --out <temporary-directory> [--experimental]",
+  "reviewedVariants": [
+    {
+      "capturedOn": "2026-09-14",
+      "projectVersionAtInspection": "0.1.219",
+      "platform": "win32",
+      "architecture": "x64",
+      "desktopVersion": "26.908.4834",
+      "cliVersion": "0.154.0-alpha.6.2",
+      "source": "installed Microsoft Store Codex resources/codex.exe",
+      "modes": {
+        "default": {
+          "ClientRequest": {
+            "count": 99,
+            "sha256": "da767fedd73502ceb644f5d7974927e1a6b7f1917b092aaa029e81949abf0125"
+          },
+          "ServerRequest": {
+            "count": 10,
+            "sha256": "f339be472737a0003efa25fba2e6e6c9237e621cd065b6d6995c51256e9dc1fb"
+          },
+          "ClientNotification": {
+            "count": 1,
+            "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+          },
+          "ServerNotification": {
+            "count": 81,
+            "sha256": "2a52bea56cd6bd994a9d014e2af60d631446d810bd78181714e4b05375a9a222"
+          }
+        },
+        "experimental": {
+          "ClientRequest": {
+            "count": 159,
+            "sha256": "4b1ea47e8a389402556b23451b5a690944e498dc31557b1bca3525631655f1f4"
+          },
+          "ServerRequest": {
+            "count": 11,
+            "sha256": "97149b290b077be5d970e7b1ade1e936d1152520b6c0187ce8745cb3d639b2cb"
+          },
+          "ClientNotification": {
+            "count": 1,
+            "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+          },
+          "ServerNotification": {
+            "count": 81,
+            "sha256": "eb4317b57ce7cad32d6ab8a5b7d39eb765c8fb8f67acbc808dd6e55959411c93"
+          }
+        }
+      },
+      "methodChanges": {},
+      "reviewedDifferencesFromBaseline": [
+        "Windows x64 与基线 0.154.0-alpha.6.2 的默认和实验协议共 8 份 JSON schema 逐字节一致。"
+      ]
+    },
+    {
+      "capturedOn": "2026-09-13",
+      "projectVersionAtInspection": "0.1.207",
+      "platform": "win32",
+      "architecture": "x64",
+      "desktopVersion": "26.903.9818",
+      "cliVersion": "0.153.4",
+      "source": "installed Microsoft Store Codex resources/codex.exe",
+      "modes": {
+        "default": {
+          "ClientRequest": {
+            "count": 99,
+            "sha256": "25bc001b5dfe3b35785597b8f9ad9e5aaf7e437331fa9921f041c9e0e03fc9f3"
+          },
+          "ServerRequest": {
+            "count": 10,
+            "sha256": "31f580ad468fbd18766eb7adb12744be4e3790e3357b58bd4413c0108c4f65d0"
+          },
+          "ClientNotification": {
+            "count": 1,
+            "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+          },
+          "ServerNotification": {
+            "count": 81,
+            "sha256": "b3e76cf11842f3e8b3270c05e000212b56eabafb0152fc38e8f920e2ef902991"
+          }
+        },
+        "experimental": {
+          "ClientRequest": {
+            "count": 155,
+            "sha256": "05c82ead1a820c765c23d3a1d262e4ae54889785276ee1acf7c494141fd94d70"
+          },
+          "ServerRequest": {
+            "count": 11,
+            "sha256": "38bb1c9dbb1dda2a688a7c8712b04319fe6ee2ed28b54acd2f5fd341d25567ff"
+          },
+          "ClientNotification": {
+            "count": 1,
+            "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+          },
+          "ServerNotification": {
+            "count": 81,
+            "sha256": "1a59e2cecb8e7930c4358f7a92245d9d52c96adb0e02b210fc39772ed10610fc"
+          }
+        }
+      },
+      "methodChanges": {
+        "experimental": {
+          "ClientRequest": {
+            "removed": [
+              "userVerification/status",
+              "userVerification/enroll",
+              "userVerification/delete",
+              "userVerification/verify"
+            ]
+          }
+        }
+      },
+      "reviewedDifferencesFromBaseline": [
+        "0.153.4 不提供四个实验性 userVerification 请求，也不提供对应的设备验证 elicitation 结构。",
+        "0.154.0-alpha.6.2 新增 configuration_update 响应项、账号用量能力参数、thread/list originators、thread metadata 的 daybreakEnabled、额度 normalModelSlug 与任务 originator。",
+        "审批路径类型在 0.153.4 使用 AbsolutePathBuf，在 0.154.0-alpha.6.2 使用 LegacyAppPathString；review detached 的弃用说明只存在于后者。"
+      ]
+    },
+    {
+      "capturedOn": "2026-09-13",
+      "projectVersionAtInspection": "0.1.210",
+      "platform": "linux",
+      "architecture": "x64",
+      "desktopVersion": "not-applicable-wsl",
+      "cliVersion": "0.153.4",
+      "source": "WSL Ubuntu npm @openai/codex@0.153.4",
+      "modes": {
+        "default": {
+          "ClientRequest": {
+            "count": 99,
+            "sha256": "25bc001b5dfe3b35785597b8f9ad9e5aaf7e437331fa9921f041c9e0e03fc9f3"
+          },
+          "ServerRequest": {
+            "count": 10,
+            "sha256": "31f580ad468fbd18766eb7adb12744be4e3790e3357b58bd4413c0108c4f65d0"
+          },
+          "ClientNotification": {
+            "count": 1,
+            "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+          },
+          "ServerNotification": {
+            "count": 81,
+            "sha256": "b3e76cf11842f3e8b3270c05e000212b56eabafb0152fc38e8f920e2ef902991"
+          }
+        },
+        "experimental": {
+          "ClientRequest": {
+            "count": 155,
+            "sha256": "05c82ead1a820c765c23d3a1d262e4ae54889785276ee1acf7c494141fd94d70"
+          },
+          "ServerRequest": {
+            "count": 11,
+            "sha256": "38bb1c9dbb1dda2a688a7c8712b04319fe6ee2ed28b54acd2f5fd341d25567ff"
+          },
+          "ClientNotification": {
+            "count": 1,
+            "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+          },
+          "ServerNotification": {
+            "count": 81,
+            "sha256": "1a59e2cecb8e7930c4358f7a92245d9d52c96adb0e02b210fc39772ed10610fc"
+          }
+        }
+      },
+      "methodChanges": {
+        "experimental": {
+          "ClientRequest": {
+            "removed": [
+              "userVerification/status",
+              "userVerification/enroll",
+              "userVerification/delete",
+              "userVerification/verify"
+            ]
+          }
+        }
+      },
+      "reviewedDifferencesFromBaseline": [
+        "0.153.4 不提供四个实验性 userVerification 请求，也不提供对应的设备验证 elicitation 结构。",
+        "0.154.0-alpha.6.2 新增 configuration_update 响应项、账号用量能力参数、thread/list originators、thread metadata 的 daybreakEnabled、额度 normalModelSlug 与任务 originator。",
+        "审批路径类型在 0.153.4 使用 AbsolutePathBuf，在 0.154.0-alpha.6.2 使用 LegacyAppPathString；review detached 的弃用说明只存在于后者。",
+        "Linux x64 与 Windows x64 的 0.153.4 默认和实验协议共 8 份 JSON schema 逐字节一致。"
+      ]
+    }
+  ],
   "modes": {
     "default": {
       "ClientRequest": {

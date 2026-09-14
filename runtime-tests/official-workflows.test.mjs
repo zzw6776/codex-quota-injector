@@ -27,7 +27,7 @@ test("[A HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时临时配置、本地端点
   assert.equal(config.config.model, r.model);
   assert.equal(config.config.sandbox_mode, "danger-full-access");
   assert.equal(config.config.model_catalog_json, r.catalogPath);
-  assert.ok(JSON.stringify(config.layers).includes(r.env.CODEX_HOME));
+  assert.ok(config.layers.some(layer => layer.name?.file === join(r.env.CODEX_HOME, "config.toml")));
   assert.equal(r.requests.length, 0, "初始化与配置读取不发送模型请求");
 });
 
@@ -66,9 +66,15 @@ for (const profile of ["direct", "shim", "router", "custom", "chat", "configured
     assert.ok(items.some(i => i.type === "agentMessage" && i.text.includes("检查测试文件")));
     assert.equal(turn.items.filter(i => i.type === "agentMessage" && i.text.includes("文件修改和失败命令均已核对")).length, 1);
     assert.ok(r.requests.some(q => q.method === "WS" || q.method === "POST"));
-    if (r.router) {
+    const observesOfficialTraffic = r.router || (profile === "shim" &&
+      ["windows-native", "wsl-native"].includes(process.env.CODEX_TEST_RUNTIME_TARGET));
+    if (observesOfficialTraffic) {
       const usage = (await readFile(r.usagePath, "utf8")).trim().split("\n").map(JSON.parse);
-      assert.ok(usage.some(event => JSON.stringify(event).includes(thread.id)));
+      assert.ok(usage.some(event => event.type === "generation" &&
+        event.threadId === thread.id && event.turnId === turn.id),
+      "原生 Relay 必须记录当前轮次的模型传输指标");
+    }
+    if (r.router) {
       assert.ok(r.requests.filter(q => q.body.generate !== false && q.method !== "HEAD").every(q =>
         q.headers.authorization === `Bearer ${profile === "router" ? "sk-offline-fixture-no-account" : "sk-fixture-platform"}`));
     }
@@ -100,7 +106,11 @@ test("[A TOOL-01 ENV-03 IO-01 RPC-05 OBS-03] 官方 fs 接口读取、复制、�
   await r.rpc.request("fs/unwatch", { watchId });
   await r.rpc.request("fs/remove", { path: copy });
   await assert.rejects(readFile(copy), { code: "ENOENT" });
-  await assert.rejects(r.rpc.request("fs/readFile", { path: copy }), /No such file|not found|不存在/i);
+  await assert.rejects(r.rpc.request("fs/readFile", { path: copy }), error => {
+    assert.equal(error.code, -32603);
+    assert.match(error.message, /\(os error 2\)$/);
+    return true;
+  });
 });
 
 test("[A TOOL-02 ENV-01] 官方命令 PTY 的输入、调整尺寸、输出和受控终止", { timeout: 30_000 }, async t => {

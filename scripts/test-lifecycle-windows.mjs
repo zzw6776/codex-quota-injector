@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { access, mkdir, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
@@ -22,6 +23,7 @@ import {
   validateLifecycleControl,
   writeLifecycleReport,
 } from "../src/lifecycle-runner.mjs";
+import { captureCodexSessionCheckpoint } from "../src/lifecycle-turn-gate.mjs";
 import { RELAY_PROTOCOL_VERSION } from "../src/relay-contract.mjs";
 import {
   createWindowsLifecyclePlan,
@@ -29,6 +31,8 @@ import {
   verifyWindowsInstaller,
   windowsScheduledTaskScript,
   writePrivateJson,
+  windowsInjectorOwnedByInstalledApp,
+  windowsInjectorOwnedBySource,
 } from "./lifecycle-windows.mjs";
 import { requireFreeResult, RESULTS, ROOT, sourceSnapshot } from "./test-support.mjs";
 
@@ -40,20 +44,23 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
   assertWindows();
   const statusArgument = argv.find((arg) => arg === "--status" || arg.startsWith("--status="));
   const resumeArgument = argv.find((arg) => arg.startsWith("--resume="));
+  const recoverArgument = argv.find((arg) => arg.startsWith("--recover="));
   const installerArgument = argv.find((arg) => arg.startsWith("--installer="));
   const known = new Set(["--plan", "--confirm-restart", "--status"]);
   for (const argument of argv) {
     if (!known.has(argument) && !argument.startsWith("--status=") &&
-      !argument.startsWith("--resume=") && !argument.startsWith("--installer=")) {
+      !argument.startsWith("--resume=") && !argument.startsWith("--recover=") &&
+      !argument.startsWith("--installer=")) {
       throw new Error(`未知参数 ${argument}`);
     }
   }
   const actions = argv.filter((argument) =>
     argument === "--plan" || argument === "--confirm-restart" || argument === "--status" ||
     argument.startsWith("--status=") || argument.startsWith("--resume=")
+    || argument.startsWith("--recover=")
   );
   if (actions.length !== 1) {
-    throw new Error("请选择一个操作：--plan、--confirm-restart、--status 或 --resume=<run-id>");
+    throw new Error("请选择一个操作：--plan、--confirm-restart、--status、--resume=<run-id> 或 --recover=<run-id>");
   }
 
   if (statusArgument) {
@@ -84,7 +91,9 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
       throw new Error(`生命周期任务 ${runId} 已以 ${report.status} 结束，不能恢复`);
     }
     if (decision === "manual-recovery") {
-      throw new Error(`生命周期任务 ${runId} 回滚失败；请查看报告并先恢复配置、安装和账号状态`);
+      throw new Error(
+        `生命周期任务 ${runId} 回滚失败；请执行 npm run test:lifecycle -- --recover=${runId}`,
+      );
     }
     if (decision === "already-running") {
       console.log(JSON.stringify({
@@ -98,6 +107,29 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
     await scheduleWindowsTask(control);
     console.log(JSON.stringify({
       status: "resumed",
+      runId,
+      reportPath: control.reportPath,
+      progressPath: control.progressPath,
+    }, null, 2));
+    return;
+  }
+
+  if (recoverArgument) {
+    const runId = safeRunId(recoverArgument.slice("--recover=".length));
+    const runDirectory = join(lifecycleRoot, runId);
+    const controlPath = join(runDirectory, "control.json");
+    const control = JSON.parse(await readFile(controlPath, "utf8"));
+    validateLifecycleControl(control, { root: ROOT, runDirectory });
+    const report = await readLifecycleReport(control.reportPath);
+    if (report.status !== "rollback-failed") {
+      throw new Error(`生命周期任务 ${runId} 状态为 ${report.status}，没有失败回滚需要恢复`);
+    }
+    control.progressPath ??= join(runDirectory, "progress.html");
+    await writeLifecycleProgressPage(control.reportPath, control.progressPath);
+    await openProgressPage(control.progressPath);
+    await scheduleWindowsTask(control, { recovery: true });
+    console.log(JSON.stringify({
+      status: "recovery-scheduled",
       runId,
       reportPath: control.reportPath,
       progressPath: control.progressPath,
@@ -125,7 +157,7 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
     unfinishedLifecycle: unfinishedLifecycle ? {
       ...unfinishedLifecycle,
       nextCommand: unfinishedLifecycle.status === "rollback-failed"
-        ? `npm run test:lifecycle -- --status=${unfinishedLifecycle.runId}`
+        ? `npm run test:lifecycle -- --recover=${unfinishedLifecycle.runId}`
         : `npm run test:lifecycle -- --resume=${unfinishedLifecycle.runId}`,
     } : null,
   };
@@ -175,6 +207,8 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
   const progressPath = join(runDirectory, "progress.html");
   const installedApp = DEFAULT_WINDOWS_INSTALL_DIR;
   const backupApp = join(runDirectory, "installed-backup");
+  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+  const sessionCheckpoint = await captureCodexSessionCheckpoint({ codexHome });
   const runtimeConfiguration = await captureWindowsRuntimeConfiguration({ runDirectory });
   if (runtimeConfiguration.originalRuntime !== plan.currentRuntime) {
     throw new Error("Codex 运行方式在计划与调度之间发生变化；请重新查看 C 批计划");
@@ -188,12 +222,21 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
   if (installedPresent !== Boolean(initialPrivate.installedVersion)) {
     throw new Error("Windows 安装目录与卸载注册版本在调度前不一致；未开始更新");
   }
+  const [initialSourceOwner, initialInstalledOwner] = await Promise.all([
+    windowsInjectorOwnedBySource(initialPrivate.injectorPids, ROOT),
+    windowsInjectorOwnedByInstalledApp(initialPrivate.injectorPids, installedApp),
+  ]);
+  if (initialSourceOwner === initialInstalledOwner) {
+    throw new Error("无法唯一确认测试前由源码入口还是正式安装入口启动，未开始生命周期测试");
+  }
   const report = createLifecycleReport({
     runId,
     projectVersion: packageJson.version,
     targetRelayProtocol: RELAY_PROTOCOL_VERSION,
     steps: [
       "verify-package",
+      "wait-desktop-idle",
+      "repair-desktop-history",
       "install-update",
       "switch-windows-runtime",
       "launch-windows-native",
@@ -216,7 +259,8 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
       currentRuntime: plan.currentRuntime,
       runtimeTargets: plan.runtimeTargets,
       components: {
-        "C-package-common": ["verify-package", "install-update"],
+        "C-package-common": ["verify-package", "wait-desktop-idle",
+          "repair-desktop-history", "install-update"],
         "C-windows-native": ["launch-windows-native", "repeat-windows-native",
           "reconnect-windows-native", "reopen-windows-native"],
         "C-wsl-native": ["launch-wsl-native", "repeat-wsl-native",
@@ -244,6 +288,14 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
         tokenHubResponses: "not-run",
         tokenHubChat: "not-run",
       },
+      sessionCheckpoint: {
+        capturedAt: sessionCheckpoint.capturedAt,
+        turns: sessionCheckpoint.turns.map((turn) => ({
+          threadId: threadIdFromRolloutPath(turn.path),
+          turnId: turn.turnId,
+          startedAt: turn.startedAt,
+        })),
+      },
     },
   });
   await writeLifecycleReport(reportPath, report);
@@ -262,6 +314,8 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
     backupApp,
     sourceRecoveryRelay: plan.sourceRecoveryRelay,
     sourceRecoveryMode: plan.sourceRecoveryMode,
+    codexHome,
+    sessionCheckpoint,
     runtimeConfiguration,
     initialHost: {
       installedPresent,
@@ -269,6 +323,7 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
       codexPids: initialPrivate.codexPids,
       injectorPids: initialPrivate.injectorPids,
       relay: initialPrivate.relay,
+      recoveryEntry: initialSourceOwner ? "current-source" : "installed-package",
     },
     accounts: {
       available: initialPrivate.privateAccountPair.available,
@@ -299,13 +354,14 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
   }, null, 2));
 }
 
-async function scheduleWindowsTask(control) {
+async function scheduleWindowsTask(control, { recovery = false } = {}) {
   const script = windowsScheduledTaskScript({
     taskName: control.scheduler.taskName,
     nodeExecutable: process.execPath,
     supervisorScript: join(ROOT, "scripts", "lifecycle-supervisor.mjs"),
     controlPath: join(lifecycleRoot, control.runId, "control.json"),
     workingDirectory: ROOT,
+    recovery,
   });
   await execFileAsync(
     "powershell.exe",
@@ -339,4 +395,8 @@ function safeRunId(value) {
 
 function powershellQuote(value) {
   return String(value).replaceAll("'", "''");
+}
+
+function threadIdFromRolloutPath(path) {
+  return String(path ?? "").match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i)?.[1] ?? null;
 }

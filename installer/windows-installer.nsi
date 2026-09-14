@@ -50,6 +50,7 @@ Section "Install"
   ${EndIf}
   SetOutPath "$INSTDIR"
   File "/oname=Codex Quota Injector.exe" "${INPUT_EXE}"
+  File "/oname=AppIcon.ico" "${APP_ICON}"
   File "/oname=NODE_LICENSE.txt" "${NODE_LICENSE}"
   Delete "$INSTDIR\relay\codex-quota-relay-windows-*"
   Delete "$INSTDIR\relay\codex-quota-relay-wsl-*"
@@ -67,8 +68,8 @@ Section "Install"
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex Quota Injector" "NoRepair" 1
 
   CreateDirectory "$SMPROGRAMS\Codex Quota Injector"
-  CreateShortCut "$SMPROGRAMS\Codex Quota Injector\Codex Quota Injector.lnk" "$INSTDIR\Codex Quota Injector.exe"
-  CreateShortCut "$DESKTOP\Codex Quota Injector.lnk" "$INSTDIR\Codex Quota Injector.exe"
+  CreateShortCut "$SMPROGRAMS\Codex Quota Injector\Codex Quota Injector.lnk" "$INSTDIR\Codex Quota Injector.exe" "" "$INSTDIR\AppIcon.ico"
+  CreateShortCut "$DESKTOP\Codex Quota Injector.lnk" "$INSTDIR\Codex Quota Injector.exe" "" "$INSTDIR\AppIcon.ico"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 SectionEnd
 
@@ -78,6 +79,7 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\Codex Quota Injector\Codex Quota Injector.lnk"
   RMDir "$SMPROGRAMS\Codex Quota Injector"
   Delete "$INSTDIR\Codex Quota Injector.exe"
+  Delete "$INSTDIR\AppIcon.ico"
   Delete "$INSTDIR\NODE_LICENSE.txt"
   Delete "$INSTDIR\relay\codex-quota-relay-windows-*"
   Delete "$INSTDIR\relay\codex-quota-relay-wsl-*"

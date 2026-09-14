@@ -104,23 +104,82 @@ export async function execOffline(executable, args, { directory, ...options }) {
   });
 }
 
-export async function stopChild(child) {
+function childStreamsClosed(child) {
+  return child.stdio.filter(Boolean)
+    .every((stream) => stream.closed === true || stream.destroyed === true);
+}
+
+function childClosePromise(child) {
+  if (childStreamsClosed(child)) return Promise.resolve();
+  return new Promise(resolve => {
+    const finish = () => {
+      child.off("close", finish);
+      resolve();
+    };
+    child.once("close", finish);
+    if (childStreamsClosed(child)) finish();
+  });
+}
+
+async function finishChildClose(child, closed, timeoutMs) {
+  let timer;
+  const completed = await Promise.race([
+    closed.then(() => true),
+    new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+  ]);
+  clearTimeout(timer);
+  if (completed) return;
+  // A command launched by the official app-server can outlive and be reparented
+  // after its parent exits while still holding the inherited stdout/stderr pipes.
+  // Closing our pipe ends must not make the whole test runner wait forever.
+  child.stdin?.end();
+  for (const stream of child.stdio.filter(Boolean)) stream.destroy();
+  await Promise.race([
+    closed,
+    new Promise(resolve => setTimeout(resolve, Math.min(timeoutMs, 250))),
+  ]);
+}
+
+export async function stopChild(child, {
+  terminateWindowsTree = execFileAsync,
+  closeTimeoutMs = 2_000,
+} = {}) {
   if (!child) return;
   const exited = child.exitCode != null || child.signalCode != null;
-  const streamsClosed = child.stdio.filter(Boolean)
-    .every((stream) => stream.closed === true || stream.destroyed === true);
+  const streamsClosed = childStreamsClosed(child);
   if (exited && streamsClosed) return;
   // macOS 的签名安全拓扑让官方 app-server 保持桌面的直接子进程，RPC
   // 观察器则作为 sidecar 继续持有同一组 stdio。只等 `exit` 会在 sidecar
   // 完成最后的状态/用量收尾前删除临时 HOME；`close` 才代表整条 stdio
   // 链已经释放。
-  const closed = once(child, "close").catch(() => undefined);
+  const closed = childClosePromise(child);
+  if (process.platform === "win32" && !exited) {
+    const exitedEvent = once(child, "exit").catch(() => undefined);
+    const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+    try {
+      await terminateWindowsTree(taskkill, ["/PID", String(child.pid), "/T", "/F"], {
+        windowsHide: true,
+        timeout: 5_000,
+      });
+    } catch (error) {
+      const exitedDuringTaskkill = child.exitCode != null || child.signalCode != null || await Promise.race([
+        exitedEvent.then(() => true),
+        new Promise(resolve => setTimeout(() => resolve(false), 250)),
+      ]);
+      if (!exitedDuringTaskkill) {
+        throw new Error(`无法终止 Windows 测试进程树 ${child.pid}: ${error.stderr || error.message}`);
+      }
+    }
+    await finishChildClose(child, closed, closeTimeoutMs);
+    return;
+  }
+  let killTimeout = null;
   if (!exited) {
     child.stdin?.end();
     child.kill("SIGTERM");
+    killTimeout = setTimeout(() => child.kill("SIGKILL"), closeTimeoutMs);
   }
-  const timeout = setTimeout(() => child.kill("SIGKILL"), 2_000);
-  try { await closed; } finally { clearTimeout(timeout); }
+  try { await finishChildClose(child, closed, closeTimeoutMs); } finally { clearTimeout(killTimeout); }
 }
 
 export function message(text, phase = "final_answer") {
@@ -335,7 +394,12 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
     await new Promise(resolve => sockets.close(resolve));
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 20 : 0,
+      retryDelay: 50,
+    });
     assert.deepEqual(failures.map(e => e.message), [], "本地模型服务断言失败");
     assert.equal(steps.length, 0, "有已计划但未执行的模型请求");
   });
@@ -432,6 +496,8 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
       platforms: route ? [platform] : [],
     }));
     const configPath = join(directory, "relay-config.json");
+    const observeModelTraffic = !route &&
+      [WINDOWS_NATIVE, WSL_NATIVE].includes(runtimeTarget);
     await writeFile(configPath, JSON.stringify({
       version: process.platform === "darwin" ? 5 : 2,
       upstreamExecutable: cli,
@@ -442,6 +508,10 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
       hostToolsRequired: true,
       runtimeTarget,
       tokenUsageEventsPath: usagePath,
+      observeModelTraffic,
+      officialAuthMode: "apiKey",
+      officialApiBaseUrl: observeModelTraffic ? origin : null,
+      officialCodexBaseUrl: observeModelTraffic ? origin : null,
       generation: `offline-${randomUUID()}`,
       router: route ? { providerId: route.providerId, baseUrl: route.baseUrl,
         tokenEnv: route.tokenEnv, tokenHeader: route.tokenHeader,

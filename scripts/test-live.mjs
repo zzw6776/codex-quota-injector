@@ -169,6 +169,8 @@ try {
       expectedCliSha256: free.selectedRuntimeComponent.runtimeSnapshot?.cli?.sha256,
       expectedRelaySha256: free.selectedRuntimeComponent.artifact?.sha256,
       existingRelayPath: free.selectedRuntimeComponent.artifact?.path,
+      browserPath: free.runtimeSnapshot.browser?.path,
+      expectedBrowserSha256: free.runtimeSnapshot.browser?.sha256,
     });
     report.wslRuntimeSnapshot = result.runtimeSnapshot ?? null;
     code = result.status === "passed" ? 0 : 1;

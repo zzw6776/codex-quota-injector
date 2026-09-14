@@ -16,8 +16,11 @@ $logRoot = Join-Path $localAppDataRoot "Codex Quota Injector\Logs"
 $bootstrapLog = Join-Path $logRoot "launcher.log"
 $stdoutLog = Join-Path $logRoot "injector-stdout.log"
 $stderrLog = Join-Path $logRoot "injector-stderr.log"
+$dependencyHelper = Join-Path $projectRoot "scripts\windows-dev-dependencies.ps1"
 
 New-Item -ItemType Directory -Path $dataRoot, $logRoot -Force | Out-Null
+. $dependencyHelper
+Reset-WindowsDevLauncherEnvironment
 
 function Write-LauncherLog([string]$message) {
   Add-Content -LiteralPath $bootstrapLog -Value "$(Get-Date -Format o) $message" -Encoding UTF8
@@ -51,20 +54,12 @@ function Test-WslRelayFile(
   if (-not (Test-Path -LiteralPath $relayExecutable -PathType Leaf)) {
     return $false
   }
-  $verifyOutput = @()
-  $verifyExitCode = 1
-  $previousErrorActionPreference = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    $verifyOutput = & $nodeExecutable $relayBuilder "--verify" $relayExecutable 2>&1
-    $verifyExitCode = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $previousErrorActionPreference
-  }
-  foreach ($line in $verifyOutput) {
+  $verify = Invoke-WindowsProcess -Executable $nodeExecutable `
+    -Arguments @($relayBuilder, "--verify", $relayExecutable)
+  foreach ($line in $verify.Output) {
     Write-LauncherLog "[wsl-relay-verify] $line"
   }
-  return $verifyExitCode -eq 0
+  return $verify.ExitCode -eq 0
 }
 
 try {
@@ -79,15 +74,24 @@ try {
       throw "Node.js 22.23.1 was not found"
     }
     $nodeExecutable = $nodeCommand.Path
-    $nodeVersion = (& $nodeExecutable --version).Trim()
+    $nodeVersionResult = Invoke-WindowsProcess -Executable $nodeExecutable -Arguments @("--version")
+    if ($nodeVersionResult.ExitCode -ne 0) {
+      throw "Unable to read Windows Node.js version; exitCode=$($nodeVersionResult.ExitCode)"
+    }
+    $nodeVersion = ($nodeVersionResult.Output -join "`n").Trim()
     if ($nodeVersion -notmatch '^v22\.') {
       throw "Windows development launcher requires Node.js 22, found $nodeVersion"
     }
   }
 
-  $nodeModules = Join-Path $projectRoot "node_modules"
-  if (-not (Test-Path -LiteralPath $nodeModules -PathType Container)) {
-    throw "node_modules was not found; run npm install in the project directory first"
+  $npmCli = Join-Path (Split-Path -Parent $nodeExecutable) "node_modules\npm\bin\npm-cli.js"
+  if (-not (Test-Path -LiteralPath $npmCli -PathType Leaf)) {
+    throw "npm CLI was not found next to Node.js: $npmCli"
+  }
+  if (Sync-WindowsDevDependencies $projectRoot $nodeExecutable $npmCli $bootstrapLog) {
+    Write-LauncherLog "Windows development dependencies installed"
+  } else {
+    Write-LauncherLog "Windows development dependencies are already complete"
   }
 
   $package = Get-Content -LiteralPath (Join-Path $projectRoot "package.json") -Raw |
@@ -116,19 +120,13 @@ try {
         "--output",
         $relayExecutable
       )
-      $relayBuildOutput = @()
-      $relayBuildExitCode = 1
-      $previousErrorActionPreference = $ErrorActionPreference
-      try {
-        $ErrorActionPreference = "Continue"
-        $relayBuildOutput = & $nodeExecutable $relayBuilder @relayBuildArguments 2>&1
-        $relayBuildExitCode = $LASTEXITCODE
-      } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-      }
-      foreach ($line in $relayBuildOutput) {
+      $relayCommandArguments = @($relayBuilder)
+      $relayCommandArguments += $relayBuildArguments
+      $relayBuild = Invoke-WindowsProcess -Executable $nodeExecutable -Arguments $relayCommandArguments
+      foreach ($line in $relayBuild.Output) {
         Write-LauncherLog "[wsl-relay] $line"
       }
+      $relayBuildExitCode = $relayBuild.ExitCode
       $relayValid = ($relayBuildExitCode -eq 0) -and (Test-WslRelayFile $nodeExecutable $relayBuilder $relayExecutable)
       if (-not $relayValid) {
         throw "WSL SEA development relay build failed; exitCode=$relayBuildExitCode; target=$relayExecutable"
@@ -148,17 +146,11 @@ try {
         "--output",
         $relayExecutable
       )
-      $relayBuildOutput = @()
-      $relayBuildExitCode = 1
-      $previousErrorActionPreference = $ErrorActionPreference
-      try {
-        $ErrorActionPreference = "Continue"
-        $relayBuildOutput = & $nodeExecutable $relayBuilder @relayBuildArguments 2>&1
-        $relayBuildExitCode = $LASTEXITCODE
-      } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-      }
-      foreach ($line in $relayBuildOutput) {
+      $relayCommandArguments = @($relayBuilder)
+      $relayCommandArguments += $relayBuildArguments
+      $relayBuild = Invoke-WindowsProcess -Executable $nodeExecutable -Arguments $relayCommandArguments
+      $relayBuildExitCode = $relayBuild.ExitCode
+      foreach ($line in $relayBuild.Output) {
         Write-LauncherLog "[relay] $line"
       }
       $relayInfo = Get-Item -LiteralPath $relayExecutable -ErrorAction SilentlyContinue

@@ -67,6 +67,24 @@ test("[A HAR-02 LCH-01] 回滚尚未结束时持续刷新且不提前宣称恢�
   assert.match(html, /原 Codex PID 10 · Codex PID 20 · 注入器 PID 30 · 中继协议 53 · 中继 PID 40/);
 });
 
+test("[A HAR-02 LCH-05] 失败回滚重试时显示恢复中而不是再次宣称测试运行", () => {
+  const report = createLifecycleReport({
+    runId: "rollback-recovery",
+    projectVersion: "1.2.3",
+    targetRelayProtocol: 55,
+    steps: ["install-update"],
+  });
+  report.status = "rollback-failed";
+  report.ownerPid = 789;
+  report.steps[0].status = "passed";
+  report.steps[0].rollback = { status: "running" };
+  report.recovery = { status: "running", attempts: 1 };
+  const html = renderLifecycleProgressHtml(report);
+  assert.match(html, /正在恢复上一次生命周期测试未能回滚的状态/);
+  assert.match(html, /http-equiv="refresh" content="1"/);
+  assert.doesNotMatch(html, /测试失败，且有状态未能自动恢复/);
+});
+
 test("[A HAR-02 HAR-03] 报告更新后渲染器刷新页面，停止前写入最终状态", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
@@ -166,4 +184,20 @@ test("[A HAR-02 LCH-02] Windows 报告页分别显示原生、WSL 和自动恢�
   assert.match(html, /C-runtime-switch/);
   assert.match(html, /切换到 Windows 原生运行方式/);
   assert.match(html, /恢复测试前的 Codex 运行方式/);
+});
+
+test("[A HAR-02 LCH-01] 进度页显示结束时的 Codex 窗口置前结果", () => {
+  const report = createLifecycleReport({
+    runId: "completion-notification",
+    projectVersion: "1.2.3",
+    targetRelayProtocol: 55,
+    steps: ["final-state"],
+  });
+  report.status = "passed";
+  report.finishedAt = new Date().toISOString();
+  report.steps[0].status = "passed";
+  report.completionNotification = { status: "activated" };
+  assert.match(renderLifecycleProgressHtml(report), /结束置前：Codex 窗口已置前/);
+  report.completionNotification.status = "failed";
+  assert.match(renderLifecycleProgressHtml(report), /结束置前：Codex 窗口未能自动置前/);
 });

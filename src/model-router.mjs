@@ -65,6 +65,7 @@ export class ModelRouterManager {
     networkProbeIntervalMs = DEFAULT_NETWORK_PROBE_INTERVAL_MS,
     networkProbeTimeoutMs = DEFAULT_NETWORK_PROBE_TIMEOUT_MS,
     onRequestShape = null,
+    log = console.log,
   } = {}) {
     this.server = null;
     this.webSocketServer = null;
@@ -98,6 +99,7 @@ export class ModelRouterManager {
     this.onRequestShape = typeof onRequestShape === "function"
       ? onRequestShape
       : null;
+    this.log = typeof log === "function" ? log : () => {};
   }
 
   onNetworkChange(listener) {
@@ -114,6 +116,7 @@ export class ModelRouterManager {
     deepSeek,
     extraModels,
     officialAuthMode = null,
+    observeOfficial = false,
     usageEventPath = null,
     reusableIdentity = null,
   }) {
@@ -124,7 +127,7 @@ export class ModelRouterManager {
       officialAuthMode,
       deepSeekBaseUrl: this.deepSeekBaseUrl,
     });
-    if (normalized.targets.size === 0) {
+    if (normalized.targets.size === 0 && !observeOfficial) {
       await this.disable();
       return null;
     }
@@ -132,13 +135,14 @@ export class ModelRouterManager {
     this.#reuseIdentity(reusableIdentity);
     await this.#ensureServer();
     await this.#ensureUsageWriter(usageEventPath);
-    if (normalized.signature !== this.snapshotSignature) {
+    const snapshotSignature = `${normalized.signature}:observe-official=${Boolean(observeOfficial)}`;
+    if (snapshotSignature !== this.snapshotSignature) {
       const replacingSnapshot = this.snapshotSignature !== null;
       const nextCompatibilityProxy = await startChatCompatibilityProxy(normalized.platforms);
       const previousCompatibilityProxy = this.chatCompatibilityProxy;
       this.chatCompatibilityProxy = nextCompatibilityProxy;
       this.snapshot = buildRoutingSnapshot(normalized, nextCompatibilityProxy);
-      this.snapshotSignature = normalized.signature;
+      this.snapshotSignature = snapshotSignature;
       this.threadRoutes.clear();
       if (replacingSnapshot) {
         this.#closeWebSocketConnections(1012, "模型路由配置已更新");
@@ -267,7 +271,7 @@ export class ModelRouterManager {
     this.server = server;
     this.webSocketServer = webSocketServer;
     this.port = address.port;
-    console.log(`[model-router] 已监听 127.0.0.1:${this.port}`);
+    this.log(`[model-router] 已监听 127.0.0.1:${this.port}`);
   }
 
   async #listenOnPreferredPort(server) {

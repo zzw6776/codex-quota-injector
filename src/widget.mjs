@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 127;
+export const WIDGET_RUNTIME_VERSION = 128;
 
 export function paginateGenerationDetails(details, visibleCount = 20) {
   const ordered = Array.isArray(details)
@@ -366,6 +366,21 @@ export function calculatePopoverMaxHeight(chipTop) {
   return Math.max(0, Math.min(MAX_HEIGHT, Math.floor(top - TITLE_BAR_SAFE_TOP - ANCHOR_GAP)));
 }
 
+export function calculateScrollbarEndPadding(
+  offsetWidth,
+  clientWidth,
+  borderWidth = 0,
+  targetClearance = 16,
+) {
+  const outer = Number(offsetWidth);
+  const inner = Number(clientWidth);
+  const borders = Math.max(0, Number(borderWidth) || 0);
+  const fallback = Math.max(0, Number(targetClearance) || 0);
+  if (!Number.isFinite(outer) || !Number.isFinite(inner)) return fallback;
+  const scrollbarWidth = Math.max(0, outer - inner - borders);
+  return Math.max(0, fallback - scrollbarWidth);
+}
+
 export function installQuotaWidget(
   calculateMaxHeight = (chipTop) => Math.max(0, Math.min(720, Math.floor(Number(chipTop) - 54))),
   runtimeVersion = WIDGET_RUNTIME_VERSION,
@@ -380,6 +395,7 @@ export function installQuotaWidget(
   toolRows = generationToolRows,
   toolRowElement = createGenerationToolRow,
   executionRemainder = generationExecutionRemainder,
+  scrollbarEndPadding = calculateScrollbarEndPadding,
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
@@ -1338,6 +1354,7 @@ export function installQuotaWidget(
     state.conversationTooltipPointer = conversationTooltipPointer(event, line);
     tooltip.hidden = false;
     tooltip.style.visibility = "hidden";
+    syncConversationScrollbarPadding(tooltip);
     positionConversationTokenTooltip(line, tooltip);
     tooltip.style.visibility = "visible";
   }
@@ -1455,9 +1472,8 @@ export function installQuotaWidget(
     summary.textContent = `请求明细 ${details.length} 次${averageText ? ` · ${averageText}` : ""}`;
     summary.style.cssText = "cursor:pointer;color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px;user-select:none";
     const list = document.createElement("div");
-    // Stable gutters cover classic scrollbars; explicit end padding also
-    // protects right-aligned metrics from macOS overlay scrollbars.
-    list.style.cssText = "display:grid;gap:5px;max-height:240px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;margin-top:5px;padding-right:16px;box-sizing:border-box";
+    list.setAttribute("data-codex-scrollbar-container", "");
+    list.style.cssText = "display:grid;gap:5px;max-height:240px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;margin-top:5px;box-sizing:border-box";
     let visibleCount = 20;
 
     const renderDetails = () => {
@@ -1488,7 +1504,8 @@ export function installQuotaWidget(
           requestSummary.style.cssText = "cursor:pointer;user-select:none;list-style-position:outside";
           requestSummary.append(header);
           const expanded = document.createElement("div");
-          expanded.style.cssText = "display:grid;gap:4px;max-height:180px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;margin:4px 0 1px 13px;padding:4px 16px 4px 5px;box-sizing:border-box;border-left:1px solid rgba(127,127,127,.18)";
+          expanded.setAttribute("data-codex-scrollbar-container", "");
+          expanded.style.cssText = "display:grid;gap:4px;max-height:180px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;margin:4px 0 1px 13px;padding:4px 0 4px 5px;box-sizing:border-box;border-left:1px solid rgba(127,127,127,.18)";
           if (diagnostics) {
             const phaseRow = document.createElement("div");
             phaseRow.style.cssText = "display:flex;flex-wrap:wrap;gap:2px 10px;min-width:0;color:var(--color-token-text-tertiary,#9a9aa4);font-size:9px;font-variant-numeric:tabular-nums";
@@ -1512,6 +1529,9 @@ export function installQuotaWidget(
             }, formatMetricDuration));
           }
           request.append(requestSummary, expanded);
+          request.addEventListener("toggle", () => {
+            if (request.open) syncConversationScrollbarPadding(request);
+          });
           list.append(request);
         } else {
           list.append(header);
@@ -1534,7 +1554,24 @@ export function installQuotaWidget(
 
     renderDetails();
     detailSection.append(summary, list);
+    detailSection.addEventListener("toggle", () => {
+      if (detailSection.open) syncConversationScrollbarPadding(detailSection);
+    });
     container.append(detailSection);
+  }
+
+  function syncConversationScrollbarPadding(root) {
+    for (const container of root.querySelectorAll("[data-codex-scrollbar-container]")) {
+      if (container.offsetWidth <= 0) continue;
+      const style = getComputedStyle(container);
+      const borderWidth = (Number.parseFloat(style.borderLeftWidth) || 0) +
+        (Number.parseFloat(style.borderRightWidth) || 0);
+      container.style.paddingRight = `${scrollbarEndPadding(
+        container.offsetWidth,
+        container.clientWidth,
+        borderWidth,
+      )}px`;
+    }
   }
 
   function summarizeConversationTooltipInput(tiers) {
@@ -2705,12 +2742,19 @@ export function installQuotaWidget(
     state.observer?.disconnect();
     state.conversationObserverRoot = root;
     if (root) {
-      state.observer?.observe(root, { childList: true, subtree: true });
+      state.observer?.observe(root, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-content-search-turn-key"],
+      });
     }
   }
 
   function mutationTouchesConversation(mutations) {
     return mutations.some((mutation) => {
+      if (mutation.type === "attributes" &&
+        mutation.attributeName === "data-content-search-turn-key") return true;
       const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes]
         .filter((node) => node.nodeType === Node.ELEMENT_NODE);
       if (changedNodes.length > 0 && changedNodes.every((node) =>
@@ -2758,7 +2802,12 @@ export function installQuotaWidget(
       }
     });
   });
-  state.mountObserver.observe(document.documentElement, { childList: true, subtree: true });
+  state.mountObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["data-content-search-turn-key"],
+  });
   // Theme changes need no data revision and must not rebuild an active form.
   const themeQuery = window.matchMedia?.("(prefers-color-scheme: light)");
   const syncTheme = () => ensureMounted();
@@ -2883,7 +2932,7 @@ export function installQuotaWidget(
 }
 
 export function widgetInstallExpression() {
-  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()},${WIDGET_RUNTIME_VERSION},${paginateGenerationDetails.toString()},${formatGenerationDetailTitle.toString()},${formatGenerationPhaseText.toString()},${formatGenerationPrimaryText.toString()},${formatConversationUsageSummary.toString()},${selectConversationNetworkLatency.toString()},${formatNetworkLatencyText.toString()},${averageGenerationNetworkLatency.toString()},${generationToolRows.toString()},${createGenerationToolRow.toString()},${generationExecutionRemainder.toString()})`;
+  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()},${WIDGET_RUNTIME_VERSION},${paginateGenerationDetails.toString()},${formatGenerationDetailTitle.toString()},${formatGenerationPhaseText.toString()},${formatGenerationPrimaryText.toString()},${formatConversationUsageSummary.toString()},${selectConversationNetworkLatency.toString()},${formatNetworkLatencyText.toString()},${averageGenerationNetworkLatency.toString()},${generationToolRows.toString()},${createGenerationToolRow.toString()},${generationExecutionRemainder.toString()},${calculateScrollbarEndPadding.toString()})`;
 }
 
 export function widgetRuntimeVersionExpression() {

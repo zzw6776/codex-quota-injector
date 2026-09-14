@@ -11,7 +11,7 @@ const REFRESH_TIMEOUT_MS = 15_000;
 const MAX_CATALOG_OUTPUT_BYTES = 16 * 1024 * 1024;
 const TEMP_HOME_PREFIX = "codex-quota-model-catalog-";
 
-export async function fetchOfficialModelCatalog({ executable, account }) {
+export async function fetchOfficialModelCatalog({ executable, account, runCli = execFileAsync }) {
   if (!executable) throw new Error("Codex CLI 路径为空");
   const hasOAuth = account?.authMode === "oauth" && account.tokens?.accessToken;
   const hasApiKey = account?.authMode === "apiKey" && account.openaiApiKey;
@@ -34,7 +34,7 @@ export async function fetchOfficialModelCatalog({ executable, account }) {
       : account;
     await writeOfficialCredentials(temporaryHome, probeAccount, { syncKeychain: false });
     const env = createOfficialCatalogEnvironment(temporaryHome);
-    const { stdout } = await execFileAsync(
+    const { stdout } = await runCli(
       executable,
       ["-c", 'cli_auth_credentials_store="file"', "debug", "models"],
       {
