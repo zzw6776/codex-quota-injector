@@ -305,6 +305,21 @@ test("额外模型验证 URL、密钥、推理档位、保留 ID 和跨平台重
   );
 });
 
+test("保存后的检测错误不会清除尚未生效的模型配置状态", async (t) => {
+  const dataDir = await useTempDir(t);
+  const manager = extraModelManager(dataDir);
+  await manager.initialize();
+  manager.setError("首次检测失败");
+  assert.equal(manager.getViewModel().pendingRestart, false);
+  await manager.savePlatform(customPlatform());
+  const saved = await readFile(manager.settingsPath, "utf8");
+  manager.setError("重新检测超时");
+  assert.equal(manager.getViewModel().pendingRestart, true);
+  assert.equal(manager.getViewModel().messageState, "error");
+  assert.equal(await readFile(manager.settingsPath, "utf8"), saved);
+  assert.equal(manager.markRestarted().pendingRestart, false);
+});
+
 test("额外模型目录准确映射上下文、图片和推理能力并隔离官方冲突", async (t) => {
   const dataDir = await useTempDir(t);
   const manager = extraModelManager(dataDir, {

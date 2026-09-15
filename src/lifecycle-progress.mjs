@@ -50,10 +50,10 @@ export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {})
     ? "正在恢复上一次生命周期测试未能回滚的状态"
     : report.status === "passed"
     ? "生命周期测试全部通过"
-    : report.status === "rollback-failed" || rollbackFailed
-      ? "测试失败，且有状态未能自动恢复"
-      : rollbackInProgress
+    : rollbackInProgress
         ? "测试失败，正在恢复原状态"
+      : report.status === "rollback-failed" || rollbackFailed
+        ? "测试失败，且有状态未能自动恢复"
       : report.status === "failed"
         ? finished && rolledBack
           ? "测试失败，自动回滚已完成"

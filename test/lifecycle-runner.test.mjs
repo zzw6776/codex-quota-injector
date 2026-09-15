@@ -97,6 +97,33 @@ test("[A HAR-03 ACC-04] 无法确认的账号动作不会重放，失败后反�
   assert.equal(restored, 1);
 });
 
+test("[A HAR-03 LCH-05] 回滚中断快照仍阻止新测试且能恢复未开始与运行中的回滚", async (t) => {
+  const directory = await useTempDir(t);
+  const reportPath = join(directory, "report.json");
+  await writeLifecycleReport(reportPath, createLifecycleReport({ steps: ["install", "switch-runtime", "verify"] }));
+  let interrupted;
+  await assert.rejects(runLifecycleReport({ reportPath, operations: {
+    install: { run: async () => {}, rollback: async () => {} },
+    "switch-runtime": { run: async () => {}, rollback: async () => {
+      interrupted = await readLifecycleReport(reportPath);
+      assert.equal(interrupted.status, "rollback-failed");
+      assert.deepEqual(interrupted.steps.slice(0, 2).map((step) => step.rollback.status), ["pending", "running"]);
+    } },
+    verify: { run: async () => { throw new Error("verification failed"); } },
+  } }), /verification failed/);
+  await writeLifecycleReport(reportPath, interrupted);
+  const latestPath = join(directory, "latest.json");
+  await writeFile(latestPath, JSON.stringify({ reportPath }));
+  assert.equal((await readLatestUnfinishedLifecycle(latestPath)).status, "rollback-failed");
+  const restored = [];
+  await recoverLifecycleRollbacks({ reportPath, operations: {
+    install: { rollback: async () => { restored.push("install"); } },
+    "switch-runtime": { rollback: async () => { restored.push("runtime"); } },
+  } });
+  assert.deepEqual(restored, ["runtime", "install"]);
+  assert.equal(await readLatestUnfinishedLifecycle(latestPath), null);
+});
+
 test("[A LCH-06] 报告使用原子替换，拒绝未来版本和重复步骤", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");

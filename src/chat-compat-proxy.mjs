@@ -475,7 +475,13 @@ function appendResponsesInput(messages, input, tools) {
     }
     flushCalls();
     const message = responseItemToChatMessage(item);
-    if (message) messages.push(message);
+    if (message) {
+      if (message.role === "assistant" && pendingReasoning) {
+        message.reasoning_content = pendingReasoning;
+      }
+      messages.push(message);
+      pendingReasoning = "";
+    }
   }
   flushCalls();
 }
@@ -935,6 +941,11 @@ function chatUsage(value) {
 }
 
 function reasoningText(item) {
+  if (typeof item?.reasoning_text === "string") return item.reasoning_text;
+  const content = Array.isArray(item?.content) ? item.content : [];
+  const reasoning = content.filter((part) => part?.type === "reasoning_text")
+    .map((part) => text(part.text)).join("");
+  if (reasoning) return reasoning;
   const summary = Array.isArray(item?.summary) ? item.summary : [];
   return summary.map((part) => text(part?.text)).join("");
 }

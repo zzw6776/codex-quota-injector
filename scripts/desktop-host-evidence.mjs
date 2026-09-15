@@ -10,7 +10,7 @@ import {
 import { defaultAccountDataDir } from "../src/platform.mjs";
 import { readCodexDelegationInput } from "../src/codex-delegation.mjs";
 
-export const DESKTOP_HOST_REPORT_VERSION = 9;
+export const DESKTOP_HOST_REPORT_VERSION = 10;
 
 export function desktopBatch(profile) {
   if (profile === "official") return "B1-official";
@@ -68,14 +68,34 @@ export function parseDesktopRollout(content, {
     if (startIndex < 0 && JSON.stringify(record).includes(marker)) {
       startIndex = index;
       model = currentModel;
+      break;
     }
   }
   if (startIndex < 0) return null;
 
+  // Bind evidence to the marked turn; later user turns cannot complete or
+  // repair an interrupted acceptance run.
+  let endIndex = records.length;
+  for (let index = startIndex + 1; index < records.length; index++) {
+    const record = records[index];
+    if ((record.type === "turn_context" && record.payload?.turn_id &&
+      turnId && record.payload.turn_id !== turnId) ||
+      (record.type === "event_msg" && record.payload?.type === "task_started")) {
+      endIndex = index;
+      break;
+    }
+    if (record.type === "event_msg" &&
+      ["task_complete", "turn_aborted"].includes(record.payload?.type)) {
+      endIndex = index + 1;
+      break;
+    }
+  }
+  const turnRecords = records.slice(startIndex, endIndex);
+
   const calls = [];
   const outputs = new Map();
   currentModel = model;
-  for (const [offset, record] of records.slice(startIndex).entries()) {
+  for (const [offset, record] of turnRecords.entries()) {
     const recordIndex = startIndex + offset;
     if (record.type === "turn_context") {
       currentModel = record.payload?.model ?? currentModel;
@@ -158,7 +178,7 @@ export function parseDesktopRollout(content, {
     .map((call) => classifyComputerUseFailure(outputs.get(call.id)?.text))
     .find(Boolean) ?? null;
   const modelMatches = matchesProfileModel(profile, currentModel, customModels);
-  const taskComplete = records.slice(startIndex).findLast((record) =>
+  const taskComplete = turnRecords.findLast((record) =>
     record.type === "event_msg" && record.payload?.type === "task_complete");
   const turnCompleted = Boolean(taskComplete);
   const taskError = normalizeTaskError(taskComplete?.payload?.error);
@@ -255,6 +275,7 @@ export function evaluateDesktopHostEvidence({
   const readThreadUpstream = rollout?.checks?.codexAppReadThread === true &&
     rollout?.checks?.codexAppReadEmptyCompletedTurns === true ? verifiedReadThreadUpstreamAttribution(
     upstreamAttributions?.["codex-app-read-thread"],
+    { marker, runtimeTarget: runtimeBinding?.expected?.runtimeTarget },
   ) : null;
   const standaloneWebRun = toolInventory?.offers?.webRun;
   const hostedWebSearch = toolInventory?.offers?.hostedWebSearch;
@@ -359,7 +380,12 @@ function verifiedComputerScreenshotUpstreamAttribution(attribution, {
   return attribution;
 }
 
-function verifiedReadThreadUpstreamAttribution(attribution) {
+function verifiedReadThreadUpstreamAttribution(attribution, { marker, runtimeTarget } = {}) {
+  const verification = attribution?.verifiedFor;
+  if (!marker || !runtimeTarget || verification?.marker !== marker ||
+    verification.runtimeTarget !== runtimeTarget ||
+    !nonEmptyString(verification.desktopBuild) || !nonEmptyString(verification.cliVersion) ||
+    verification.readingChainUnchanged !== true) return null;
   if (attribution?.status !== "blocked-upstream" ||
     attribution?.layer !== "official-codex-desktop-read-thread-wrapper" ||
     typeof attribution?.reason !== "string" || !attribution.reason.trim()) return null;

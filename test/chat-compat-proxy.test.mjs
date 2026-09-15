@@ -120,6 +120,39 @@ test("按请求能力把图片转到 Chat，普通请求继续使用 Responses",
   assert.equal(requests[1].body.messages[0].content[1].type, "image_url");
 });
 
+test("Chat 转换保留各回合的推理正文且不会串到后续工具调用", async (t) => {
+  let received;
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received = await readJsonRequest(request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+  });
+  const { baseUrl } = await startProxy(t, upstream.origin);
+  const response = await fetch(new URL("responses", baseUrl), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "chat-model", input: [
+      { type: "reasoning", summary: [{ type: "summary_text", text: "first reasoning" }] },
+      { role: "assistant", content: "first answer" },
+      { role: "user", content: "continue" },
+      { type: "reasoning", reasoning_text: "second reasoning" },
+      { type: "function_call", name: "lookup", call_id: "call-1", arguments: "{}" },
+      { type: "function_call_output", call_id: "call-1", output: "tool result" },
+      { type: "reasoning", content: [{ type: "reasoning_text", text: "final reasoning" }] },
+      { role: "assistant", content: "final answer" },
+      { role: "user", content: "next tool" },
+      { type: "function_call", name: "lookup", call_id: "call-2", arguments: "{}" },
+      { type: "function_call_output", call_id: "call-2", output: "next result" },
+    ] }),
+  });
+  assert.equal(response.status, 200);
+  await response.json();
+  const assistants = received.messages.filter((item) => item.role === "assistant");
+  assert.deepEqual(assistants.map((item) => item.reasoning_content), [
+    "first reasoning", "second reasoning", "final reasoning", undefined,
+  ]);
+  assert.deepEqual(assistants.filter((item) => item.tool_calls).map((item) => item.tool_calls[0].id), ["call-1", "call-2"]);
+});
+
 test("纯文本历史模式在原生 Responses 转发前移除私有 reasoning 信封", async (t) => {
   let received;
   const upstream = await startHttpServer(t, async (request, response) => {

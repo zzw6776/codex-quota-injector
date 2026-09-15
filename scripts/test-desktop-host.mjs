@@ -506,6 +506,7 @@ async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerm
   const snapshot = await sourceSnapshot();
   const sourceCurrent = snapshot.sha256 === report.sourceSnapshot.sha256;
   report.runtimeBinding = await inspectDesktopRuntime(report);
+  report.upstreamAttributions = await readDesktopUpstreamAttributions(report.runtimeTarget);
   const explicitWslPath = typeof rolloutPath === "string" && rolloutPath.startsWith("wsl:")
     ? rolloutPath.slice("wsl:".length)
     : null;

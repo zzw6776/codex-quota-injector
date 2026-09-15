@@ -846,7 +846,9 @@ export class AccountManager {
       tokens: {
         idToken: tokens.idToken || existing?.tokens.idToken || "",
         accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken ?? existing?.tokens.refreshToken ?? null,
+        refreshToken: nextAuthStatus === "temporary"
+          ? null
+          : tokens.refreshToken ?? existing?.tokens.refreshToken ?? null,
       },
       accountId: accountId ?? existing?.accountId ?? null,
       organizationId: organizationId ?? existing?.organizationId ?? null,

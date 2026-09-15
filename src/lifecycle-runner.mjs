@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-export const LIFECYCLE_REPORT_VERSION = 2;
+export const LIFECYCLE_REPORT_VERSION = 3;
 
 export function validateLifecycleControl(control, { root, runDirectory } = {}) {
   const expectedRoot = resolve(root);
@@ -116,6 +116,7 @@ export function lifecycleResumeDecision(report, {
 export async function writeLifecycleReport(path, report) {
   updateLifecycleComponents(report);
   validateLifecycleReport(report);
+  report.version = LIFECYCLE_REPORT_VERSION;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.tmp.${process.pid}.${randomUUID()}`;
   await writeFile(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
@@ -193,17 +194,22 @@ export async function runLifecycleReport({
       activeStep.error = publicError(error);
       activeStep.finishedAt = now().toISOString();
     }
-    report.status = "failed";
+    // Persist all outstanding restoration work before the first rollback.
+    // If the controller exits here, the existing recovery path must still own it.
+    const rollbackSteps = [...report.steps].reverse().filter((step) =>
+      ["passed", "failed"].includes(step.status) &&
+      typeof operations?.[step.id]?.rollback === "function");
+    for (const step of rollbackSteps) {
+      step.rollback = { status: "pending" };
+    }
+    report.status = rollbackSteps.length ? "rollback-failed" : "failed";
     report.error = publicError(error);
     report.updatedAt = now().toISOString();
     await writeLifecycleReport(reportPath, report);
 
     let rollbackFailed = false;
-    for (const step of [...report.steps].reverse()) {
+    for (const step of rollbackSteps) {
       const operation = operations?.[step.id];
-      if (!["passed", "failed"].includes(step.status) || typeof operation?.rollback !== "function") {
-        continue;
-      }
       step.rollback = { status: "running", startedAt: now().toISOString() };
       report.updatedAt = step.rollback.startedAt;
       await writeLifecycleReport(reportPath, report);
@@ -254,7 +260,7 @@ export async function recoverLifecycleRollbacks({
       throw new Error(`生命周期报告状态为 ${report.status}，没有可恢复的失败回滚`);
     }
     const failedSteps = [...report.steps].reverse()
-      .filter((step) => step.rollback?.status === "failed");
+      .filter((step) => ["pending", "running", "failed"].includes(step.rollback?.status));
     if (failedSteps.length === 0) {
       throw new Error("生命周期报告没有可恢复的失败回滚");
     }
@@ -322,6 +328,7 @@ export async function recoverLifecycleRollbacks({
     const finishedAt = now().toISOString();
     report.status = recoveryFailed ? "rollback-failed" : "failed";
     report.ownerPid = null;
+    report.finishedAt = finishedAt;
     report.recovery = {
       ...report.recovery,
       status: recoveryFailed ? "failed" : "passed",
@@ -339,7 +346,7 @@ export async function recoverLifecycleRollbacks({
 }
 
 export function validateLifecycleReport(report) {
-  if (!report || ![1, LIFECYCLE_REPORT_VERSION].includes(report.version)) {
+  if (!report || ![1, 2, LIFECYCLE_REPORT_VERSION].includes(report.version)) {
     throw new Error("生命周期报告版本不受支持");
   }
   if (!report.runId || !Array.isArray(report.steps) || report.steps.length === 0) {

@@ -291,6 +291,15 @@ test("[platform:windows-native] [A HAR-03 LCH-02] Windows 运行方式恢复保�
     setWindowsRuntimeConfiguration(secondConfiguration, "wsl-native"),
     /外部修改/,
   );
+  await assert.rejects(restoreWindowsRuntimeConfiguration(secondConfiguration), /拒绝覆盖/);
+  assert.equal(await readFile(secondConfigPath, "utf8"), `${original}# changed before switch\n`);
+
+  await setWindowsRuntimeConfiguration(configuration, "wsl-native");
+  const external = (await readFile(configPath, "utf8"))
+    .replace("runCodexInWindowsSubsystemForLinux = true", "runCodexInWindowsSubsystemForLinux = false") + "# changed runtime\n";
+  await writeFile(configPath, external);
+  await assert.rejects(restoreWindowsRuntimeConfiguration(configuration), /拒绝覆盖/);
+  assert.equal(await readFile(configPath, "utf8"), external);
 });
 
 test("[platform:windows-native] [A LCH-03] Windows 首次初始化切换 PID 后达到稳定状态才建立重复启动基线", async () => {

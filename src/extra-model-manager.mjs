@@ -291,7 +291,6 @@ export class ExtraModelManager {
   }
 
   setError(message) {
-    this.pendingRestart = false;
     this.message = String(message ?? "模型管理操作失败");
     this.messageState = "error";
     this.#setOperation(null);

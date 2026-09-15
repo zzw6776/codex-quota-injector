@@ -13,6 +13,8 @@
 
 报告保留原始调用及失败证据，再追加归因说明。已知上游阻断不算通过，也不算新的 DeepSeek 兼容缺陷；整批状态仍依据所有必需项与前置条件判断。只有上述复用条件不再满足、出现相反证据，或官方更新后需要确认修复时，才重新展开完整排查。
 
+执行器只接受绑定本次验收的归因：核对上述条件后，在当前原生环境的 `upstream-attributions-<runtime>.json` 中给 `codex-app-read-thread` 记录补充 `verifiedFor`，包含本次报告的 `marker`、`runtimeTarget`、实际 `desktopBuild`、`cliVersion` 和 `readingChainUnchanged: true`。保留原始对照及已知问题引用，说明是否重新对照；不得只复制上一轮的绑定。执行器会重新读取归因文件，旧轮次、另一环境或尚未核对的归因不自动生效。
+
 ## 已确认范围
 
 2026-09-15，在 macOS arm64、官方桌面 build 9275、实际运行 CLI `0.154.0-alpha.6.2`、项目 Relay 协议 74 上确认。版本来自当轮实际二进制，不采用长期任务创建时的 session_meta 版本。本文记录此次已验证的失效机制，不代表所有 read_thread 异常都是同一原因，也不继承为 Windows 结论。

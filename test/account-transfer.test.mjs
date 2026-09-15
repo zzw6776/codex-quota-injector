@@ -187,6 +187,34 @@ test("[A ACC-01 ACC-03] 临时迁移不会覆盖目标设备已有的同账号�
   assert.equal(preserved.tokens.refreshToken, "existing-refresh");
 });
 
+for (const authStatus of ["transferred", "needsReauth"]) {
+  test(`[A ACC-03] 临时导入替换 ${authStatus} 账号后不会把旧 refresh token 写回 Codex`, async (t) => {
+    const target = await setup(t, "codex-transfer-temporary-stale-");
+    const existing = oauthAccount("stale", "stale@example.invalid", "stale-refresh", { authStatus });
+    await target.store.upsert(existing);
+    t.mock.method(globalThis, "fetch", async (url) => {
+      if (String(url).endsWith("/wham/usage")) return quotaResponse();
+      if (String(url).includes("/accounts/check/")) return subscriptionResponse();
+      throw new Error(`临时账号不应刷新凭据：${url}`);
+    });
+    await target.manager.importTokenInput(JSON.stringify({
+      version: 2, kind: "codex-account-transfer", mode: "temporary",
+      accounts: [{ tokens: {
+        id_token: existing.tokens.idToken,
+        access_token: existing.tokens.accessToken,
+        account_id: existing.accountId,
+      } }],
+    }));
+    assert.equal(target.store.get(existing.id).tokens.refreshToken, null);
+    await target.manager.switchAccount(existing.id);
+    const official = JSON.parse(await readFile(join(target.codexHome, "auth.json"), "utf8"));
+    assert.equal(official.tokens.refresh_token, "");
+    await target.manager.syncCurrentAccountFromOfficialCredentials();
+    assert.equal(target.store.get(existing.id).authStatus, "temporary");
+    assert.equal(target.store.get(existing.id).tokens.refreshToken, null);
+  });
+}
+
 test("[A ACC-03] 完整转移写回最新 Token、停用源账号并切换当前账号，目标接管后旧设备恢复会安全失败", async (t) => {
   const source = await setup(t, "codex-transfer-handoff-source-");
   const account = oauthAccount("handoff", "handoff@example.invalid", "handoff-refresh-old", {

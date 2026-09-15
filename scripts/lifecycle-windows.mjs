@@ -251,6 +251,10 @@ export async function restoreWindowsRuntimeConfiguration(configuration) {
     restored = current;
     externalChangesPreserved = configuration.externalChangesPreserved === true;
   } else if (currentHash != null && !allowedHashes.has(currentHash)) {
+    if (!configuration.mutationStarted ||
+      parseConfigRuntime(current.toString("utf8")) !== configuration.activeRuntime) {
+      throw new Error("Codex 运行方式被外部修改或不属于本次测试，拒绝覆盖");
+    }
     restored = Buffer.from(updateWindowsSubsystemSetting(
       current.toString("utf8"),
       configuration.originalRuntime === WSL_NATIVE,

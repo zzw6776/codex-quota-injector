@@ -86,6 +86,7 @@ test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独
     codexAppListThreads: true,
     codexAppReadThread: true,
     codexAppReadContent: true,
+    codexAppReadEmptyCompletedTurns: false,
     codexAppReadMarker: true,
     codexAppListProjects: true,
     codexAppGetUsageLimits: true,
@@ -497,6 +498,8 @@ test("[A HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且
     status: "blocked-upstream",
     layer: "official-codex-desktop-read-thread-wrapper",
     reason: "官方桌面 read_thread 封装将大回合 items 清空",
+    verifiedFor: { marker, runtimeTarget: "windows-native", desktopBuild: "fixture-build",
+      cliVersion: "fixture-cli", readingChainUnchanged: true },
     controls: {
       officialNoRelay: { completedItemCounts: [79, 140] },
       productionRelay: { completedItemCounts: [79, 140] },
@@ -519,6 +522,17 @@ test("[A HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且
   assert.equal(blocked.checks.find((item) => item.id === "codex-app-read-thread").status,
     "blocked-upstream");
   assert.match(blocked.upstreamReason, /read_thread/);
+
+  for (const verification of [undefined,
+    { ...attribution.verifiedFor, marker: "OLD_RUN" },
+    { ...attribution.verifiedFor, runtimeTarget: "macos-native" },
+    { ...attribution.verifiedFor, readingChainUnchanged: false },
+  ]) {
+    const result = evaluateDesktopHostEvidence({ ...shared,
+      upstreamAttributions: { "codex-app-read-thread": { ...attribution, verifiedFor: verification } },
+    });
+    assert.equal(result.status, "failed", "旧报告或未核对的读取链不能自动归因给上游");
+  }
 
   const mismatchedControl = structuredClone(attribution);
   mismatchedControl.controls.productionRelay.completedItemCounts = [0, 0];
@@ -741,6 +755,21 @@ test("[A HAR-04 TOOL-05 TOOL-06] 目标模型任务结束但宿主工具缺失�
   assert.equal(result.checks.find((item) => item.id === "web-search").status, "unsupported");
   assert.equal(isDesktopSessionTerminal("blocked"), true);
   assert.equal(isDesktopSessionTerminal("incomplete"), false);
+});
+
+test("桌面证据只绑定标记所在回合，后续成功回合不能掩盖中断或改变模型", () => {
+  const first = fixtureRollout("deepseek-flash").replace(
+    '"type":"task_complete"', '"type":"turn_aborted"',
+  );
+  const later = fixtureRollout("gpt-5.5", "LATER_MARKER")
+    .split("\n").filter((line) => !line.includes('"type":"session_meta"')).join("\n")
+    .replaceAll("turn-desktop", "turn-later");
+  const result = parseDesktopRollout(first + later, { marker, profile: "deepseek" });
+  assert.equal(result.model, "deepseek-flash");
+  assert.equal(result.turnId, "turn-desktop");
+  assert.equal(result.turnCompleted, false);
+  assert.equal(result.modelMatches, true);
+  assert.deepEqual(result.callIds.webRun, ["web-1", "web-2", "web-3"]);
 });
 
 function fixtureRollout(model, testMarker = marker) {
