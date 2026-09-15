@@ -14,8 +14,9 @@ import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
 import { fetchOfficialModelCatalog } from "./official-model-catalog.mjs";
 
 const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
-const RELAY_CONFIG_VERSION = 2;
-const MACOS_SHIM_CONFIG_VERSION = 5;
+const RELAY_CONFIG_VERSION = 3;
+const MACOS_SHIM_CONFIG_VERSION = 6;
+const PRIMARY_APP_SERVER_ENV = "CODEX_QUOTA_PRIMARY_APP_SERVER";
 
 export async function refreshCodexModelCatalog({
   contextManager,
@@ -58,7 +59,6 @@ export async function refreshCodexModelCatalog({
 }
 
 export async function prepareCodexLaunch({
-  deepSeekManager,
   extraModelManager,
   contextManager,
   accountManager = null,
@@ -95,17 +95,14 @@ export async function prepareCodexLaunch({
       executable: upstreamExecutable,
     });
     const contextState = contextManager.getViewModel();
-    const deepSeek = deepSeekManager.getViewModel();
     const extraModels = extraModelManager.getViewModel();
     staticModelCatalog = requiresStaticModelCatalog({
       contextState,
-      deepSeek,
       extraModels,
     });
     if (contextState.status === "external" && staticModelCatalog) {
       await modelRouterManager?.disable();
       const message = "检测到用户管理的模型目录，已保留其配置并停用本工具模型中继";
-      deepSeekManager.setError(message);
       extraModelManager.setError(message);
       return {
         env: {},
@@ -123,11 +120,9 @@ export async function prepareCodexLaunch({
       };
     }
     const catalog = contextManager.getEffectiveCatalog();
-    const deepSeekRuntime = await deepSeekManager.writeRuntimeCatalog(catalog);
-    runtime = await extraModelManager.writeRuntimeCatalog(deepSeekRuntime.catalog);
+    runtime = await extraModelManager.writeRuntimeCatalog(catalog);
     const routingExtraModels = withoutCatalogConflicts(extraModels, runtime.catalogConflicts);
     const customRoutingRequired = requiresCustomRouting({
-      deepSeek,
       extraModels: routingExtraModels,
     });
     const bridgeMode = selectBridgeMode({
@@ -157,7 +152,6 @@ export async function prepareCodexLaunch({
       if (bridgeMode === "macos-router") {
         if (!modelRouterManager) throw new Error("macOS 自定义模型路由器未初始化");
         router = await modelRouterManager.configure({
-          deepSeek,
           extraModels: routingExtraModels,
           officialAuthMode: officialCatalog.officialAuthMode,
           usageEventPath: tokenUsageEventPath,
@@ -173,7 +167,6 @@ export async function prepareCodexLaunch({
     }
   } catch (error) {
     await modelRouterManager?.disable().catch(() => undefined);
-    deepSeekManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
     extraModelManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
     return {
       env: {},
@@ -192,7 +185,7 @@ export async function prepareCodexLaunch({
   }
   const catalogGeneration = staticModelCatalog
     ? runtime.generation
-    : `official-online:${deepSeekManager.settings.generation}:${extraModelManager.settings.generation}`;
+    : `official-online:${extraModelManager.settings.generation}`;
   const relayGeneration = `${catalogGeneration}:${BRIDGE_GENERATION}`;
   try {
     const config = process.platform === "darwin"
@@ -201,7 +194,6 @@ export async function prepareCodexLaunch({
           upstreamExecutable,
           relayExecutable: process.execPath,
           relayArguments: isSea() ? [] : [resolve(import.meta.dirname, "launcher.mjs")],
-          providerSettingsPath: deepSeekManager.settingsPath,
           extraModelSettingsPath: runtime.settingsPath,
           modelCatalogPath: staticModelCatalog ? runtime.path : null,
           relayStatePath: statePath,
@@ -225,7 +217,6 @@ export async function prepareCodexLaunch({
           upstreamExecutable,
           officialAuthMode: officialCatalog.officialAuthMode,
           observeModelTraffic: true,
-          providerSettingsPath: deepSeekManager.settingsPath,
           extraModelSettingsPath: runtime.settingsPath,
           modelCatalogPath: staticModelCatalog ? runtime.path : null,
           relayStatePath: statePath,
@@ -240,7 +231,6 @@ export async function prepareCodexLaunch({
     await writeRelayConfig(relayConfigPath, config);
   } catch (error) {
     await modelRouterManager?.disable().catch(() => undefined);
-    deepSeekManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
     extraModelManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
     return {
       env: {},
@@ -264,6 +254,7 @@ export async function prepareCodexLaunch({
     env: {
       ...relayLaunchEnvironment(relayExecutable),
       CODEX_APP_SERVER_FORCE_CLI: "1",
+      [PRIMARY_APP_SERVER_ENV]: "1",
       CODEX_QUOTA_RELAY_CONFIG: relayConfigPath,
       CODEX_QUOTA_UPSTREAM_CODEX_CLI: upstreamExecutable,
       ...(router ? { [router.tokenEnv]: router.token } : {}),
@@ -292,9 +283,8 @@ export function selectBridgeMode({ platform, staticModelCatalog, customRoutingRe
   return "windows-relay";
 }
 
-function requiresCustomRouting({ deepSeek, extraModels }) {
-  return Boolean(deepSeek?.enabled && deepSeek?.configured && deepSeek?.apiKey) ||
-    extraModels?.platforms?.some((platform) =>
+function requiresCustomRouting({ extraModels }) {
+  return extraModels?.platforms?.some((platform) =>
       platform?.enabled && platform?.apiKey && platform?.models?.length > 0
     ) === true;
 }
@@ -313,12 +303,11 @@ function withoutCatalogConflicts(extraModels, conflicts) {
   };
 }
 
-function requiresStaticModelCatalog({ contextState, deepSeek, extraModels }) {
+function requiresStaticModelCatalog({ contextState, extraModels }) {
   // An external root-level model_catalog_json remains the user's responsibility:
   // the upstream process already receives it from config.toml. Only inject our
   // composed static catalog when one of this tool's model features actually needs it.
   return Number(contextState?.overriddenCount) > 0 ||
-    Boolean(deepSeek?.enabled && deepSeek?.configured) ||
     extraModels?.platforms?.some((platform) =>
       platform?.enabled && platform?.apiKey && platform?.models?.length > 0
     ) === true;

@@ -27,7 +27,9 @@ test("[A HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时临时配置、本地端点
   assert.equal(config.config.model, r.model);
   assert.equal(config.config.sandbox_mode, "danger-full-access");
   assert.equal(config.config.model_catalog_json, r.catalogPath);
-  assert.ok(config.layers.some(layer => layer.name?.file === join(r.env.CODEX_HOME, "config.toml")));
+  const expectedConfigPath = await realpath(join(r.env.CODEX_HOME, "config.toml"));
+  assert.ok(config.layers.some(layer => layer.name?.file === expectedConfigPath),
+    "官方配置层路径必须指向同一临时文件，兼容 macOS 的 /var → /private/var 规范化");
   assert.equal(r.requests.length, 0, "初始化与配置读取不发送模型请求");
 });
 

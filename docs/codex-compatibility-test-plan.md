@@ -31,10 +31,10 @@
 | E01 | [account-manager.test.mjs](../test/account-manager.test.mjs)，12 | 凭据格式、额度请求、刷新、工作区匹配、凭据写回 | OAuth 浏览器流程、Keychain 交接和桌面切换恢复已完成 |
 | E02 | [account-store.test.mjs](../test/account-store.test.mjs)，5 | 加密、篡改检测、持久化、迁移、唤醒时间 | 全部写入失败和并发操作场景已覆盖 |
 | E03 | [account-wakeup.test.mjs](../test/account-wakeup.test.mjs)，5 | 时间设置、幂等占位、休眠跳过、异常恢复、刷新失败 | 官方唤醒子进程的异常路径已验证 |
-| E04 | [model-configuration.test.mjs](../test/model-configuration.test.mjs)，9 | DeepSeek/额外模型、目录、上下文、外部配置保护、Swift shim 参数 | 真实官方参数解析、完整启动决策和模型功能已验证；其中目录探测和 shim 使用假 CLI |
-| E05 | [model-router.test.mjs](../test/model-router.test.mjs)，14 | HTTP/WS、辅助与未知 API、鉴权、路由、能力拒绝、重连、usage | 工具已执行、官方任务已压缩或主入口已完成任务；上游为本地模拟服务 |
+| E04 | [model-configuration.test.mjs](../test/model-configuration.test.mjs)，13；[model-capability-probe.test.mjs](../test/model-capability-probe.test.mjs)，23 | DeepSeek 预设及实时模型列表、额外模型、自动协议和能力探测、推理强度与推理模式工具选择、目录、上下文、外部配置保护、Swift shim 参数 | 真实官方参数解析、完整启动决策和模型功能已验证；能力探测使用受控供应商响应，目录探测和 shim 使用假 CLI |
+| E05 | [model-router.test.mjs](../test/model-router.test.mjs)，32 | HTTP/WS、辅助与未知 API、鉴权、路由、能力拒绝、重连、usage | 工具已执行、官方任务已压缩或主入口已完成任务；上游为本地模拟服务 |
 | E06 | [app-server-relay.test.mjs](../test/app-server-relay.test.mjs)，1 | 模型列表、新任务、新轮次、环境与 usage 的一条组合流程 | 所有 RPC 和任务生命周期已覆盖；上游是假 CLI，Windows 跳过该用例 |
-| E07 | [chat-compat-proxy.test.mjs](../test/chat-compat-proxy.test.mjs)，6 | 文本/图片转换、工具历史关联、SSE 截断、原生透传 | 真实 Codex 执行工具及供应商全部能力已验证 |
+| E07 | [chat-compat-proxy.test.mjs](../test/chat-compat-proxy.test.mjs)，12；[responses-tool-adapter.test.mjs](../test/responses-tool-adapter.test.mjs)，5 | Responses 选择性工具适配、文本/图片 Chat 回退、工具历史关联、SSE 截断、原生透传 | 真实 Codex 执行工具及供应商全部能力已验证 |
 | E08 | [runtime-contracts.test.mjs](../test/runtime-contracts.test.mjs)，11 | CDP、就绪、进程识别、单实例协议、Widget 数据桥、格式计算和工具列表 | 完整 launcher/injector 生命周期、真实页面挂载、窗口点击已验证 |
 | E09 | [token-usage.test.mjs](../test/token-usage.test.mjs)，13 | 去重、压缩计量、并发任务、子任务、缓存、Worker 回退、工具账本关联 | 压缩、子智能体和这些工具实际可用；此处测试的是记录解析 |
 | E10 | [tool-executions.test.mjs](../test/tool-executions.test.mjs)，6 | 原生工具类型识别、同名调用、时间归属、脱敏摘要、命令与完整列表投影 | 清单中的 web、MCP、图像和协作工具都执行成功 |
@@ -49,8 +49,8 @@
 | 平台 | [platform.mjs](../src/platform.mjs) 的可执行文件发现、Store 文件准备、Windows/WSL 识别、启动和进程就绪 |
 | 启动配置 | [codex-bridge.mjs](../src/codex-bridge.mjs) 的 `prepareCodexLaunch`；[macos-shim.mjs](../src/macos-shim.mjs) 与 [macos-codex-shim.swift](../src/macos-codex-shim.swift) 的原生 exec |
 | RPC 中继 | [app-server-relay.mjs](../src/app-server-relay.mjs) 的参数注入、`rewriteClientLine`、`rewriteServerLine`、状态学习、标准流与信号；[windows-relay-entry.mjs](../src/windows-relay-entry.mjs)、[wsl-relay-entry.mjs](../src/wsl-relay-entry.mjs) |
-| 模型网络 | [model-router.mjs](../src/model-router.mjs) 的 HTTP、辅助接口、WS、路由状态、凭据与用量观察；[chat-compat-proxy.mjs](../src/chat-compat-proxy.mjs) 的 Responses/Chat 转换与工具历史 |
-| 模型配置 | [codex-context.mjs](../src/codex-context.mjs)、[official-model-catalog.mjs](../src/official-model-catalog.mjs)、[deepseek-manager.mjs](../src/deepseek-manager.mjs)、[deepseek-model.json](../src/deepseek-model.json)、[extra-model-manager.mjs](../src/extra-model-manager.mjs) |
+| 模型网络 | [model-router.mjs](../src/model-router.mjs) 的 HTTP、辅助接口、WS、路由状态、凭据与用量观察；[chat-compat-proxy.mjs](../src/chat-compat-proxy.mjs) 与 [responses-tool-adapter.mjs](../src/responses-tool-adapter.mjs) 的 Responses 工具适配、Chat 回退与工具历史 |
+| 模型配置 | [codex-context.mjs](../src/codex-context.mjs)、[official-model-catalog.mjs](../src/official-model-catalog.mjs)、[deepseek-model.json](../src/deepseek-model.json)、[extra-model-manager.mjs](../src/extra-model-manager.mjs) |
 | 账号 | [account-manager.mjs](../src/account-manager.mjs) 的 OAuth、监听、刷新、切换与 Keychain；[account-store.mjs](../src/account-store.mjs) 的加密和写入队列 |
 | 定时唤醒 | [account-wakeup.mjs](../src/account-wakeup.mjs) 的状态机；[wakeup-client.mjs](../src/wakeup-client.mjs) 的独立官方进程、选模型、登录、取消与清理 |
 | 页面 | [injector.mjs](../src/injector.mjs) 的连接、动作队列、刷新与重启；[cdp-client.mjs](../src/cdp-client.mjs) 的目标与 RPC；[widget.mjs](../src/widget.mjs) 的 DOM、事件、数据与销毁 |
@@ -68,7 +68,7 @@ macOS 在无模型扩展/上下文覆盖时可以走官方直接路径；需要�
 | E13 | [relay-protocol.test.mjs](../test/relay-protocol.test.mjs)，9 组 | RPC-02/03/04/05、MOD-01/05、SES-01、OBS-02 的部分契约：双向外壳、ID 匹配、分页、分片、大历史、任务响应模型、迟到失败和观察写入失败；上游仍是 Node 材料进程 |
 | E14 | [chat-tool-contracts.test.mjs](../test/chat-tool-contracts.test.mjs)，13 组 | TOOL-01/07、NET-02/04/05、MOD-03 的工具续接、历史归属、指定函数、流式终态与故障恢复；没有实际执行官方工具宿主 |
 | E15 | [model-router-recovery.test.mjs](../test/model-router-recovery.test.mjs)，5 组 | NET-04/05、MOD-03、OBS-02 的生产 Router/Chat 组合、并发凭据隔离、取消与错误恢复、观察故障和用量；上游全部为本地服务 |
-| E16 | [deepseek-history.test.mjs](../runtime-tests/deepseek-history.test.mjs)，1 组 | MOD-03、SES-01/02/06 的实际官方 app-server → 当前原生生产中继入口 → 本地 Responses 服务；macOS 经过 shim/Router，Windows 与 WSL 分别经过实际 PE/ELF SEA Relay，使用各自 Node.js、依赖、官方 CLI 与临时目录。用 `reasoning_text` 流复现 Codex 推理历史，验证恢复和分叉继承 DeepSeek 供应商、工具历史保持关联、第三方供应商采用本地摘要压缩并在压缩后续接，同时剥离私有消息元数据及 DeepSeek 不支持的 `summary`/`encrypted_content` |
+| E16 | [deepseek-history.test.mjs](../runtime-tests/deepseek-history.test.mjs)，1 组 | MOD-03、SES-01/02/06 的实际官方 app-server → 当前原生生产中继入口 → 本地 Responses 服务；macOS 经过 shim/Router，Windows 与 WSL 分别经过实际 PE/ELF SEA Relay，使用各自 Node.js、依赖、官方 CLI 与临时目录。按模型管理中 DeepSeek Flash 当前实测的 `responses-full` 能力复现并完整保留 `reasoning_text`、`summary` 与 `encrypted_content`，验证恢复和分叉继承供应商、工具历史保持关联、第三方供应商采用本地摘要压缩并在压缩后续接 |
 | E17 | [deepseek-tools.test.mjs](../runtime-tests/deepseek-tools.test.mjs)，1 组 | MOD-03、TOOL-03、INT-02 的实际官方 app-server → 当前原生生产中继入口 → 本地 Responses/MCP 服务；Windows 与 WSL 各自执行，结果不能互相继承。固定 DeepSeek 直接工具模式必须在首次请求暴露 MCP 命名空间，并在 `never` 下通过只读 MCP 验证直调、模型调用、结果回灌和独立事件，防止错误启用延迟搜索后工具失效或模型循环 |
 | E18 | [desktop-host-evidence.test.mjs](../test/desktop-host-evidence.test.mjs) 与 [desktop-fixture.test.mjs](../runtime-tests/desktop-fixture.test.mjs) | 固定 B1/B2 后台与桌面组件不互相继承；桌面报告只从匹配随机标记的真实 rollout、模型/调用 ID、失败退出码后的续接、运行时绑定和本机 HTTP 服务记录判定，不采信模型自述。这里只验证执行器契约，不能代替真实桌面任务运行 |
 
@@ -174,7 +174,7 @@ flowchart LR
 | MOD-01 | 官方目录、分页与刷新；catalog、context、relay | E04/E06 | 官方字段、分页、在线/内置/缓存、新增未知模型、刷新失败；模型列表和上下文不丢失 | 官方模型在扩展开/关时都可选、可用；定时刷新不打断任务 |
 | MOD-02 | 上下文覆盖、重置与迁移；context、bridge | E04 局部 | 单模型/全部重置、持久化、重启后的生效目录、失败回滚；用户原配置保持 | 修改后官方读取的上下文配置与选择一致，任务仍能继续 |
 | MOD-03 | 第三方平台启停、冲突与混用；model managers、Router | E04/E05 | 官方同名冲突、跨平台模型 ID、启停删除、显式/继承路由、辅助请求；凭据送往正确目标 | 官方和已配置的每类第三方路由均实际完成任务，互不污染 |
-| MOD-04 | 模型能力与选项；catalog、relay、Router、Chat proxy | E04/E05 | 图片、推理档位、工具、服务档位等声明与请求一致；不支持的组合按声明处理，未知官方能力保持 | 模型声明支持的能力实际成功；能力缺失不能靠静默删字段报成功 |
+| MOD-04 | 模型能力与选项；catalog、relay、Router、模型兼容代理 | E04/E05 | 按模型探测 Responses/Chat、流式输出、函数/custom/namespace、续接、并行、tool choice、Hosted Search、推理历史、图片和组合 Codex 请求；Responses 核心通过后继续验证 custom/namespace 原生或 function 转换、流式和组合请求，任一必需阶段明确不兼容时验证 Chat 回退；能力矩阵驱动目录声明、协议选择和请求过滤 | 模型声明支持的能力实际成功；转换后的能力标为 `bridged`，不支持与临时故障分别记录，不能因接口返回 200 就标绿 |
 | MOD-05 | 任务/轮次设置、供应商约束；relay 状态、Router 绑定 | E05/E06 局部 | thread/turn 设置、模型继承、禁止的供应商切换、失败回滚、晚到响应；不串用先前模型 | 同供应商可用切换和声明限制正确；旧任务恢复后模型归属准确 |
 | MOD-06 | 配置优先级、外部配置及功能开关；bridge、context、官方 CLI | E04 仅部分保护 | 根级与 app-server 级 -c、config 层、外部 catalog、模式/权限开关、配置导入、损坏/未来版本；对照官方解析 | 用户已有设置和模式仍生效，关闭扩展后正常使用官方功能 |
 
@@ -190,7 +190,7 @@ flowchart LR
 | NET-01 | 官方 HTTP 与未知 API；Router | E05 有本地覆盖 | 方法、路径、查询、应用头、原始内容、压缩响应、错误正文；正确认证与范围边界 | 实际主请求和辅助请求成功；必要头与认证被上游接受 |
 | NET-02 | SSE、增量与终态；Router、Chat proxy | E05/E07 局部 | 多段事件、分片、文本/推理/工具参数、completed/incomplete/error；因果顺序和终态唯一 | 流式内容完整，工具可续接，截断与失败状态没有伪报完成 |
 | NET-03 | 模型 Responses WS；Router | E05 有预热、二进制和重连 | 预热/生成、多 stream、关闭/重连、子协议、ping/pong 与原始帧；区分 app-server WS 和模型 WS | 验证实际选用的传输；不能只因启用了 WS 配置就声称走过 WS |
-| NET-04 | Responses/Chat 转换和历史；Chat proxy | E07 单工具续接等 | 多工具、分段参数、并行结果、历史淘汰/缺失、重启、类型与推理语义；不支持能力有明确结果 | 真实官方运行时执行转换后的工具并完成后续轮次 |
+| NET-04 | Responses 工具适配、Chat 回退和历史；模型兼容代理 | E07 单工具续接等 | 多工具、custom/namespace 与 `tool_choice` 双向转换、SSE 分段参数、并行结果、历史淘汰/缺失、重启、类型与推理语义；不支持能力有明确结果 | 真实官方运行时执行转换后的工具并完成后续轮次 |
 | NET-05 | 故障、中断与恢复；Router、relay、Chat proxy | 现有错误分支分散 | 401/403/429/5xx、超时、半途断流、客户端取消、上游退出；使用受控服务验证有界重试和关闭 | 正常服务下中断后可以继续；服务故障留下阶段证据，不反复调用刷绿 |
 | NET-06 | 压缩等辅助请求的路由与计量；Router | E05 有 compact/未来 API | 显式模型、任务继承、官方/第三方目标、辅助 usage、未知辅助端点 | 实际辅助操作完成；不能用一次模拟 compact 响应代替真实压缩验收 |
 
@@ -257,7 +257,7 @@ flowchart LR
 | 编号 | 场景与触点 | 现有证据/缺口 | A：免费验证 | B：真实判据 |
 | --- | --- | --- | --- | --- |
 | UI-01 | 注入、重新挂载、版本替换和销毁；widget、injector、CDP | E08 数据桥/语法 | 实际 DOM 挂载、旧版本替换、主节点变化、destroy、监听器和样式清理；不拦截原生输入 | 注入/重连后仍能发消息、使用工具、切换任务 |
-| UI-02 | 面板全部动作；widget→动作队列→manager | E08 drain 表达式；各 manager 局部 | 实际点击/输入/保存/取消，覆盖账号迁移与恢复、刷新、上下文、DeepSeek、额外平台、唤醒动作；所有面板在关闭按钮左侧固定显示 `codex_app` 彩色状态点（绿/黄/红/蓝对应正常/启动中/异常/直连），不显示状态文字且使用普通指针；正常 Tooltip 只显示易读功能名，异常时显示缺失项、建议和技术诊断；轮询时间变化不得触发面板重绘或打断悬浮；降级时验证常驻诊断及重新检查/重启/打开日志动作；断言事件恰好执行一次和持久化结果 | 需要模型的动作按对应 B 场景验证；真实工具缺失必须在 UI 可见，不能仅验证按钮存在 |
+| UI-02 | 面板全部动作；widget→动作队列→manager | E08 drain 表达式；各 manager 局部 | 实际点击/输入/保存/取消，覆盖账号迁移与恢复、刷新、上下文、模型管理中的 DeepSeek 预设和其他平台、唤醒动作；所有面板在关闭按钮左侧固定显示 `codex_app` 彩色状态点（绿/黄/红/蓝对应正常/启动中/异常/直连），不显示状态文字且使用普通指针；正常 Tooltip 只显示易读功能名，异常时显示缺失项、建议和技术诊断；轮询时间变化不得触发面板重绘或打断悬浮；降级时验证常驻诊断及重新检查/重启/打开日志动作；断言事件恰好执行一次和持久化结果 | 需要模型的动作按对应 B 场景验证；真实工具缺失必须在 UI 可见，不能仅验证按钮存在 |
 | UI-03 | 布局、滚动、焦点和原生控件；widget | E08 计算函数 | 不同窗口尺寸、长账号/工具列表、浮层打开关闭、键盘、焦点和命中测试；截图配合 DOM/状态断言 | 实际任务输出增长时原生输入/滚动/工具结果仍可操作 |
 | UI-04 | 页面/任务切换、多窗口与连接恢复；CDP 目标、injector | E08 仅目标选择 | 设置页/主页面/新窗口、任务切换、关闭重开、revision 乱序；旧连接数据不能写到新任务 | 正确窗口与任务显示自己的结果和统计，继续操作正常 |
 
@@ -272,7 +272,7 @@ flowchart LR
 | C2 | 仅上下文覆盖开启，使用官方模型 | 验证静态目录/shim 等独立分支 |
 | C3 | 自定义模型配置开启，仍使用官方模型 | 必须验证官方能力没有随扩展而失效 |
 | C4 | 使用已配置的 Responses 第三方模型 | 每类实际路由与声明能力有验收 |
-| C5 | 使用已配置的 Chat 兼容模型 | 额外覆盖转换、工具历史和续接 |
+| C5 | 使用自动检测为 Chat 链路的模型 | 额外覆盖转换、工具历史和续接；用户不手动选择兼容协议 |
 | C6 | 用户管理外部 catalog、配置受保护或扩展准备失败 | 验证用户配置归属和声明的降级行为 |
 
 A 通过测试配置覆盖当前平台所有可达生产分支。B 验证本次声明适用的真实 profile；缺少真实供应商凭据记“配置未验证”，报告不得把它写成已验证。每个支持的能力域都要有执行证据；通用契约可复用，不复制每个工具名字的相同字段断言。组合膨胀时按共同路径归组并说明等价依据；启动分支、协议转换分支、工具宿主差异不能合并掉。

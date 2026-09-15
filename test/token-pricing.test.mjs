@@ -33,6 +33,7 @@ test("OpenAI 计价正确拆分普通输入、缓存命中、缓存写入和输�
 test("长上下文按单次请求分层，显式短上下文可以覆盖自动判断", () => {
   const pricing = new TokenPricingManager({ fetchImpl: null });
   assert.equal(resolveContextTier("gpt-6-astra", 272_001), "long");
+  assert.equal(resolveContextTier("deepseek-flash", 999_999), "standard");
   assert.equal(resolveContextTier("deepseek-v4-flash", 999_999), "standard");
   assert.equal(pricing.calculate("gpt-6-astra", { input_tokens: 300_000 }).contextTier, "long");
   assert.equal(
@@ -49,7 +50,7 @@ test("未知模型、缺失缓存写入价格和跨供应商聚合不会显示�
     /缓存写入/,
   );
   const openai = pricing.calculate("gpt-5.6-luna", { input_tokens: 1_000 });
-  const deepseek = pricing.calculate("deepseek-v4-flash", { input_tokens: 1_000 });
+  const deepseek = pricing.calculate("deepseek-flash", { input_tokens: 1_000 });
   assert.equal(accumulateTokenCost(openai, deepseek).available, false);
   assert.equal(accumulateTokenCost(openai, pricing.calculate("unknown", {})).available, false);
 });

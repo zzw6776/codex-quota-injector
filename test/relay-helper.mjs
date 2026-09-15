@@ -9,7 +9,7 @@ import { waitFor } from "./helpers.mjs";
 
 export async function startTestRelay(t, {
   usagePathIsDirectory = false,
-  deepSeekEnabled = false,
+  deepSeekPresetEnabled = false,
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codex-relay-contract-"));
   let child;
@@ -34,26 +34,42 @@ export async function startTestRelay(t, {
   }
   const configPath = join(directory, "relay.json");
   const catalogPath = join(directory, "catalog.json");
-  const providerSettingsPath = join(directory, "deepseek.json");
   const settingsPath = join(directory, "models.json");
   const usagePath = join(directory, "usage.jsonl");
   await mkdir(join(directory, "codex-home"));
   if (usagePathIsDirectory) await mkdir(usagePath);
   await writeFile(catalogPath, JSON.stringify({ models: [{ slug: "official" }] }));
-  if (deepSeekEnabled) {
-    await writeFile(providerSettingsPath, JSON.stringify({ enabled: true, apiKey: "test-only" }));
-  }
-  await writeFile(settingsPath, JSON.stringify({ platforms: [{
-    id: "fixture", name: "Fixture", enabled: true, apiKey: "test-only",
-    baseUrl: "http://127.0.0.1:1/v1/",
-    models: ["custom-a", "custom-b", "custom-c"].map((id) => ({
-      id, displayName: id, reasoningEfforts: ["low", "high"], defaultReasoningEffort: "low",
-    })),
-  }] }));
+  const platforms = deepSeekPresetEnabled
+    ? [{
+      id: "d33f5ee0-0000-4000-8000-000000000001",
+      preset: "deepseek",
+      name: "DeepSeek",
+      enabled: true,
+      apiKey: "test-only",
+      baseUrl: "http://127.0.0.1:1/v1/",
+      models: [{
+        id: "deepseek-flash",
+        displayName: "DeepSeek Flash",
+        compatibility: {
+          protocol: "responses",
+          historyMode: "reasoning-text-only",
+          supportsImage: true,
+        },
+        reasoningEfforts: ["low", "high", "max"],
+        defaultReasoningEffort: "high",
+      }],
+    }]
+    : [{
+      id: "fixture", name: "Fixture", enabled: true, apiKey: "test-only",
+      baseUrl: "http://127.0.0.1:1/v1/",
+      models: ["custom-a", "custom-b", "custom-c"].map((id) => ({
+        id, displayName: id, reasoningEfforts: ["low", "high"], defaultReasoningEffort: "low",
+      })),
+    }];
+  await writeFile(settingsPath, JSON.stringify({ platforms }));
   await writeFile(configPath, JSON.stringify({
     upstreamExecutable: executable, modelCatalogPath: catalogPath,
     extraModelSettingsPath: settingsPath, tokenUsageEventsPath: usagePath,
-    ...(deepSeekEnabled ? { providerSettingsPath } : {}),
   }));
   const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
     ["PATH", "Path", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "PATHEXT"].includes(name),
@@ -63,7 +79,8 @@ export async function startTestRelay(t, {
   ], {
     cwd: join(import.meta.dirname, ".."), windowsHide: true,
     env: { ...environment, CODEX_HOME: join(directory, "codex-home"),
-      CODEX_QUOTA_ROLE: "app-server-relay", CODEX_QUOTA_RELAY_CONFIG: configPath },
+      CODEX_QUOTA_ROLE: "app-server-relay", CODEX_QUOTA_PRIMARY_APP_SERVER: "1",
+      CODEX_QUOTA_RELAY_CONFIG: configPath },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stderr = "";

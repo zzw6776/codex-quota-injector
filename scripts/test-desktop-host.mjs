@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import packageJson from "../package.json" with { type: "json" };
 import { CdpClient, findCodexTarget } from "../src/cdp-client.mjs";
 import { inspectLifecycleHost, publicLifecycleHost } from "../src/lifecycle-host.mjs";
+import { DEEPSEEK_CANONICAL_MODEL_ID } from "../src/deepseek-model-profile.mjs";
 import { RELAY_PROTOCOL_VERSION } from "../src/relay-contract.mjs";
 import { WIDGET_RUNTIME_VERSION } from "../src/widget.mjs";
 import { liveProfiles } from "../live-tests/runtime.mjs";
@@ -275,7 +276,7 @@ async function desktopPlan(profile, runtimeTarget, triggerMode = "direct") {
     backendComponent: backendComponentId(profile, runtimeTarget),
     profile,
     triggerMode,
-    expectedModel: profile === "deepseek" ? "deepseek-v4-flash" : "Codex 官方模型",
+    expectedModel: profile === "deepseek" ? DEEPSEEK_CANONICAL_MODEL_ID : "Codex 官方模型",
     platform: process.platform,
     arch: process.arch,
     runtimeTarget,

@@ -13,6 +13,7 @@ import { WebSocketServer } from "ws";
 import { ModelRouterManager } from "../../src/model-router.mjs";
 import { ExtraModelManager } from "../../src/extra-model-manager.mjs";
 import deepSeekModel from "../../src/deepseek-model.json" with { type: "json" };
+import { MODEL_CAPABILITY_PROBE_VERSION } from "../../src/model-capability-probe.mjs";
 import {
   MACOS_NATIVE,
   WINDOWS_NATIVE,
@@ -416,12 +417,57 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
     baseUrl: origin, apiKey: "sk-fixture-platform", models: [{ id: customModel.slug, supportsImage: true,
       contextWindow: 128000, displayName: "Offline fixture", defaultReasoningEffort: "low",
       chatCompatibility: profile === "chat", reasoningEfforts: ["low", "medium", "high"] }] };
-  if (profile === "deepseek") {
-    catalog.models = catalog.models.filter(candidate => candidate?.slug !== deepSeekFixture.slug);
-    catalog.models.push(deepSeekFixture);
-  } else if (productionCatalog) {
+  const deepSeekPlatform = {
+    id: "d33f5ee0-5df4-4f8a-9bf4-47b29e7555ab",
+    name: "DeepSeek",
+    preset: "deepseek",
+    enabled: true,
+    baseUrl: origin,
+    apiKey: "sk-fixture-deepseek",
+    models: [{
+      id: deepSeekFixture.slug,
+      selected: true,
+      supportsImage: deepSeekFixture.input_modalities?.includes("image") === true,
+      contextWindow: deepSeekFixture.context_window,
+      displayName: deepSeekFixture.display_name,
+      defaultReasoningEffort: "high",
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      compatibility: {
+        status: "verified",
+        protocol: "responses",
+        routes: { default: "responses", imageInput: "responses" },
+        historyMode: "responses-full",
+        toolContinuation: true,
+        supportsImage: deepSeekFixture.input_modalities?.includes("image") === true,
+        imageStatus: deepSeekFixture.input_modalities?.includes("image") === true
+          ? "supported"
+          : "unsupported",
+        capabilities: {
+          transport: { responses: "native", chat: "inconclusive" },
+          streaming: "native",
+          functionTools: "native",
+          customTools: "bridged",
+          namespaceTools: "native",
+          nativeCustomTools: ["apply_patch"],
+          parallelTools: "native",
+          toolChoice: "native",
+          reasoning: "native",
+          reasoningToolChoice: "auto-only",
+          reasoningHistory: "native",
+          imageInput: "native",
+          hostedTools: { web_search: "unsupported" },
+        },
+        codexConformance: "passed",
+        checkedAt: 1,
+        probeVersion: MODEL_CAPABILITY_PROBE_VERSION,
+        targetFingerprint: "offline-deepseek-flash",
+      },
+    }],
+  };
+  const activePlatform = profile === "deepseek" ? deepSeekPlatform : platform;
+  if (profile === "deepseek" || productionCatalog) {
     const manager = new ExtraModelManager({ dataDir: join(directory, "model-settings") });
-    manager.settings = { generation: 1, platforms: [platform] };
+    manager.settings = { generation: 1, platforms: [activePlatform] };
     catalog = (await manager.writeRuntimeCatalog(catalog)).catalog;
   } else catalog.models.push(customModel);
   const catalogPath = join(directory, "模型目录 with spaces.json");
@@ -432,21 +478,10 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
     router = new ModelRouterManager({
       officialApiBaseUrl: origin,
       officialCodexBaseUrl: origin,
-      deepSeekBaseUrl: origin,
     });
-    const deepSeek = profile === "deepseek" ? {
-      enabled: true,
-      configured: true,
-      apiKey: "sk-fixture-deepseek",
-      model: {
-        displayName: deepSeekFixture.display_name,
-        reasoningEfforts: deepSeekFixture.supported_reasoning_levels.map(item => item.effort),
-      },
-    } : undefined;
     route = await router.configure({
       officialAuthMode: "apiKey", usageEventPath: usagePath,
-      deepSeek,
-      extraModels: { platforms: [platform] },
+      extraModels: { platforms: [activePlatform] },
     });
     endpoint = route.baseUrl;
     env[route.tokenEnv] = route.token;
@@ -475,8 +510,13 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
   if (profile !== "direct") {
     let shim = null;
     if (process.platform === "darwin") {
-      shim = join(directory, "Codex Quota Injector Shim");
-      await execFileAsync("/usr/bin/xcrun", ["swiftc", "-O", resolve(ROOT, "src/macos-codex-shim.swift"), "-o", shim], { timeout: 30_000 });
+      shim = String(process.env.CODEX_TEST_MACOS_SHIM ?? "").trim();
+      if (shim) {
+        await access(shim);
+      } else {
+        shim = join(directory, "Codex Quota Injector Shim");
+        await execFileAsync("/usr/bin/xcrun", ["swiftc", "-O", resolve(ROOT, "src/macos-codex-shim.swift"), "-o", shim], { timeout: 30_000 });
+      }
     } else if (process.platform === "win32" && runtimeTarget === WINDOWS_NATIVE) {
       shim = String(process.env.CODEX_TEST_RELAY_EXECUTABLE ?? "").trim() || process.execPath;
       if (shim === process.execPath) executablePrefixArgs = [resolve(ROOT, "src/windows-relay-entry.mjs")];
@@ -486,23 +526,19 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
     } else {
       throw new Error(`BLOCKED: ${process.platform}/${process.arch}/${runtimeTarget ?? "unknown"} 没有生产中继测试适配器`);
     }
-    const providerSettingsPath = join(directory, "provider-settings.json");
     const extraModelSettingsPath = join(directory, "runtime-extra-model-settings.json");
-    await writeFile(providerSettingsPath, JSON.stringify(profile === "deepseek"
-      ? { enabled: true, apiKey: "sk-fixture-deepseek", generation: 1 }
-      : { enabled: false, apiKey: "", generation: 0 }));
     await writeFile(extraModelSettingsPath, JSON.stringify({
       generation: 1,
-      platforms: route ? [platform] : [],
+      platforms: route ? [activePlatform] : [],
     }));
     const configPath = join(directory, "relay-config.json");
     const observeModelTraffic = !route &&
       [WINDOWS_NATIVE, WSL_NATIVE].includes(runtimeTarget);
     await writeFile(configPath, JSON.stringify({
-      version: process.platform === "darwin" ? 5 : 2,
+      version: process.platform === "darwin" ? 6 : 3,
       upstreamExecutable: cli,
       relayExecutable: process.execPath, relayArguments: [resolve(ROOT, "src/launcher.mjs")],
-      providerSettingsPath, extraModelSettingsPath, modelCatalogPath: catalogPath,
+      extraModelSettingsPath, modelCatalogPath: catalogPath,
       relayStatePath: join(directory, "relay-state.json"),
       hostHealthPath: join(directory, "host-health.json"),
       hostToolsRequired: true,
@@ -518,6 +554,7 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
         legacyProviderIds: route.legacyProviderIds } : null }));
     env.CODEX_QUOTA_RELAY_CONFIG = configPath;
     env.CODEX_QUOTA_UPSTREAM_CODEX_CLI = cli;
+    env.CODEX_QUOTA_PRIMARY_APP_SERVER = "1";
     if (runtimeTarget === WSL_NATIVE) env.CODEX_QUOTA_WSL_UPSTREAM_CODEX_CLI = cli;
     executable = shim;
   }

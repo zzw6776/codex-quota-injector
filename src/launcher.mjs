@@ -45,7 +45,6 @@ async function runLauncher() {
   const { AccountManager } = await import("./account-manager.mjs");
   const { prepareCodexLaunch } = await import("./codex-bridge.mjs");
   const { CodexContextManager } = await import("./codex-context.mjs");
-  const { DeepSeekManager } = await import("./deepseek-manager.mjs");
   const { ExtraModelManager } = await import("./extra-model-manager.mjs");
   const { installFileLogger } = await import("./file-logger.mjs");
   const { runInjector } = await import("./injector.mjs");
@@ -82,10 +81,16 @@ async function runLauncher() {
   let requestLaunchRecovery = null;
   let reloadWidget = null;
   const devRuntime = instanceMode === "dev" ? await import("./dev-runtime.mjs") : null;
+  if (devRuntime?.isCodexHostedDevLaunch()) {
+    console.warn(
+      "[launcher] 检测到开发版由 Codex 任务内部启动，拒绝接管；" +
+      "请从 Finder 打开“启动开发版.command”或在外部终端执行 npm run launch",
+    );
+    return;
+  }
   const runtimeIdentity = devRuntime ? await devRuntime.readDevRuntimeIdentity() : null;
   const accountManager = new AccountManager();
   const contextManager = new CodexContextManager();
-  const deepSeekManager = new DeepSeekManager();
   const extraModelManager = new ExtraModelManager();
   const modelRouterManager = new ModelRouterManager();
 
@@ -112,7 +117,6 @@ async function runLauncher() {
   const prepareCurrentLaunch = async () => {
     launchOptions = await prepareCodexLaunch({
       accountManager,
-      deepSeekManager,
       extraModelManager,
       contextManager,
       modelRouterManager,
@@ -153,7 +157,6 @@ async function runLauncher() {
 
     await accountManager.initialize();
     await contextManager.initialize();
-    await deepSeekManager.initialize();
     await extraModelManager.initialize();
     launchOptions = await prepareCurrentLaunch();
     await ensureCodexDebugMode(port, launchOptions);
@@ -165,7 +168,6 @@ async function runLauncher() {
       injectionMode: launchOptions.injectionMode,
       accountManager,
       contextManager,
-      deepSeekManager,
       extraModelManager,
       modelRouterManager,
       managersInitialized: true,

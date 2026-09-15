@@ -16,7 +16,7 @@ async function startRouter(t, handler, { usageEventPath = null, chatCompatibilit
   });
   t.after(() => manager.close());
   const config = await manager.configure({
-    deepSeek: { enabled: false }, officialAuthMode: "apiKey", usageEventPath,
+    officialAuthMode: "apiKey", usageEventPath,
     extraModels: { platforms: [{
       id: "fixture", name: "Fixture", enabled: true, apiKey: "fixture-custom-key", baseUrl: `${upstream.origin}/custom/v1/`,
       models: [{ id: "custom-model", displayName: "Custom", supportsImage: true, chatCompatibility,

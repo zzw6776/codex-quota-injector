@@ -71,14 +71,14 @@ test("[A HAR-04 ENV-03 TOOL-05] 桌面启动前检查不绑定发起任务的 co
 });
 
 test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独立 HTTP 证据判定供应商及工具链", () => {
-  const rollout = parseDesktopRollout(fixtureRollout("deepseek-v4-flash"), {
+  const rollout = parseDesktopRollout(fixtureRollout("deepseek-flash"), {
     marker,
     profile: "deepseek",
-    customModels: ["deepseek-v4-flash", "custom-model"],
+    customModels: ["deepseek-flash", "custom-model"],
     path: "/fixture/rollout.jsonl",
   });
   assert.equal(rollout.threadId, "thread-desktop");
-  assert.equal(rollout.model, "deepseek-v4-flash");
+  assert.equal(rollout.model, "deepseek-flash");
   assert.equal(rollout.modelMatches, true);
   assert.deepEqual(rollout.checks, {
     functionsExec: true,
@@ -116,7 +116,7 @@ test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独
   assert.ok(result.checks.every(check => check.status === "passed"));
 });
 
-test("[A HAR-04 TOOL-06] Windows 桌面报告只接受原生应用的独立启动与提交证据", () => {
+test("[platform:windows-native] [A HAR-04 TOOL-06] Windows 桌面报告只接受原生应用的独立启动与提交证据", () => {
   const rollout = parseDesktopRollout(fixtureRollout("gpt-6-astra"), {
     marker,
     profile: "official",
@@ -151,10 +151,10 @@ test("[A HAR-04 TOOL-06] Windows 桌面报告只接受原生应用的独立启�
 });
 
 test("[A HAR-04 MOD-03] B1/B2 桌面证据不能继承其他模型、旧源码或另一组件结果", () => {
-  const deepseek = parseDesktopRollout(fixtureRollout("deepseek-v4-flash"), {
+  const deepseek = parseDesktopRollout(fixtureRollout("deepseek-flash"), {
     marker,
     profile: "official",
-    customModels: ["deepseek-v4-flash"],
+    customModels: ["deepseek-flash"],
   });
   assert.equal(deepseek.modelMatches, false);
   const result = evaluateDesktopHostEvidence({
@@ -183,7 +183,7 @@ test("[A HAR-04 TOOL-04] 失败命令之后没有真实工具调用时不得声�
   assert.equal(rollout.checks.functionsExecFailure, false);
 });
 
-test("[A HAR-04 TOOL-04] Windows 失败命令重试后采信真实保留的退出码", () => {
+test("[platform:windows-native] [A HAR-04 TOOL-04] Windows 失败命令重试后采信真实保留的退出码", () => {
   const records = fixtureRollout("gpt-6-astra").trim().split("\n").map(JSON.parse);
   const exactFailureIndex = records.findIndex((record) =>
     record.type === "response_item" && record.payload?.input?.includes(`FAIL_${marker}`));
@@ -237,7 +237,7 @@ test("[A HAR-04 TOOL-06] Computer Use 截图调用失败不能因调用发生而
   assert.equal(rollout.callIds.computerScreenshot.length, 1);
 });
 
-test("[A HAR-04 TOOL-06] Windows 截图仅在官方无 Relay 对照一致时标记上游阻断", () => {
+test("[platform:windows-native] [A HAR-04 TOOL-06] Windows 截图仅在官方无 Relay 对照一致时标记上游阻断", () => {
   const records = fixtureRollout("gpt-6-astra")
     .replace(" await tab.screenshot();", "")
     .trim().split("\n").map(JSON.parse);
@@ -299,9 +299,10 @@ test("[A HAR-04 TOOL-06] Windows 截图仅在官方无 Relay 对照一致时标�
     upstreamAttributions: { "computer-screenshot": unverified },
   });
   assert.equal(failed.status, "failed");
+
 });
 
-test("[A HAR-04 TOOL-06] WSL 官方 sandboxCwd 阻断单独标记为上游能力阻断", () => {
+test("[platform:wsl-native] [A HAR-04 TOOL-06] WSL 官方 sandboxCwd 阻断单独标记为上游能力阻断", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replace('"output":"SECRET_RESULT_BODY"',
       '"output":"Mcp error: sandboxCwd is not a local file URI: file:///mnt/d/project"');
@@ -341,7 +342,7 @@ test("[A HAR-04 TOOL-06] functions.exec 编排的官方 node_repl Computer Use �
 });
 
 test("[A HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定，不依赖活动输入回显", () => {
-  const content = fixtureRollout("deepseek-v4-flash")
+  const content = fixtureRollout("deepseek-flash")
     .replace(
       JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
       JSON.stringify(functionOutput("codex-read", readThreadOutput(marker, { items: [] }))),
@@ -361,7 +362,7 @@ test("[A HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定�
   assert.equal(evaluateDesktopHostEvidence({ ...shared, triggerMode: "direct" }).status, "failed");
   assert.equal(evaluateDesktopHostEvidence({ ...shared, triggerMode: "delegated" }).status, "failed");
 
-  const partiallyEmptyContent = fixtureRollout("deepseek-v4-flash")
+  const partiallyEmptyContent = fixtureRollout("deepseek-flash")
     .replace(
       JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
       JSON.stringify(functionOutput("codex-read", readThreadOutput(marker, { turns: [
@@ -383,7 +384,7 @@ test("[A HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定�
     triggerMode: "delegated",
   }).status, "failed");
 
-  const delegatedContent = fixtureRollout("deepseek-v4-flash")
+  const delegatedContent = fixtureRollout("deepseek-flash")
     .replace(
       JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
       JSON.stringify(functionOutput("codex-read", readThreadOutput("older-message"))),
@@ -404,6 +405,82 @@ test("[A HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定�
     rollout: delegatedRollout,
     triggerMode: "delegated",
   }).status, "passed");
+});
+
+for (const delegationTool of ["create_thread", "send_message_to_thread"]) {
+test(`[A HAR-04 TOOL-04] read_thread 接受 ${delegationTool} 的真实委托输入，不依赖本轮触发方式`, () => {
+  const delegated = delegatedReadInput();
+  delegated.name = delegationTool;
+  for (const output of [delegated.output, delegated.output.text]) {
+    const turns = [
+      { id: "human", status: "completed", items: [
+        { type: "userMessage", content: [{ type: "text", text: "previous input" }] },
+        { type: "agentMessage", text: "previous reply" },
+      ] },
+      { id: "delegated", status: "completed", items: [
+        { ...delegated, output }, { type: "agentMessage", text: "delegated reply" },
+      ] },
+      { id: "active", status: "inProgress", items: [] },
+    ];
+    const rollout = rolloutWithReadTurns(turns);
+    assert.equal(rollout.checks.codexAppReadContent, true);
+    assert.equal(rollout.checks.codexAppReadMarker, false);
+    for (const triggerMode of ["direct", "delegated"]) {
+      const result = evaluateDesktopHostEvidence({
+        profile: "deepseek", marker, triggerMode, rollout,
+        runtimeBinding: { status: "passed" },
+        toolInventory: { offers: { webRun: true } },
+        httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
+      });
+      assert.equal(result.status, "passed");
+    }
+  }
+});
+}
+
+test("[A HAR-04 TOOL-04] read_thread 不把普通工具输出或不完整委托算作用户输入", () => {
+  const input = delegatedReadInput();
+  const invalidInputs = [
+    { ...input, type: "mcpToolCall" },
+    { ...input, name: "read_thread" },
+    { ...input, namespace: "other" },
+    { ...input, output: undefined },
+    { ...input, output: { ...input.output, truncated: true } },
+    { ...input, output: "ordinary tool result" },
+    { ...input, output: "<codex_delegation><input>request</input></codex_delegation>" },
+    { ...input, output: input.output.text.replace("source-task", "") },
+    { ...input, output: input.output.text.replace("delegated request", "  \n ") },
+    { ...input, output: input.output.text.replace("</codex_delegation>", "") },
+  ];
+  for (const invalid of invalidInputs) {
+    const rollout = rolloutWithReadTurns([
+      { id: "delegated", status: "completed", items: [invalid, { type: "agentMessage", text: "reply" }] },
+    ]);
+    assert.equal(rollout.checks.codexAppReadContent, false, JSON.stringify(invalid));
+  }
+  const splitTurns = rolloutWithReadTurns([
+    { id: "input-only", status: "completed", items: [input] },
+    { id: "reply-only", status: "completed", items: [{ type: "agentMessage", text: "reply" }] },
+  ]);
+  assert.equal(splitTurns.checks.codexAppReadContent, false);
+});
+
+test("[A HAR-04 TOOL-04] read_thread 不跳过缺失 items 的完成回合，不借用其他任务内容", () => {
+  const validTurn = { id: "valid", status: "completed", items: [
+    delegatedReadInput(), { type: "agentMessage", text: "reply" },
+  ] };
+  assert.equal(rolloutWithReadTurns([
+    validTurn, { id: "missing", status: "completed" },
+  ]).checks.codexAppReadContent, false);
+  const content = fixtureRollout("deepseek-flash").replace(
+    JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
+    JSON.stringify(functionOutput("codex-read", JSON.stringify([
+      JSON.parse(readThreadOutput(marker, { items: [] })),
+      { thread: { id: "other-task" }, turns: [validTurn] },
+    ]))),
+  );
+  const rollout = parseDesktopRollout(content, { marker, profile: "deepseek" });
+  assert.equal(rollout.checks.codexAppReadContent, false);
 });
 
 test("[A HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且桌面封装清空时标记上游阻断", () => {
@@ -450,6 +527,20 @@ test("[A HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且
     upstreamAttributions: { "codex-app-read-thread": mismatchedControl },
   });
   assert.equal(failed.status, "failed");
+  for (const turns of [
+    [{ id: "missing-items", status: "completed" }],
+    [{ id: "missing-input", status: "completed", items: [
+      { type: "agentMessage", text: "reply" },
+    ] }],
+  ]) {
+    const otherFailure = rolloutWithReadTurns(turns);
+    const result = evaluateDesktopHostEvidence({
+      ...shared, profile: "deepseek", rollout: otherFailure,
+      upstreamAttributions: { "codex-app-read-thread": attribution },
+    });
+    assert.equal(result.checks.find((item) => item.id === "codex-app-read-thread").status, "failed");
+    assert.equal(result.upstreamReason, null);
+  }
 });
 
 test("[A HAR-04 NET-05] 目标模型用量失败必须保留官方错误并判定失败", () => {
@@ -475,16 +566,16 @@ test("[A HAR-04 NET-05] 目标模型用量失败必须保留官方错误并判�
 
 test("[A HAR-04 OBS-04] 请求工具清单只保留脱敏标识并能确认 web 能力是否下发", () => {
   const content = [
-    { type: "request-tool-inventory", threadId: "other", model: "deepseek-v4-flash", recordedAt: 2000,
+    { type: "request-tool-inventory", threadId: "other", model: "deepseek-flash", recordedAt: 2000,
       tools: [{ type: "custom", name: "web.run" }] },
-    { type: "request-tool-inventory", threadId: "thread-desktop", model: "deepseek-v4-flash", recordedAt: 2001,
+    { type: "request-tool-inventory", threadId: "thread-desktop", model: "deepseek-flash", recordedAt: 2001,
       tools: [{ type: "function", name: "exec" }, { type: "mcp", serverLabel: "codex_app" }] },
-    { type: "request-tool-inventory", threadId: "thread-desktop", model: "deepseek-v4-flash", recordedAt: 2002,
+    { type: "request-tool-inventory", threadId: "thread-desktop", model: "deepseek-flash", recordedAt: 2002,
       tools: [{ type: "custom", name: "web.run" }, { type: "function", name: "exec" }] },
   ].map(JSON.stringify).join("\n");
   const inventory = parseRequestToolInventory(content, {
     threadId: "thread-desktop",
-    model: "deepseek-v4-flash",
+    model: "deepseek-flash",
     startedAt: 2000,
   });
   assert.equal(inventory.eventCount, 2);
@@ -502,17 +593,17 @@ test("[A HAR-04 TOOL-05] DeepSeek 的 Hosted web_search 描述不能冒充可调
   const inventory = parseRequestToolInventory(JSON.stringify({
     type: "request-tool-inventory",
     threadId: "thread-desktop",
-    model: "deepseek-v4-flash",
+    model: "deepseek-flash",
     recordedAt: 2001,
     tools: [{ type: "web_search" }],
   }), {
     threadId: "thread-desktop",
-    model: "deepseek-v4-flash",
+    model: "deepseek-flash",
     startedAt: 2000,
   });
   assert.deepEqual(inventory.offers, { webRun: false, hostedWebSearch: true });
 
-  const rollout = parseDesktopRollout(fixtureRollout("deepseek-v4-flash").split("\n")
+  const rollout = parseDesktopRollout(fixtureRollout("deepseek-flash").split("\n")
     .filter((line) => !line.includes('"call_id":"web-'))
     .join("\n"), { marker, profile: "deepseek" });
   const result = evaluateDesktopHostEvidence({
@@ -550,6 +641,9 @@ test("[A HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", ()
   assert.match(prompt, /codex_app/);
   assert.match(prompt, /list_threads/);
   assert.match(prompt, /read_thread/);
+  assert.match(prompt, /includeOutputs: true/);
+  assert.match(prompt, /maxOutputCharsPerItem: 20000/);
+  assert.match(prompt, /codex_delegation/);
   assert.match(prompt, /list_projects/);
   assert.match(prompt, /get_usage_limits/);
   assert.match(prompt, /web\.run/);
@@ -589,11 +683,11 @@ test("[A HAR-04 ENV-03] 自动发现只读取本次标记所在的近期 rollout
   const directory = join(codexHome, "sessions", "2026", "09", "13");
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "rollout-fixture.jsonl"), fixtureRollout("gpt-6-astra"));
-  await writeFile(join(directory, "rollout-other.jsonl"), fixtureRollout("deepseek-v4-flash", "BHOST_ffffffffffffffff"));
+  await writeFile(join(directory, "rollout-other.jsonl"), fixtureRollout("deepseek-flash", "BHOST_ffffffffffffffff"));
   const rollout = await findDesktopRolloutEvidence({
     marker,
     profile: "official",
-    customModels: ["deepseek-v4-flash"],
+    customModels: ["deepseek-flash"],
     startedAt: Date.now() - 1_000,
     codexHome,
   });
@@ -610,26 +704,26 @@ test("[A HAR-04 MOD-03] 自动发现忽略控制任务里同标记的错误供�
   const beforeTarget = await findDesktopRolloutEvidence({
     marker,
     profile: "deepseek",
-    customModels: ["deepseek-v4-flash"],
+    customModels: ["deepseek-flash"],
     startedAt: Date.now() - 1_000,
     codexHome,
   });
   assert.equal(beforeTarget, null);
 
-  await writeFile(join(directory, "rollout-target.jsonl"), fixtureRollout("deepseek-v4-flash"));
+  await writeFile(join(directory, "rollout-target.jsonl"), fixtureRollout("deepseek-flash"));
   const target = await findDesktopRolloutEvidence({
     marker,
     profile: "deepseek",
-    customModels: ["deepseek-v4-flash"],
+    customModels: ["deepseek-flash"],
     startedAt: Date.now() - 1_000,
     codexHome,
   });
-  assert.equal(target.model, "deepseek-v4-flash");
+  assert.equal(target.model, "deepseek-flash");
   assert.equal(target.modelMatches, true);
 });
 
 test("[A HAR-04 TOOL-05 TOOL-06] 目标模型任务结束但宿主工具缺失时标记 blocked 并停止监视", () => {
-  const content = fixtureRollout("deepseek-v4-flash").split("\n")
+  const content = fixtureRollout("deepseek-flash").split("\n")
     .filter((line) => !line.includes('"call_id":"web-'))
     .join("\n");
   const rollout = parseDesktopRollout(content, { marker, profile: "deepseek" });
@@ -685,6 +779,24 @@ function fixtureRollout(model, testMarker = marker) {
     { type: "event_msg", payload: { type: "task_complete" } },
   ];
   return records.map(JSON.stringify).join("\n") + "\n";
+}
+
+function delegatedReadInput() {
+  return {
+    type: "functionCallOutput", name: "send_message_to_thread", namespace: "codex_app",
+    output: {
+      text: "<codex_delegation>\n<source_thread_id>source-task</source_thread_id>\n<input>delegated request</input>\n</codex_delegation>",
+      truncated: false,
+    },
+  };
+}
+
+function rolloutWithReadTurns(turns) {
+  const content = fixtureRollout("deepseek-flash").replace(
+    JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
+    JSON.stringify(functionOutput("codex-read", readThreadOutput(marker, { turns }))),
+  );
+  return parseDesktopRollout(content, { marker, profile: "deepseek" });
 }
 
 function readThreadOutput(value, { items = null, turns = null } = {}) {

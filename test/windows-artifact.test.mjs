@@ -25,7 +25,7 @@ async function writeSparseArtifact(path, { magic = "MZ", includeFuse = true } = 
   }
 }
 
-test("Windows 中继产物必须同时具有 PE 标识、有效体积和激活的 SEA fuse", async (t) => {
+test("[platform:windows-native] Windows 中继产物必须同时具有 PE 标识、有效体积和激活的 SEA fuse", async (t) => {
   const directory = await useTempDir(t, "codex-windows-artifact-");
   const valid = join(directory, "valid.exe");
   const invalidPe = join(directory, "invalid-pe.exe");

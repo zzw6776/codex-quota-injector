@@ -355,7 +355,7 @@ test("[A LCH-04] 健康文件监听兼容原子替换、防抖并在错误时关
   assert.equal(watchers[0].closed, true);
 });
 
-test("[A LCH-01 UI-02] Windows 原生提示脚本只包含通用错误和明确日志路径", () => {
+test("[platform:windows-native] [A LCH-01 UI-02] Windows 原生提示脚本只包含通用错误和明确日志路径", () => {
   const path = "C:\\Users\\Fixture O'Brien\\injector.log";
   const openScript = windowsOpenLogScript(path);
   const alertScript = windowsStartupFailureScript(path);

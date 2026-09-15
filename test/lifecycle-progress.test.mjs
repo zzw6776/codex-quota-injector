@@ -163,7 +163,7 @@ test("[A HAR-02 LCH-01] Safari 可见后才把生命周期任务交给外部监�
   assert.deepEqual(order, ["visible", "scheduled"]);
 });
 
-test("[A HAR-02 LCH-02] Windows 报告页分别显示原生、WSL 和自动恢复结果", () => {
+test("[platform:windows-native][platform:wsl-native] [A HAR-02 LCH-02] Windows 报告页分别显示原生、WSL 和自动恢复结果", () => {
   const report = createLifecycleReport({
     runId: "runtime-components",
     projectVersion: "1.2.3",

@@ -3,6 +3,10 @@ import { readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export function isCodexHostedDevLaunch(environment = process.env) {
+  return Boolean(String(environment.CODEX_APP_TOOLS_PIPE_PATH ?? "").trim());
+}
+
 // Only the self-contained Widget module can be reloaded in place. Any other
 // runtime or dependency change must keep using the normal upgrade path.
 export async function readDevRuntimeIdentity(root = fileURLToPath(new URL("../", import.meta.url))) {

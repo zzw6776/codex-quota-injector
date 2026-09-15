@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { windowsInstallerArguments } from "../scripts/windows-installer-command.mjs";
 
-test("Windows 安装器显式以 UTF-8 读取包含中文的 NSIS 脚本", () => {
+test("[platform:windows-native] Windows 安装器显式以 UTF-8 读取包含中文的 NSIS 脚本", () => {
   const scriptPath = "D:\\project\\installer\\windows-installer.nsi";
   const args = windowsInstallerArguments({
     version: "1.2.3",
@@ -24,7 +24,7 @@ test("Windows 安装器显式以 UTF-8 读取包含中文的 NSIS 脚本", () =>
     "NSIS 必须在读取脚本前切换到 UTF-8");
 });
 
-test("Windows 安装器把独立应用图标安装并绑定到两个快捷方式", async () => {
+test("[platform:windows-native] Windows 安装器把独立应用图标安装并绑定到两个快捷方式", async () => {
   const script = await readFile(resolve(import.meta.dirname, "../installer/windows-installer.nsi"), "utf8");
   assert.match(script, /File "\/oname=AppIcon\.ico" "\$\{APP_ICON\}"/);
   assert.match(script, /CreateShortCut "\$SMPROGRAMS\\Codex Quota Injector\\Codex Quota Injector\.lnk"[^\n]+"\$INSTDIR\\AppIcon\.ico"/);

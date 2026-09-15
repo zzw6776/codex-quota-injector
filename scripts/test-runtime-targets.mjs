@@ -16,6 +16,36 @@ export const MACOS_NATIVE = "macos-native";
 export const WINDOWS_NATIVE = "windows-native";
 export const WSL_NATIVE = "wsl-native";
 export const RUNTIME_TARGETS = new Set([MACOS_NATIVE, WINDOWS_NATIVE, WSL_NATIVE]);
+export const CONTRACT_PLATFORM_MARKERS = Object.freeze({
+  [MACOS_NATIVE]: "[platform:macos-native]",
+  [WINDOWS_NATIVE]: "[platform:windows-native]",
+  [WSL_NATIVE]: "[platform:wsl-native]",
+});
+
+export function classifyContractTestTitles(source) {
+  const groups = new Map([
+    [COMMON_COMPONENT, []],
+    [MACOS_NATIVE, []],
+    [WINDOWS_NATIVE, []],
+    [WSL_NATIVE, []],
+  ]);
+  const titles = [...String(source).matchAll(/^(?:if\s*\([^\n]+\)\s*)?test\(\s*([`"'])(.*?)\1/gm)]
+    .map((match) => match[2]);
+  for (const title of titles) {
+    const targets = Object.entries(CONTRACT_PLATFORM_MARKERS)
+      .filter(([, marker]) => title.includes(marker))
+      .map(([runtimeTarget]) => runtimeTarget);
+    if (!targets.length) groups.get(COMMON_COMPONENT).push(title);
+    else for (const runtimeTarget of targets) groups.get(runtimeTarget).push(title);
+  }
+  return groups;
+}
+
+export function exactContractNamePattern(titles) {
+  if (!titles?.length) return "(?!)";
+  const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return `(?:${[...new Set(titles)].map((title) => `${escapeRegex(title)}$`).join("|")})`;
+}
 
 export function runtimeTargetsForPlatform(platform = process.platform) {
   if (platform === "darwin") return [MACOS_NATIVE];

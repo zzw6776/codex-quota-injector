@@ -178,7 +178,7 @@ test("SES-01 新建、恢复和分叉均从官方响应外层学习模型，保�
 });
 
 test("MOD-03 SES-01 重启后先恢复 DeepSeek 任务不会污染既有官方任务", async (t) => {
-  const relay = await startTestRelay(t, { deepSeekEnabled: true });
+  const relay = await startTestRelay(t, { deepSeekPresetEnabled: true });
   await relay.send({ id: "discover", method: "thread/list", params: {} });
   await relay.received("discover");
   await relay.emit({ id: "discover", result: { data: [
@@ -191,8 +191,9 @@ test("MOD-03 SES-01 重启后先恢复 DeepSeek 任务不会污染既有官方�
     threadId: "deepseek-task",
   } });
   const deepSeekResume = await relay.received("resume-deepseek");
-  assert.equal(deepSeekResume.params.model, "deepseek-v4-flash");
-  assert.equal(deepSeekResume.params.modelProvider, "deepseek");
+  assert.equal(deepSeekResume.params.model, "deepseek-flash");
+  assert.equal(deepSeekResume.params.modelProvider,
+    "custom_d33f5ee0000040008000000000000001");
   await relay.emit({ id: "resume-deepseek", result: {
     thread: { id: "deepseek-task", turns: [] },
     model: "deepseek-v4-flash",

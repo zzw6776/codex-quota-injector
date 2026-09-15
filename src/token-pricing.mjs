@@ -26,9 +26,12 @@ const FALLBACK_EXCHANGE_RATE = Object.freeze({
   fallback: true,
 });
 
+const DEEPSEEK_V41_FLASH_PRICE = priceTier(1, 0.02, 1, 2);
 const DEEPSEEK_PRICES = Object.freeze({
-  "deepseek-v4-flash": priceTier(1, 0.02, 1, 2),
-  "deepseek-v4-pro": priceTier(3, 0.025, 3, 6),
+  "deepseek-flash": DEEPSEEK_V41_FLASH_PRICE,
+  "deepseek-v4-flash": DEEPSEEK_V41_FLASH_PRICE,
+  "deepseek-v4-flash-vision-exp": DEEPSEEK_V41_FLASH_PRICE,
+  "deepseek-v4-pro": DEEPSEEK_V41_FLASH_PRICE,
 });
 
 // Standard API USD per 1M tokens, checked 2026-09-06:

@@ -21,7 +21,7 @@ function signedPeImage({ certificateOffset = 768, certificateSize = 256 } = {}) 
   return { image, securityDirectoryOffset };
 }
 
-test("Windows SEA 构建在改写 PE 前移除文件尾 Authenticode 证书表", async (t) => {
+test("[platform:windows-native] Windows SEA 构建在改写 PE 前移除文件尾 Authenticode 证书表", async (t) => {
   const directory = await useTempDir(t, "windows-sea-support-");
   const path = join(directory, "node.exe");
   const { image, securityDirectoryOffset } = signedPeImage();
@@ -35,7 +35,7 @@ test("Windows SEA 构建在改写 PE 前移除文件尾 Authenticode 证书表",
   assert.equal(stripped.readUInt32LE(securityDirectoryOffset + 4), 0);
 });
 
-test("Windows SEA 构建拒绝伪成功的 postject 重定位损坏输出", () => {
+test("[platform:windows-native] Windows SEA 构建拒绝伪成功的 postject 重定位损坏输出", () => {
   assert.throws(() => assertSuccessfulPostject({
     status: 0,
     stdout: "error: Relocation corrupted: BlockSize is out of bound\nInjection done!",

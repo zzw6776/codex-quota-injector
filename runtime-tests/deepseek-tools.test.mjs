@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { call, message, ROOT, startRuntime } from "./support/offline-runtime.mjs";
 
-test("[A MOD-03 TOOL-03 INT-02] DeepSeek 直接工具模式向模型暴露并执行 MCP 命名空间", { timeout: 30_000 }, async t => {
+test("[A MOD-03 TOOL-03 INT-02] 模型配置平台的 DeepSeek Flash 原生执行 MCP 命名空间", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, {
     profile: "deepseek",
     prepare: async ({ directory, env }) => {
@@ -17,6 +17,7 @@ args=${JSON.stringify([join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), dire
 `);
     },
   });
+  assert.equal(r.model, "deepseek-flash");
   const marker = "DEEPSEEK_DIRECT_MCP";
   await writeFile(join(r.directory, "mcp-marker.txt"), marker);
   r.enqueue(
@@ -25,8 +26,10 @@ args=${JSON.stringify([join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), dire
         "直接工具模式不能把 MCP 隐藏到延迟搜索后");
       const namespace = body.tools?.find(tool =>
         tool.type === "namespace" && tool.name === "mcp__fixture");
-      assert.ok(namespace?.tools?.some(tool => tool.type === "function" && tool.name === "read"),
-        "DeepSeek 首次请求必须直接包含 fixture.read 声明");
+      assert.ok(namespace?.tools?.some(tool =>
+        tool.type === "function" && tool.name === "read" &&
+        tool.description === "Offline fixture read"),
+      "DeepSeek Flash 当前检测为 Namespace 原生，首次请求必须包含 fixture.read 声明");
       return [{ ...call("read", {}), namespace: "mcp__fixture" }];
     },
     body => {

@@ -3,9 +3,14 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import { findOfficialAppServerUrl } from "../live-tests/web-search-contract.mjs";
+import {
+  DEEPSEEK_CANONICAL_MODEL_ID,
+  DEEPSEEK_ROUTABLE_MODEL_IDS,
+} from "../src/deepseek-model-profile.mjs";
 import { defaultAccountDataDir } from "../src/platform.mjs";
+import { readCodexDelegationInput } from "../src/codex-delegation.mjs";
 
-export const DESKTOP_HOST_REPORT_VERSION = 7;
+export const DESKTOP_HOST_REPORT_VERSION = 9;
 
 export function desktopBatch(profile) {
   if (profile === "official") return "B1-official";
@@ -191,6 +196,7 @@ export function parseDesktopRollout(content, {
       codexAppListThreads: codexAppListSucceeded,
       codexAppReadThread: codexAppListSucceeded && codexAppReadSucceeded,
       codexAppReadContent: codexAppReadEvidence.hasMessageItems,
+      codexAppReadEmptyCompletedTurns: codexAppReadEvidence.emptyCompletedTurns,
       codexAppReadMarker: codexAppReadEvidence.markerInMessageItems,
       codexAppListProjects: Boolean(codexAppListProjectsCall &&
         isSuccessfulCodexAppOutput(codexAppListProjectsOutput)),
@@ -246,9 +252,10 @@ export function evaluateDesktopHostEvidence({
   );
   const readThreadPassed = rollout?.checks?.codexAppReadThread === true &&
     rollout?.checks?.codexAppReadContent === true;
-  const readThreadUpstream = verifiedReadThreadUpstreamAttribution(
+  const readThreadUpstream = rollout?.checks?.codexAppReadThread === true &&
+    rollout?.checks?.codexAppReadEmptyCompletedTurns === true ? verifiedReadThreadUpstreamAttribution(
     upstreamAttributions?.["codex-app-read-thread"],
-  );
+  ) : null;
   const standaloneWebRun = toolInventory?.offers?.webRun;
   const hostedWebSearch = toolInventory?.offers?.hostedWebSearch;
   const webOffered = profile === "deepseek"
@@ -456,7 +463,7 @@ export function desktopHostPrompt({
     nativeExecutablePath
       ? `2. 再用 functions.exec 在同一段 PowerShell 脚本中执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"，下一行紧接 exit $LASTEXITCODE；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`
       : `2. 再用 functions.exec 执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`,
-    `3. 调用四个常用只读 codex_app 入口：先调用 list_threads 并确认正常返回；若发起者在本提示后附带当前任务 ID，必须用该 ID，否则从返回结果识别当前任务。再调用 read_thread 并确认返回的是当前任务；返回页中每个 completed 回合都必须同时含真实 userMessage 和 agentMessage，当前 inProgress 回合可以为空。本轮标记由 rollout 独立绑定，不要求 read_thread 重复返回尚未完成的当前输入。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
+    `3. 调用四个常用只读 codex_app 入口：先调用 list_threads 并确认正常返回；若发起者在本提示后附带当前任务 ID，必须用该 ID，否则从返回结果识别当前任务。再调用 read_thread，设置 includeOutputs: true、maxOutputCharsPerItem: 20000，并确认返回的是当前任务；返回页中每个 completed 回合都必须含真实输入和 agentMessage。输入可以是 userMessage，或 codex_app.create_thread / send_message_to_thread 的 functionCallOutput，其中必须包含完整 codex_delegation、非空 source_thread_id 和 input 正文；只有工具名称或截断输出不能通过。当前 inProgress 回合可以为空。本轮标记由 rollout 独立绑定，不要求 read_thread 重复返回尚未完成的当前输入。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
     "4. 用实际 web.run 搜索 OpenAI 官方 Codex app-server 文档，open 命中页面，再 find `thread/fork`；不能用 shell 或普通 fetch 代替。",
     nativeExecutablePath
       ? `5. 用实际 computer use 启动 Windows 原生应用 ${nativeExecutablePath}。用本轮可执行文件路径和标题中可见的 ${marker} 前缀唯一定位窗口；Windows 可能截断标题，必须从辅助功能树读取并核对完整标记后才能输入。聚焦 Marker input，原样输入并只提交一次，同时对该窗口调用一次真实截图。正确提交后应用会自动关闭。不能使用浏览器、HTTP 页面、shell 输入或辅助驱动代替。`
@@ -540,9 +547,9 @@ function normalizeTaskError(value) {
 function matchesProfileModel(profile, model, customModels) {
   const actual = String(model ?? "").trim();
   if (!actual) return false;
-  if (profile === "deepseek") return actual === "deepseek-v4-flash";
+  if (profile === "deepseek") return actual === DEEPSEEK_CANONICAL_MODEL_ID;
   if (profile !== "official") return false;
-  return !new Set(["deepseek-v4-flash", ...customModels].filter(Boolean)).has(actual);
+  return !new Set([...DEEPSEEK_ROUTABLE_MODEL_IDS, ...customModels].filter(Boolean)).has(actual);
 }
 
 function isExecCall(call) {
@@ -580,23 +587,24 @@ function isSuccessfulCodexAppOutput(value) {
 }
 
 function inspectCodexAppReadOutput(value, { marker, threadId } = {}) {
-  const text = String(value ?? "");
   const documents = collectJsonDocuments(value);
   let threadMatched = false;
   let completedTurnCount = 0;
   let completedTurnsWithMessages = 0;
+  let emptyCompletedTurnCount = 0;
   let markerInMessageItems = false;
   for (const document of documents) {
     walkJson(document, (candidate) => {
-      if (candidate?.thread?.id === threadId) threadMatched = true;
-      if (!Array.isArray(candidate?.turns)) return;
+      if (!threadId || candidate?.thread?.id !== threadId || !Array.isArray(candidate?.turns)) return;
+      threadMatched = true;
       for (const turn of candidate.turns) {
-        if (!Array.isArray(turn?.items)) continue;
-        const messageItems = turn.items.filter((item) =>
-          item?.type === "userMessage" || item?.type === "agentMessage");
-        if (turn.status === "completed") {
+        const items = Array.isArray(turn?.items) ? turn.items : [];
+        const messageItems = items.filter((item) =>
+          item?.type === "userMessage" || item?.type === "agentMessage" || isDelegatedReadInput(item));
+        if (turn?.status === "completed") {
           completedTurnCount += 1;
-          if (messageItems.some((item) => item?.type === "userMessage") &&
+          if (Array.isArray(turn.items) && turn.items.length === 0) emptyCompletedTurnCount += 1;
+          if (messageItems.some((item) => item?.type === "userMessage" || isDelegatedReadInput(item)) &&
             messageItems.some((item) => item?.type === "agentMessage")) {
             completedTurnsWithMessages += 1;
           }
@@ -608,11 +616,16 @@ function inspectCodexAppReadOutput(value, { marker, threadId } = {}) {
     });
   }
   return {
-    threadMatched: threadMatched || Boolean(threadId && text.includes(threadId)),
+    threadMatched,
     hasMessageItems: completedTurnCount > 0 &&
       completedTurnsWithMessages === completedTurnCount,
+    emptyCompletedTurns: completedTurnCount > 0 && emptyCompletedTurnCount === completedTurnCount,
     markerInMessageItems,
   };
+}
+
+function isDelegatedReadInput(item) {
+  return item?.type === "functionCallOutput" && readCodexDelegationInput(item) !== null;
 }
 
 function collectJsonDocuments(value) {

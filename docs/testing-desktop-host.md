@@ -53,9 +53,9 @@ npm run test:desktop -- --status=<run-id>
 
 1. `package.json` 源码摘要在测试期间未变化；实际 Widget 显示当前项目版本，实际中继协议与源码一致；接管 app-server 时，`codex_app` 健康状态必须为 `ready`。
 2. 当前桌面运行环境与报告一致。macOS、Windows 原生 Relay、WSL 原生 Relay 的结果不能互相继承。
-3. rollout 中任务实际使用 B1 的官方模型或 B2 的 `deepseek-v4-flash`，并记录任务 ID、轮次 ID 和各工具调用 ID。
+3. rollout 中任务实际使用 B1 的官方模型或 B2 的 `deepseek-flash`，并记录任务 ID、轮次 ID 和各工具调用 ID。
 4. `functions.exec` 的成功命令返回随机标记；另一命令返回随机标记和退出码 23，且同一任务随后继续调用其他工具。
-5. 实际 `codex_app.list_threads` 返回当前任务，再以该任务 ID 调用 `codex_app.read_thread`。返回页中的每个 `completed` 回合都必须同时包含真实 `userMessage` 和 `agentMessage`，任一完成回合的 `items` 为空都不能通过；当前 `inProgress` 回合可以为空，`interrupted` 按官方单独行为留证。当前活动输入在回合完成前不会进入 read_thread 投影，因此随机标记只由 rollout 独立绑定，不要求 read_thread 重复回显。随后实际调用 `codex_app.list_projects` 与 `codex_app.get_usage_limits` 并正常返回。四个调用分别记录调用 ID，本地读取 rollout 不能代替。
+5. 实际 `codex_app.list_threads` 返回当前任务，再以该任务 ID 调用 `codex_app.read_thread`。调用时设置 `includeOutputs: true`、`maxOutputCharsPerItem: 20000`，因为默认返回会隐藏委托正文。返回页中的每个 `completed` 回合都必须同时包含真实输入和 `agentMessage`：输入允许 `userMessage`，或 `namespace: codex_app`、`name: create_thread|send_message_to_thread` 的 `functionCallOutput`，后者必须有完整 `codex_delegation`、非空 `source_thread_id` 和 `input` 正文。官方输出包装 `{text, truncated}` 与完整字符串都可识别，截断或仅有工具名称不能通过。只检查匹配任务中的回合，不能跨任务或跨回合拼凑输入与回复；任一完成回合的 `items` 为空或缺失都不能通过；当前 `inProgress` 回合可以为空，`interrupted` 按官方单独行为留证。当前活动输入在回合完成前不会进入 read_thread 投影，因此随机标记只由 rollout 独立绑定，不要求 read_thread 重复回显。随后实际调用 `codex_app.list_projects` 与 `codex_app.get_usage_limits` 并正常返回。四个调用分别记录调用 ID，本地读取 rollout 不能代替。
 6. 目标模型回合必须正常结束；`task_complete.error`（包括 `usage_limit_exceeded`）单独写入报告并判定失败，不能被后续 Relay 恢复掩盖。桌面或 app-server 在回合终态附近轮换时，运行时检查会等待同代 Relay 有界恢复后再判定，避免把瞬时切换误报为 Relay 根因。
 7. 执行器从中继收到的真实模型请求记录脱敏工具清单，只保留工具类型、名称、命名空间和 MCP server label，不保存提示词、参数、Schema、工具输出或凭据。实际 `web.run` 完成 `search_query`、`open`、`find`，结果来自 OpenAI 官方 Codex 文档或 `openai/codex` 仓库并包含 `thread/fork`。B1 可使用独立 `web.run` 或官方 Hosted Search；B2 只有独立 `web.run` 才视为可调用，DeepSeek Responses 请求中存在但供应商忽略的 Hosted `web_search` 描述单独记录并判为 `unsupported`，阻断完整桌面组件且不继续无效重试。已支持但任务结束仍未调用记为 `not-executed`，调用后返回错误记为 `failed`。
 8. Windows 上实际 computer use 启动本轮动态生成的 WinForms 原生应用，通过辅助功能读取随机标记、输入并只提交一次，同时调用一次截图；原生清单独立记录启动次数和提交值。macOS 使用本机 HTTP 材料并额外核对下载事件。调用发生但返回错误不能算通过；模型文字说明不参与判定。
@@ -88,7 +88,9 @@ npm run test:desktop -- --profile=official --runtime=wsl-native --plan
 
 每次结果写入 `.runtime/test-results/desktop-host/<run-id>/report.json`，相邻 `progress.html` 只显示脱敏步骤和状态，不驱动测试，也不参与断言。后台报告同步记录桌面报告路径、两个组件状态和 B 总状态。固定检查逐项使用 `passed`、`unsupported`、`not-executed`、`failed` 或执行中的 `not-run`；存在 `unsupported` 或 `not-executed` 时桌面组件为 `blocked`。报告不保存提示正文之外的真实业务内容、工具输出正文或凭据。
 
-`read_thread` 或其他官方宿主工具异常不能根据单次桌面结果直接归因。先核对 rollout/SQLite，再以实际运行的同版本官方 app-server、同一数据分别运行无 Relay 直连和正式 Relay 对照。只有两个底层结果一致且桌面封装异常的证据齐全时，报告才能将该项从 `failed` 更正为 `blocked-upstream`；对照不一致仍保持 `failed` 并继续定位。
+`read_thread` 或其他官方宿主工具异常不能根据单次桌面结果直接归因。先检查已知问题并核对 rollout/SQLite。`read_thread` 的正确任务中出现 completed 回合空 items 时，第一排查方向是 `codex-desktop-read-thread-pagination-cursor`，按[证据复用说明](read-thread-pagination-investigation.md#再次出现时先做什么)核对适用条件；匹配时引用既有对照并注明本任务未重复对照，不因供应商或任务变化重复完整定位。首次出现或证据不匹配时，再以实际运行的同版本官方 app-server、同一数据分别运行无 Relay 直连和正式 Relay 对照。两个底层结果一致且桌面封装异常的证据齐全时才标记 `blocked-upstream`；对照不一致仍保持 `failed` 并继续定位。当前 read_thread 归因只匹配“正确任务已成功返回，完成回合全部为显式空 items”的现场形态；缺失 items 字段、委托正文不完整或其他读取错误不能套用这个阻断标签。
+
+已确认的 macOS 桌面分页游标问题见 [read_thread 分页问题复现材料](read-thread-pagination-investigation.md)。委托输入判据修复不改变该问题的 `blocked-upstream` 状态，也不重写既有验收报告；后续执行生成报告版本 9 的新证据。
 
 Windows Computer Use 截图失败也遵循同一规则。桌面执行器只读取 `.runtime/test-results/desktop-host/upstream-attributions-<runtime>.json` 中经过结构核验的归因；当前 rollout 必须出现对应失败，并且文件必须同时记录同运行环境的生产 Relay 失败与已移除 Relay 的官方对照失败，才允许将截图标记为 `blocked-upstream`。
 

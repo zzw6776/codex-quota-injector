@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { watch as watchFs } from "node:fs";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import { isRelayStateCurrent } from "./platform.mjs";
 
@@ -10,6 +10,7 @@ export const HOST_HEALTH_STARTUP_GRACE_MS = 30_000;
 export const HOST_HEALTH_ACTIVE_POLL_MS = 3_000;
 export const HOST_HEALTH_READY_POLL_MS = 30_000;
 export const HOST_HEALTH_WATCH_DEBOUNCE_MS = 100;
+export const HOST_TOOL_RELOAD_REQUEST_VERSION = 1;
 export const REQUIRED_CODEX_APP_TOOLS = Object.freeze([
   "list_threads",
   "read_thread",
@@ -26,6 +27,134 @@ export function hostHealthPollInterval(status) {
   return ["ready", "direct"].includes(String(status ?? ""))
     ? HOST_HEALTH_READY_POLL_MS
     : HOST_HEALTH_ACTIVE_POLL_MS;
+}
+
+export async function requestHostToolReload(binding, {
+  requestId = randomUUID(),
+  now = Date.now(),
+} = {}) {
+  const healthPath = String(binding?.healthPath ?? "").trim();
+  const generation = String(binding?.generation ?? "").trim();
+  if (!binding?.hostToolsRequired || !healthPath || !generation) {
+    throw new Error("当前启动入口没有可重载的 Codex 任务工具中继");
+  }
+  const normalizedRequestId = String(requestId ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(normalizedRequestId)) {
+    throw new Error("Codex 任务工具重载请求 ID 无效");
+  }
+  const directory = dirname(healthPath);
+  const path = `${healthPath}.reload-${normalizedRequestId}.json`;
+  const temporaryPath = `${path}.${process.pid}.tmp`;
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify({
+      version: HOST_TOOL_RELOAD_REQUEST_VERSION,
+      requestId: normalizedRequestId,
+      generation,
+      requestedAt: Number(now) || Date.now(),
+    }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await rename(temporaryPath, path);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+  return { requestId: normalizedRequestId, path };
+}
+
+export function watchHostToolReloadRequests({ healthPath, generation } = {}, {
+  onRequest = () => {},
+  onError = () => {},
+  watchImpl = watchFs,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  debounceMs = HOST_HEALTH_WATCH_DEBOUNCE_MS,
+} = {}) {
+  const normalizedHealthPath = String(healthPath ?? "").trim();
+  const normalizedGeneration = String(generation ?? "").trim();
+  if (!normalizedHealthPath || !normalizedGeneration) {
+    return { active: false, close() {} };
+  }
+  const directory = dirname(normalizedHealthPath);
+  const prefix = `${basename(normalizedHealthPath)}.reload-`;
+  let watcher = null;
+  let timer = null;
+  let closed = false;
+  let scanning = false;
+  let scanAgain = false;
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (timer != null) clearTimer(timer);
+    timer = null;
+    watcher?.close?.();
+    watcher = null;
+  };
+  const scan = async () => {
+    if (closed) return;
+    if (scanning) {
+      scanAgain = true;
+      return;
+    }
+    scanning = true;
+    try {
+      const names = (await readdir(directory))
+        .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
+        .sort();
+      for (const name of names) {
+        if (closed) break;
+        const path = join(directory, name);
+        let request = null;
+        try {
+          request = JSON.parse(await readFile(path, "utf8"));
+        } catch (error) {
+          if (error?.code !== "ENOENT") onError(error);
+        } finally {
+          await unlink(path).catch(() => undefined);
+        }
+        if (request?.version !== HOST_TOOL_RELOAD_REQUEST_VERSION ||
+          request?.generation !== normalizedGeneration ||
+          !/^[A-Za-z0-9_-]{8,128}$/.test(String(request?.requestId ?? ""))) continue;
+        try {
+          await onRequest(request);
+        } catch (error) {
+          onError(error);
+        }
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") onError(error);
+    } finally {
+      scanning = false;
+      if (scanAgain && !closed) {
+        scanAgain = false;
+        void scan();
+      }
+    }
+  };
+  const schedule = () => {
+    if (closed) return;
+    if (timer != null) clearTimer(timer);
+    timer = setTimer(() => {
+      timer = null;
+      void scan();
+    }, debounceMs);
+    timer?.unref?.();
+  };
+  try {
+    watcher = watchImpl(directory, { persistent: false }, (_eventType, fileName) => {
+      if (fileName && !String(fileName).startsWith(prefix)) return;
+      schedule();
+    });
+    watcher.on?.("error", onError);
+    schedule();
+  } catch (error) {
+    onError(error);
+    close();
+  }
+  return {
+    get active() { return !closed && watcher != null; },
+    close,
+  };
 }
 
 export function watchHostHealthFiles(binding, {
@@ -264,6 +393,28 @@ class HostHealthTracker {
       this.armGraceTimer();
     }
     void this.update(classified);
+  }
+
+  observeReloadStarted() {
+    this.clearGraceTimer();
+    void this.update({
+      status: "starting",
+      code: "reloading-codex-app",
+      message: "正在重新加载 Codex 任务工具",
+      detail: null,
+      serverStatus: "starting",
+    });
+  }
+
+  observeReloadFailed(error) {
+    this.clearGraceTimer();
+    void this.update({
+      status: "degraded",
+      code: "codex-app-reload-failed",
+      message: "Codex 任务工具重新加载失败",
+      detail: sanitizeHealthDetail(errorMessage(error)),
+      serverStatus: "failed",
+    });
   }
 
   async disconnect(detail = null) {

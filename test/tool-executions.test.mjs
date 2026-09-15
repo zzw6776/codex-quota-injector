@@ -34,6 +34,55 @@ test("exec 内同名调用逐项展开，单项采用原生时长，整组采用
   assert.equal(projectToolExecutions(ledger, "response-1").calls.length, 2, "replay must not duplicate calls");
 });
 
+test("缺少原生子项时只保留 exec 的直接工具名，并使用外层往返耗时", () => {
+  const call = simplifyToolExecutionRecord({
+    type: "response_item",
+    timestamp: "1970-01-01T00:00:00.100Z",
+    payload: {
+      type: "custom_tool_call", call_id: "outer", name: "exec",
+      input: `
+        const example = "tools.exec_command({ secret: 'do-not-store' })";
+        // tools.apply_patch({ secret: "do-not-store" })
+        /* tools.view_image({ path: "/private/image.png" }) */
+        await tools.write_stdin({ session_id: 42, chars: "secret-token" });
+        await tools.write_stdin({ session_id: 42 });
+        object.tools.web__run({ q: "private" });
+        const template = \`tools.read_mcp_resource({ secret: true })\`;
+      `,
+    },
+  }, "turn");
+  assert.deepEqual(call.nestedToolNames, ["write_stdin"]);
+  assert.equal(JSON.stringify(call).includes("secret-token"), false);
+  assert.equal(JSON.stringify(call).includes("do-not-store"), false);
+
+  const ledger = createToolExecutionLedger();
+  recordToolExecution(ledger, call);
+  add(ledger, "response", { responseId: "response" });
+  recordToolExecution(ledger, simplifyToolExecutionRecord({
+    type: "response_item",
+    timestamp: "1970-01-01T00:00:00.600Z",
+    payload: { type: "custom_tool_call_output", call_id: "outer" },
+  }, "turn"));
+  const result = projectToolExecutions(ledger, "response");
+  assert.equal(result.complete, false, "outer timing must not masquerade as a native child measurement");
+  assert.deepEqual(result.calls, [{
+    id: "outer", toolName: "write_stdin", description: "调用耗时",
+    startedAt: 100, durationMs: 500, durationSource: "outer-exec", measured: false,
+  }]);
+  assert.deepEqual(projectToolExecutions(normalizeToolExecutionLedger(JSON.parse(JSON.stringify(ledger))), "response"), result);
+});
+
+test("一个 exec 中出现多个直接工具时保留一条外层记录，不拆分耗时", () => {
+  const ledger = createToolExecutionLedger();
+  add(ledger, "call", { id: "outer", toolName: "exec", nestedToolNames: ["write_stdin", "exec_command"], startedAt: 100 });
+  add(ledger, "response", { responseId: "response" });
+  add(ledger, "result", { id: "outer", completedAt: 700 });
+  assert.deepEqual(projectToolExecutions(ledger, "response").calls, [{
+    id: "outer", toolName: "exec", description: "整体调用耗时",
+    startedAt: 100, durationMs: 600, durationSource: "outer-exec", measured: false,
+  }]);
+});
+
 test("晚完成的命令仍归属启动请求；时间窗口归属不唯一时保留未记录", () => {
   const ledger = createToolExecutionLedger();
   add(ledger, "call", { id: "a", toolName: "exec", startedAt: 100 });
@@ -45,7 +94,8 @@ test("晚完成的命令仍归属启动请求；时间窗口归属不唯一时�
   add(ledger, "item", { id: "late", toolName: "exec_command", startedAt: 150, completedAt: 700, durationMs: 550 });
   assert.equal(projectToolExecutions(ledger, "ra").calls[0].id, "late");
   assert.equal(projectToolExecutions(ledger, "ra").durationMs, 600, "a session yield does not end the command's execution");
-  assert.equal(projectToolExecutions(ledger, "rb").calls[0].durationMs, null);
+  assert.equal(projectToolExecutions(ledger, "rb").calls[0].durationMs, 500);
+  assert.equal(projectToolExecutions(ledger, "rb").calls[0].durationSource, "outer-exec");
   assert.equal(projectToolExecutions(ledger, "missing"), null);
 
   add(ledger, "call", { id: "overlap", toolName: "exec", startedAt: 120 });

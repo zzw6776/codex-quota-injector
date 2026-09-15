@@ -8,15 +8,18 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { CdpClient, findCodexTarget, isCodexDebugPortReady } from "../src/cdp-client.mjs";
+import { isCodexHostedDevLaunch } from "../src/dev-runtime.mjs";
 import {
   codexLaunchEnvironment,
   isRelayConfigCurrent,
   isRelayStateCurrent,
+  parseMacCodexLifecycleProcesses,
   parseWindowsSubsystemSetting,
   updateWindowsSubsystemSetting,
   parseProcessList,
   requestMacCodexQuit,
   requestWindowsCodexQuit,
+  stopMacCodex,
 } from "../src/platform.mjs";
 import {
   acquireSingleInstance,
@@ -66,7 +69,13 @@ test("[A HAR-04 LCH-04] 测试进程回收等待 sidecar 释放继承的 stdio",
   assert.equal(closed, true, "父进程退出但 sidecar 仍持有 stdio 时不能提前回收目录");
 });
 
-test("[A LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送终止信号", async () => {
+test("[A LCH-05] 开发版拒绝从 Codex 内部工具进程接管生命周期", () => {
+  assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "/tmp/codex-app-tools" }), true);
+  assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "  " }), false);
+  assert.equal(isCodexHostedDevLaunch({}), false);
+});
+
+test("[platform:macos-native] [A LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送终止信号", async () => {
   let invocation = null;
   await requestMacCodexQuit({
     execFileImpl: async (command, args, options) => {
@@ -80,7 +89,97 @@ test("[A LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送�
   });
 });
 
-test("[A LCH-05] Windows 关闭 Codex 先请求主窗口正常退出", async () => {
+test("[platform:macos-native] [A LCH-05] macOS 生命周期只识别目标 Bundle 的已知辅助进程", () => {
+  const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
+  const bareModifier = "/Applications/Codex.app/Contents/Resources/native/bare-modifier-monitor";
+  const crashpad = "/Applications/Codex.app/Contents/Frameworks/Codex Framework.framework/Versions/1/Helpers/browser_crashpad_handler";
+  assert.deepEqual(parseMacCodexLifecycleProcesses([
+    `  101 ${executable}`,
+    `  102 ${bareModifier}`,
+    `  103 ${crashpad}`,
+    "  104 /Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+    "  105 /Applications/Codex.app/Contents/Resources/native/bare-modifier-monitor-copy",
+    "  106 /Applications/Other.app/Contents/Resources/native/bare-modifier-monitor",
+    "invalid",
+  ].join("\n"), executable), [
+    { pid: 101, executablePath: executable, role: "desktop" },
+    { pid: 102, executablePath: bareModifier, role: "bare-modifier-monitor" },
+    { pid: 103, executablePath: crashpad, role: "browser-crashpad-handler" },
+  ]);
+});
+
+test("[platform:macos-native] [A LCH-05] macOS 主进程退出后定向回收旧辅助进程并避开已复用 PID", async () => {
+  const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
+  const bareModifier = "/Applications/Codex.app/Contents/Resources/native/bare-modifier-monitor";
+  const crashpad = "/Applications/Codex.app/Contents/Frameworks/Codex Framework.framework/Versions/1/Helpers/browser_crashpad_handler";
+  let processes = [
+    { pid: 101, executablePath: executable, role: "desktop" },
+    { pid: 102, executablePath: bareModifier, role: "bare-modifier-monitor" },
+    { pid: 103, executablePath: crashpad, role: "browser-crashpad-handler" },
+    { pid: 104, executablePath: crashpad, role: "browser-crashpad-handler" },
+  ];
+  let now = 0;
+  let quitRequests = 0;
+  const signals = [];
+  await stopMacCodex({
+    executable,
+    timeoutMs: 200,
+    listProcessesImpl: async () => structuredClone(processes),
+    requestQuitImpl: async () => {
+      quitRequests += 1;
+      processes = processes
+        .filter((entry) => entry.pid !== 101)
+        .map((entry) => entry.pid === 104
+          ? { ...entry, executablePath: "/usr/bin/reused-process", role: "other" }
+          : entry);
+    },
+    signalProcessImpl: (pid, signal) => {
+      signals.push([pid, signal]);
+      if ((pid === 102 && signal === "SIGTERM") ||
+        (pid === 103 && signal === "SIGKILL")) {
+        processes = processes.filter((entry) => entry.pid !== pid);
+      }
+    },
+    isProcessAliveImpl: (pid) => processes.some((entry) => entry.pid === pid),
+    delayImpl: async (milliseconds) => { now += milliseconds; },
+    nowImpl: () => now,
+  });
+  assert.equal(quitRequests, 1);
+  assert.deepEqual(signals, [
+    [102, "SIGTERM"],
+    [103, "SIGTERM"],
+    [103, "SIGKILL"],
+  ]);
+  assert.equal(processes.some((entry) => entry.pid === 104), true);
+});
+
+test("[platform:macos-native] [A LCH-05] macOS 只剩历史辅助进程时不调用 AppleScript", async () => {
+  const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
+  let processes = [{
+    pid: 102,
+    executablePath: "/Applications/Codex.app/Contents/Resources/native/bare-modifier-monitor",
+    role: "bare-modifier-monitor",
+  }];
+  let now = 0;
+  let quitRequests = 0;
+  const signals = [];
+  await stopMacCodex({
+    executable,
+    listProcessesImpl: async () => structuredClone(processes),
+    requestQuitImpl: async () => { quitRequests += 1; },
+    signalProcessImpl: (pid, signal) => {
+      signals.push([pid, signal]);
+      processes = [];
+    },
+    isProcessAliveImpl: (pid) => processes.some((entry) => entry.pid === pid),
+    delayImpl: async (milliseconds) => { now += milliseconds; },
+    nowImpl: () => now,
+  });
+  assert.equal(quitRequests, 0);
+  assert.deepEqual(signals, [[102, "SIGTERM"]]);
+});
+
+test("[platform:windows-native] [A LCH-05] Windows 关闭 Codex 先请求主窗口正常退出", async () => {
   let invocation = null;
   const requested = await requestWindowsCodexQuit({
     processIds: [42, 42, -1, 73],
@@ -103,7 +202,7 @@ test("[A LCH-05] Windows 关闭 Codex 先请求主窗口正常退出", async () 
   });
 });
 
-test("[A LCH-02 TOOL-04] Windows 启动新桌面不会继承旧任务的 app-tools 管道", () => {
+test("[platform:windows-native] [A LCH-02 TOOL-04] Windows 启动新桌面不会继承旧任务的 app-tools 管道", () => {
   assert.deepEqual(codexLaunchEnvironment({
     Path: "C:\\Windows",
     CODEX_APP_TOOLS_PIPE_PATH: "\\\\.\\pipe\\stale",
@@ -116,7 +215,7 @@ test("[A LCH-02 TOOL-04] Windows 启动新桌面不会继承旧任务的 app-too
   });
 });
 
-test("[A LCH-02 LCH-06] Windows relay 模式只读取 desktop 段的 WSL 设置", () => {
+test("[platform:windows-native][platform:wsl-native] [A LCH-02 LCH-06] Windows relay 模式只读取 desktop 段的 WSL 设置", () => {
   assert.equal(parseWindowsSubsystemSetting(`
 runCodexInWindowsSubsystemForLinux = true
 [desktop]
@@ -134,7 +233,7 @@ runCodexInWindowsSubsystemForLinux = true
 `), false);
 });
 
-test("[A LCH-02 LCH-06] Windows 生命周期只修改 desktop 运行方式并保留其余配置", () => {
+test("[platform:windows-native][platform:wsl-native] [A LCH-02 LCH-06] Windows 生命周期只修改 desktop 运行方式并保留其余配置", () => {
   const original = [
     'model = "gpt-5"',
     "[desktop]",
@@ -249,7 +348,7 @@ test("relay 配置和进程状态同时校验 generation、PID 与进程身份",
   assert.equal(await isRelayStateCurrent(statePath, "g1"), false);
 });
 
-test("macOS 进程列表只匹配完整官方可执行路径，避免误判 helper", () => {
+test("[platform:macos-native] macOS 进程列表只匹配完整官方可执行路径，避免误判 helper", () => {
   const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
   assert.deepEqual(parseProcessList([
     `  101 ${executable}`,
@@ -308,7 +407,7 @@ test("单实例协议会保留普通重复启动，并允许显式正式版接�
   assert.equal(takeoverRequest.explicitStart, true);
 });
 
-test("Windows 安装接管允许同版本正式包退出，并在持锁期间关闭 Codex", async (t) => {
+test("[platform:windows-native] Windows 安装接管允许同版本正式包退出，并在持锁期间关闭 Codex", async (t) => {
   const reservation = createTcpServer();
   await new Promise((resolve, reject) => {
     reservation.once("error", reject);
@@ -524,7 +623,7 @@ test("请求分层保留中间说明和最终回复阶段，工具单项不重�
   assert.equal(generationToolRows({ toolExecutions: { calls: calls.slice(0, 1) } }).length, 1);
   assert.equal(formatGenerationPrimaryText(tools), "延时 —");
   assert.deepEqual(generationToolRows({ toolTiming: { calls: [{ toolName: "exec", durationMs: 6_500 }] } }),
-    [{ toolName: "exec", description: "单项明细未记录", durationMs: null }]);
+    [{ toolName: "exec", description: "调用耗时", durationMs: 6_500, durationSource: "outer-exec" }]);
   const source = widgetInstallExpression();
   assert.ok(source.includes("max-height:240px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable"));
   assert.ok(source.includes("max-height:180px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable"));
@@ -631,6 +730,13 @@ test("文件与命令共用原生折叠列表，完整逐行展示且耗时只�
   const missing = render(document, { toolName: "exec", description: "单项明细未记录" }, () => assert.fail("no measured duration"));
   assert.equal(missing.tag, "div", "do not reconstruct a list from truncated legacy text");
   assert.equal(missing.children[1].textContent, "未记录");
+  const outer = render(document, {
+    toolName: "write_stdin", description: "调用耗时", durationMs: 5_100, durationSource: "outer-exec",
+  }, (value) => `${value / 1_000}s`);
+  assert.equal(outer.children[0].textContent, "write_stdin · 调用耗时");
+  assert.equal(outer.children[1].textContent, "5.1s");
+  assert.ok(outer.children[1].title.includes("由外层 exec 计时"));
+  assert.ok(outer.children[1].title.includes("不等同于子工具自身执行耗时"));
   const tiny = render(document, { toolName: "exec_command", durationMs: 0.00375 }, () => assert.fail("must not round to zero"));
   assert.equal(tiny.children[1].textContent, "<1ms");
   const remainder = render(document, {

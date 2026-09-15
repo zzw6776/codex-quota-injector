@@ -61,7 +61,7 @@ async function resolveRealNpmCli() {
   throw new Error(`当前 Windows Node.js 没有配套 npm CLI: ${process.execPath}`);
 }
 
-if (powershell) test("Windows 开发入口清除 Relay 子进程环境且保留用户配置", async () => {
+if (powershell) test("[platform:windows-native] Windows 开发入口清除 Relay 子进程环境且保留用户配置", async () => {
   const helper = join(import.meta.dirname, "..", "scripts", "windows-dev-dependencies.ps1");
   const command = [
     '$env:CODEX_QUOTA_RELAY_CONFIG="relay.json"',
@@ -83,7 +83,7 @@ if (powershell) test("Windows 开发入口清除 Relay 子进程环境且保留�
   });
 });
 
-if (powershell) test("Windows 开发入口仅在依赖树不完整时安装并再次验证", async (t) => {
+if (powershell) test("[platform:windows-native] Windows 开发入口仅在依赖树不完整时安装并再次验证", async (t) => {
   const healthyDirectory = await useTempDir(t, "codex-dependencies-healthy-");
   await mkdir(join(healthyDirectory, "node_modules"));
   const healthyNpm = await writeFakeNpm(healthyDirectory, "healthy");
@@ -101,7 +101,7 @@ if (powershell) test("Windows 开发入口仅在依赖树不完整时安装并�
   ]);
 });
 
-if (powershell) test("Windows 开发入口在自动安装失败时返回可诊断错误", async (t) => {
+if (powershell) test("[platform:windows-native] Windows 开发入口在自动安装失败时返回可诊断错误", async (t) => {
   const directory = await useTempDir(t, "codex-dependencies-failure-");
   await mkdir(join(directory, "node_modules"));
   const fakeNpm = await writeFakeNpm(directory, "install-fails");
@@ -111,7 +111,7 @@ if (powershell) test("Windows 开发入口在自动安装失败时返回可诊�
   });
 });
 
-if (powershell) test("Windows 开发入口使用真实 Node 执行 npm CLI 并读取退出码", async (t) => {
+if (powershell) test("[platform:windows-native] Windows 开发入口使用真实 Node 执行 npm CLI 并读取退出码", async (t) => {
   const npmCli = await resolveRealNpmCli();
   const directory = await useTempDir(t, "codex-dependencies-real-npm-");
   await writeFile(join(directory, "package.json"), JSON.stringify({ name: "dependency-fixture", private: true }));

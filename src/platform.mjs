@@ -26,6 +26,8 @@ const MACOS_EXECUTABLES = [
   "/Applications/Codex.app/Contents/MacOS/Codex",
 ];
 const MACOS_CODEX_BUNDLE_ID = "com.openai.codex";
+const MACOS_HELPER_TERM_TIMEOUT_MS = 2_000;
+const MACOS_HELPER_FORCE_TIMEOUT_MS = 3_000;
 const WINDOWS_EXECUTABLE_NAMES = ["ChatGPT.exe", "Codex.exe"];
 const WINDOWS_CODEX_CACHE_DIR = "codex-upstream";
 const WINDOWS_CODEX_CACHE_FILE = "codex-upstream.exe";
@@ -167,6 +169,16 @@ Get-CimInstance Win32_Process |
   return [];
 }
 
+export async function listMacCodexLifecycleProcesses({
+  executable: providedExecutable,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const executable = providedExecutable ?? await resolveCodexExecutable().catch(() => null);
+  if (!executable) return [];
+  const { stdout } = await execFileImpl("/bin/ps", ["-axww", "-o", "pid=,comm="]);
+  return parseMacCodexLifecycleProcesses(stdout, executable);
+}
+
 export async function listCodexDesktopProcessIds({
   platform = process.platform,
   executable: providedExecutable,
@@ -211,6 +223,11 @@ export async function isCodexRunning() {
 }
 
 export async function stopCodex({ timeoutMs = 5_000 } = {}) {
+  if (process.platform === "darwin") {
+    await stopMacCodex({ timeoutMs });
+    return;
+  }
+
   const processIds = await listCodexProcessIds();
   if (processIds.length === 0) return;
 
@@ -228,13 +245,6 @@ export async function stopCodex({ timeoutMs = 5_000 } = {}) {
         }).catch(() => undefined)
       ));
     }
-  } else if (process.platform === "darwin") {
-    try {
-      await requestMacCodexQuit();
-    } catch (error) {
-      console.warn(`[platform] Codex 正常退出请求失败，回退到进程信号：${error.message}`);
-      signalProcesses(processIds, "SIGTERM");
-    }
   } else {
     signalProcesses(processIds, "SIGTERM");
   }
@@ -242,7 +252,6 @@ export async function stopCodex({ timeoutMs = 5_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!isAnyProcessAlive(processIds)) {
-      if (process.platform === "darwin") await delay(200);
       return;
     }
     await delay(100);
@@ -250,7 +259,6 @@ export async function stopCodex({ timeoutMs = 5_000 } = {}) {
 
   const remaining = processIds.filter(isProcessAlive);
   if (remaining.length === 0) {
-    if (process.platform === "darwin") await delay(200);
     return;
   }
 
@@ -267,12 +275,85 @@ export async function stopCodex({ timeoutMs = 5_000 } = {}) {
   const forceDeadline = Date.now() + (process.platform === "win32" ? 1_000 : 3_000);
   while (Date.now() < forceDeadline) {
     if (!isAnyProcessAlive(remaining)) {
-      if (process.platform === "darwin") await delay(200);
       return;
     }
     await delay(100);
   }
   throw new Error("Codex 进程未能在超时内退出");
+}
+
+export async function stopMacCodex({
+  timeoutMs = 5_000,
+  executable: providedExecutable,
+  execFileImpl = execFileAsync,
+  listProcessesImpl,
+  requestQuitImpl = requestMacCodexQuit,
+  signalProcessImpl = (processId, signal) => process.kill(processId, signal),
+  isProcessAliveImpl = isProcessAlive,
+  delayImpl = delay,
+  nowImpl = Date.now,
+} = {}) {
+  const executable = providedExecutable ?? await resolveCodexExecutable().catch(() => null);
+  if (!executable) return;
+  const readProcesses = () => listProcessesImpl
+    ? listProcessesImpl({ executable })
+    : listMacCodexLifecycleProcesses({ executable, execFileImpl });
+  const snapshot = await readProcesses();
+  if (snapshot.length === 0) return;
+
+  const mainProcesses = snapshot.filter((entry) => entry.role === "desktop");
+  let termRequested = false;
+  if (mainProcesses.length > 0) {
+    try {
+      await requestQuitImpl({ execFileImpl });
+    } catch (error) {
+      console.warn(`[platform] Codex 正常退出请求失败，回退到进程信号：${error.message}`);
+      const remaining = await matchingMacProcessSnapshot(snapshot, readProcesses);
+      signalMacProcessSnapshot(remaining, "SIGTERM", signalProcessImpl);
+      termRequested = true;
+    }
+  } else {
+    const remaining = await matchingMacProcessSnapshot(snapshot, readProcesses);
+    signalMacProcessSnapshot(remaining, "SIGTERM", signalProcessImpl);
+    termRequested = true;
+  }
+
+  await waitForProcessIdsExit(
+    snapshot.map((entry) => entry.pid),
+    termRequested ? Math.min(timeoutMs, MACOS_HELPER_TERM_TIMEOUT_MS) : timeoutMs,
+    { isProcessAliveImpl, delayImpl, nowImpl },
+  );
+  let remaining = await matchingMacProcessSnapshot(snapshot, readProcesses);
+  if (remaining.length === 0) {
+    await delayImpl(200);
+    return;
+  }
+
+  if (!termRequested) {
+    signalMacProcessSnapshot(remaining, "SIGTERM", signalProcessImpl);
+    await waitForProcessIdsExit(
+      remaining.map((entry) => entry.pid),
+      MACOS_HELPER_TERM_TIMEOUT_MS,
+      { isProcessAliveImpl, delayImpl, nowImpl },
+    );
+    remaining = await matchingMacProcessSnapshot(remaining, readProcesses);
+    if (remaining.length === 0) {
+      await delayImpl(200);
+      return;
+    }
+  }
+
+  signalMacProcessSnapshot(remaining, "SIGKILL", signalProcessImpl);
+  await waitForProcessIdsExit(
+    remaining.map((entry) => entry.pid),
+    MACOS_HELPER_FORCE_TIMEOUT_MS,
+    { isProcessAliveImpl, delayImpl, nowImpl },
+  );
+  const stubborn = await matchingMacProcessSnapshot(remaining, readProcesses);
+  if (stubborn.length > 0) {
+    throw new Error(`Codex 进程未能在超时内退出：${stubborn.map((entry) => entry.pid).join(", ")}`);
+  }
+  await delayImpl(200);
 }
 
 export async function requestMacCodexQuit({ execFileImpl = execFileAsync } = {}) {
@@ -329,6 +410,36 @@ function isProcessAlive(pid) {
 
 function isAnyProcessAlive(pids) {
   return pids.some(isProcessAlive);
+}
+
+async function waitForProcessIdsExit(processIds, timeoutMs, {
+  isProcessAliveImpl,
+  delayImpl,
+  nowImpl,
+}) {
+  const deadline = nowImpl() + Math.max(0, timeoutMs);
+  while (nowImpl() < deadline) {
+    if (!processIds.some(isProcessAliveImpl)) return true;
+    await delayImpl(100);
+  }
+  return !processIds.some(isProcessAliveImpl);
+}
+
+async function matchingMacProcessSnapshot(snapshot, readProcesses) {
+  const currentByPid = new Map((await readProcesses()).map((entry) => [entry.pid, entry]));
+  return snapshot.filter((entry) =>
+    currentByPid.get(entry.pid)?.executablePath === entry.executablePath
+  );
+}
+
+function signalMacProcessSnapshot(processes, signal, signalProcessImpl) {
+  for (const entry of processes) {
+    try {
+      signalProcessImpl(entry.pid, signal);
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  }
 }
 
 export async function launchCodex(
@@ -706,6 +817,33 @@ function parseProcessList(processList, executable) {
     if (match?.[2] === executable) processIds.push(Number(match[1]));
   }
   return processIds;
+}
+
+export function parseMacCodexLifecycleProcesses(processList, executable) {
+  const marker = ".app/Contents/MacOS/";
+  const markerIndex = String(executable).lastIndexOf(marker);
+  if (markerIndex < 0) return [];
+  const bundlePath = String(executable).slice(0, markerIndex + 4);
+  const bareModifierPath = `${bundlePath}/Contents/Resources/native/bare-modifier-monitor`;
+  const frameworkPrefix = `${bundlePath}/Contents/Frameworks/`;
+  const crashpadSuffix = "/Helpers/browser_crashpad_handler";
+  const processes = [];
+  for (const line of String(processList).split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    if (!match) continue;
+    const executablePath = match[2];
+    let role = null;
+    if (executablePath === executable) role = "desktop";
+    else if (executablePath === bareModifierPath) role = "bare-modifier-monitor";
+    else if (executablePath.startsWith(frameworkPrefix) &&
+      executablePath.endsWith(crashpadSuffix)) role = "browser-crashpad-handler";
+    if (role) processes.push({
+      pid: Number(match[1]),
+      executablePath,
+      role,
+    });
+  }
+  return processes;
 }
 
 async function detectRunningWindowsCodexExecutable() {

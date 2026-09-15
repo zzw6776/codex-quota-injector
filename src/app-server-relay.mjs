@@ -8,22 +8,24 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
-import deepSeekModel from "./deepseek-model.json" with { type: "json" };
+import {
+  canonicalDeepSeekModelId,
+  DEEPSEEK_CANONICAL_MODEL_ID,
+  DEEPSEEK_FLASH_MODEL_IDS,
+  DEEPSEEK_ROUTABLE_MODEL_IDS,
+  isDeepSeekRoutableModel,
+} from "./deepseek-model-profile.mjs";
 import {
   createHostHealthTracker,
   isMcpStatusListMethod,
+  watchHostToolReloadRequests,
 } from "./host-health.mjs";
 import { RELAY_PROTOCOL_VERSION, RELAY_STATE_VERSION } from "./relay-contract.mjs";
-import { startChatCompatibilityProxy } from "./chat-compat-proxy.mjs";
+import { startModelCompatibilityProxy } from "./chat-compat-proxy.mjs";
 import { ModelRouterManager } from "./model-router.mjs";
+import { MODEL_CAPABILITY_PROBE_VERSION } from "./model-capability-probe.mjs";
 
-const DEEPSEEK_MODEL = "deepseek-v4-flash";
-const DEEPSEEK_PROVIDER = "deepseek";
 const OPENAI_PROVIDER = "openai";
-const DEEPSEEK_ENV_KEY = "DEEPSEEK_API_KEY";
-const PROVIDER_CONFIG =
-  `model_providers.${DEEPSEEK_PROVIDER}={name="DeepSeek",base_url="https://api.deepseek.com/",` +
-  `env_key="${DEEPSEEK_ENV_KEY}",wire_api="responses"}`;
 const CUSTOM_PROVIDER_PREFIX = "custom_";
 const THREAD_METHODS = new Set(["thread/start", "thread/resume", "thread/fork"]);
 const THREAD_SETTINGS_METHOD = "thread/settings/update";
@@ -35,7 +37,6 @@ const OBSERVED_THREAD_METHODS = new Set([
   THREAD_SETTINGS_METHOD,
 ]);
 const TURN_INPUT_METHODS = new Set(["turn/start", "turn/steer"]);
-const ALLOWED_DEEPSEEK_EFFORTS = new Set(["low", "high", "max"]);
 const ALLOWED_CUSTOM_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
 const CUSTOM_REASONING_DESCRIPTIONS = {
   none: "No additional reasoning",
@@ -53,9 +54,13 @@ const RELAY_OWNERSHIP_POLL_MS = 1_000;
 const RELAY_STATE_LOCK_RETRY_MS = 25;
 const RELAY_STATE_LOCK_TIMEOUT_MS = 5_000;
 const RELAY_STATE_LOCK_STALE_MS = 10_000;
+const HOST_TOOL_RELOAD_TIMEOUT_MS = 15_000;
+const MCP_CONFIG_RELOAD_METHOD = "config/mcpServer/reload";
+const MCP_STATUS_LIST_METHOD = "mcpServerStatus/list";
 const SIDECAR_MODE_ENV = "CODEX_QUOTA_APP_SERVER_SIDECAR";
 const SIDECAR_UPSTREAM_STDIN_FD_ENV = "CODEX_QUOTA_UPSTREAM_STDIN_FD";
 const SIDECAR_UPSTREAM_STDOUT_FD_ENV = "CODEX_QUOTA_UPSTREAM_STDOUT_FD";
+const PRIMARY_APP_SERVER_ENV = "CODEX_QUOTA_PRIMARY_APP_SERVER";
 const execFileAsync = promisify(execFile);
 
 export async function runAppServerRelay() {
@@ -95,15 +100,8 @@ export async function runAppServerRelay() {
     await runPassthrough(upstreamExecutable, originalArgs);
     return;
   }
+  const publishHostState = shouldPublishHostState(originalArgs, process.env);
 
-  const providerSettingsPath = await resolveRelayPath(
-    relayConfig?.providerSettingsPath ?? process.env.CODEX_QUOTA_PROVIDER_SETTINGS,
-  );
-  const settings = await readJson(providerSettingsPath).catch((error) => {
-    console.error(`DeepSeek 本地配置读取失败，已按停用处理: ${error.message}`);
-    return null;
-  });
-  const deepSeekEnabled = Boolean(settings?.enabled && settings?.apiKey);
   let router = normalizeRouterConfiguration(relayConfig?.router);
   const extraModelSettingsPath = await resolveRelayPath(
     relayConfig?.extraModelSettingsPath ?? process.env.CODEX_QUOTA_EXTRA_MODEL_SETTINGS,
@@ -119,6 +117,11 @@ export async function runAppServerRelay() {
     for (const model of platform.models) {
       customModelProviders.set(model.id, platform.providerId);
       customModels.set(model.id, { ...model, platformName: platform.name });
+      if (platform.preset === "deepseek" && model.id === DEEPSEEK_CANONICAL_MODEL_ID) {
+        for (const modelId of DEEPSEEK_FLASH_MODEL_IDS) {
+          customModelProviders.set(modelId, platform.providerId);
+        }
+      }
     }
   }
   const tokenUsageEventsPath = await resolveRelayPath(
@@ -133,18 +136,7 @@ export async function runAppServerRelay() {
       log: (message) => console.error(message),
     });
     const configured = await localModelRouter.configure({
-      deepSeek: deepSeekEnabled
-        ? {
-            ...settings,
-            configured: true,
-            model: {
-              displayName: deepSeekModel.display_name,
-              reasoningEfforts: deepSeekModel.supported_reasoning_levels
-                ?.map((item) => item.effort),
-            },
-          }
-        : null,
-      extraModels: { platforms: [...customPlatforms.values()] },
+      extraModels: extraModelSettings,
       officialAuthMode: relayConfig?.officialAuthMode,
       observeOfficial: true,
       usageEventPath: tokenUsageEventsPath,
@@ -157,14 +149,14 @@ export async function runAppServerRelay() {
     relayConfig?.modelCatalogPath ?? process.env.CODEX_QUOTA_MODEL_CATALOG ?? "",
   );
   const officialModels = await readOfficialModelSlugs(catalogPath);
-  officialModels.delete(DEEPSEEK_MODEL);
+  for (const modelId of DEEPSEEK_ROUTABLE_MODEL_IDS) officialModels.delete(modelId);
   for (const modelId of customModelProviders.keys()) officialModels.delete(modelId);
   // macOS already owns the network-facing compatibility proxy inside the
   // ModelRouter. Starting a second proxy here would bypass its route binding,
   // usage observation and credential boundary.
-  const chatCompatibilityProxy = router
+  const modelCompatibilityProxy = router
     ? null
-    : await startChatCompatibilityProxy(customPlatforms);
+    : await startModelCompatibilityProxy(customPlatforms);
 
   const args = [...originalArgs];
   const appServerConfigArgs = [];
@@ -178,13 +170,6 @@ export async function runAppServerRelay() {
       routerProviderConfig(router.providerId, "Codex Quota Router", router),
     );
     const configuredProviderIds = new Set([router.providerId]);
-    if (deepSeekEnabled) {
-      appServerConfigArgs.push(
-        "-c",
-        routerProviderConfig(DEEPSEEK_PROVIDER, "DeepSeek", router),
-      );
-      configuredProviderIds.add(DEEPSEEK_PROVIDER);
-    }
     for (const platform of customPlatforms.values()) {
       if (!platform.enabled) continue;
       appServerConfigArgs.push(
@@ -201,12 +186,11 @@ export async function runAppServerRelay() {
       );
     }
   } else {
-    if (deepSeekEnabled) appServerConfigArgs.push("-c", PROVIDER_CONFIG);
     for (const platform of customPlatforms.values()) {
       if (!platform.enabled) continue;
       appServerConfigArgs.push(
         "-c",
-        customProviderConfig(platform, chatCompatibilityProxy?.baseUrlFor(platform)),
+        customProviderConfig(platform, modelCompatibilityProxy?.baseUrlFor(platform)),
       );
     }
   }
@@ -219,8 +203,7 @@ export async function runAppServerRelay() {
   args.splice(appServerIndex + 1, 0, ...appServerConfigArgs);
 
   const env = { ...process.env, CODEX_CLI_PATH: upstreamExecutable };
-  if (deepSeekEnabled && !router) env[DEEPSEEK_ENV_KEY] = settings.apiKey;
-  else delete env[DEEPSEEK_ENV_KEY];
+  delete env.DEEPSEEK_API_KEY;
   for (const key of Object.keys(env)) {
     if (key.startsWith("CODEX_QUOTA_MODEL_") && key.endsWith("_API_KEY")) delete env[key];
   }
@@ -243,13 +226,19 @@ export async function runAppServerRelay() {
   });
   const upstreamInput = sidecar?.stdin ?? child.stdin;
   const upstreamOutput = sidecar?.stdout ?? child.stdout;
-  const statePath = await resolveRelayPath(
-    relayConfig?.relayStatePath ?? process.env.CODEX_QUOTA_RELAY_STATE ?? "",
-  );
-  const healthPath = await resolveRelayPath(relayConfig?.hostHealthPath ?? "");
+  const statePath = publishHostState
+    ? await resolveRelayPath(
+        relayConfig?.relayStatePath ?? process.env.CODEX_QUOTA_RELAY_STATE ?? "",
+      )
+    : "";
+  const healthPath = publishHostState
+    ? await resolveRelayPath(relayConfig?.hostHealthPath ?? "")
+    : "";
   const processIdentity = await currentRelayProcessIdentity(wslNative);
-  const usageEventWriter = createUsageEventWriter(tokenUsageEventsPath);
-  let ownsRuntimeState = sidecar;
+  const usageEventWriter = createUsageEventWriter(
+    publishHostState ? tokenUsageEventsPath : "",
+  );
+  let ownsRuntimeState = Boolean(sidecar);
   try {
     if (!sidecar) {
       ownsRuntimeState = await claimRelayState(
@@ -261,27 +250,31 @@ export async function runAppServerRelay() {
   } catch (error) {
     child?.kill();
     sidecar?.close();
-    await chatCompatibilityProxy?.close();
+    await modelCompatibilityProxy?.close();
     await localModelRouter?.close();
     throw error;
   }
-  const hostHealth = await createHostHealthTracker({
-    path: healthPath,
-    generation: relayConfig?.generation ??
-      process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
-    runtimeTarget: relayConfig?.runtimeTarget ?? (wslNative
-      ? "wsl-native"
-      : windowsNative
-        ? "windows-native"
-        : process.platform === "darwin"
-          ? "macos-native"
-          : null),
-    processIdentity,
-    claim: ownsRuntimeState,
-  });
+  const hostHealth = publishHostState
+    ? await createHostHealthTracker({
+        path: healthPath,
+        generation: relayConfig?.generation ??
+          process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+        runtimeTarget: relayConfig?.runtimeTarget ?? (wslNative
+          ? "wsl-native"
+          : windowsNative
+            ? "windows-native"
+            : process.platform === "darwin"
+              ? "macos-native"
+              : null),
+        processIdentity,
+        claim: ownsRuntimeState,
+      })
+    : null;
   let relayCleanupTimer = null;
   let relayOwnershipTimer = null;
   let relayOwnershipCheck = Promise.resolve();
+  let hostToolReloadWatcher = null;
+  let relayState = null;
   let cleanedUp = false;
   const cleanup = async (detail = null) => {
     if (cleanedUp) return;
@@ -291,14 +284,17 @@ export async function runAppServerRelay() {
     if (relayOwnershipTimer) clearInterval(relayOwnershipTimer);
     relayOwnershipTimer = null;
     await relayOwnershipCheck.catch(() => undefined);
+    hostToolReloadWatcher?.close();
+    hostToolReloadWatcher = null;
+    if (relayState?.hostToolReloadTimer) clearTimeout(relayState.hostToolReloadTimer);
     await Promise.all([
       removeRelayState(statePath, processIdentity),
       // Relay 状态一旦删除，读取端会立即把宿主能力判为断开。这里不再
       // 追加一次健康文件写入，避免 macOS sidecar 在官方进程退出后与
       // 临时 HOME/正式卸载目录回收竞争；已持久化的具体启动根因仍保留。
-      hostHealth.close({ disconnected: false }),
+      hostHealth?.close({ disconnected: false }),
       usageEventWriter.close(),
-      chatCompatibilityProxy?.close(),
+      modelCompatibilityProxy?.close(),
       localModelRouter?.close(),
     ]);
   };
@@ -339,8 +335,7 @@ export async function runAppServerRelay() {
   const pendingRequests = new Map();
   const threadContexts = new Map();
   const turnModels = new Map();
-  const relayState = {
-    deepSeekEnabled,
+  relayState = {
     officialModels,
     customPlatforms,
     customModelProviders,
@@ -352,7 +347,22 @@ export async function runAppServerRelay() {
     modelListStatus: null,
     emitUsageEvent: usageEventWriter.write,
     hostHealth,
+    sendUpstream(message) {
+      upstreamInput.write(`${JSON.stringify(message)}\n`);
+    },
+    hostToolReloadInFlight: false,
+    hostToolReloadTimer: null,
   };
+  hostToolReloadWatcher = watchHostToolReloadRequests({
+    healthPath,
+    generation: relayConfig?.generation ??
+      process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+  }, {
+    onRequest: () => requestCodexAppToolsReload(relayState),
+    onError: (error) => {
+      console.error(`[host-health] 重载请求监听失败：${error.message}`);
+    },
+  });
   relayCleanupTimer = setInterval(() => pruneRelayState(relayState), RELAY_CLEANUP_INTERVAL_MS);
   relayCleanupTimer.unref?.();
   if (!sidecar && statePath) {
@@ -481,23 +491,24 @@ function rewriteClientLine(line, state) {
   const threadContext = getThreadContext(state.threadContexts, params.threadId);
   const previousContext = params.threadId ? cloneThreadContext(threadContext) : null;
   const requestModel = readModelSetting(params);
-  const requestedModel = requestModel.present ? requestModel.model : threadContext?.model ?? null;
+  let requestedModel = requestModel.present ? requestModel.model : threadContext?.model ?? null;
   let provider = providerForModel(requestedModel, state) ??
     threadContext?.provider ?? null;
+  let routedCustomPlatform = customPlatformForProvider(provider, state);
+  let routedDeepSeekModel = deepSeekRouteModel(requestedModel, routedCustomPlatform);
+  if (routedDeepSeekModel) requestedModel = routedDeepSeekModel;
 
   if (THREAD_METHODS.has(method)) {
-    if (provider === DEEPSEEK_PROVIDER && !state.deepSeekEnabled) {
-      return jsonRpcError(message.id, "DeepSeek 尚未启用或 API Key 为空");
-    }
-    const customPlatform = customPlatformForProvider(provider, state);
+    const customPlatform = routedCustomPlatform;
     if (isCustomProvider(provider) && !customPlatform?.enabled) {
       return jsonRpcError(message.id, "该额外模型平台尚未启用或 API Key 为空");
     }
     if (provider) params.modelProvider = provider;
-    if (!normalizedModel(params.model) && requestedModel) {
+    if (routedDeepSeekModel) {
+      params.model = routedDeepSeekModel;
+    } else if (!normalizedModel(params.model) && requestedModel) {
       params.model = requestedModel;
     }
-    if (provider === DEEPSEEK_PROVIDER) params.config = deepSeekThreadConfig(params.config);
     if (customPlatform?.enabled) {
       params.config = customThreadConfig(params.config, state.customModels.get(requestedModel));
     }
@@ -506,36 +517,25 @@ function rewriteClientLine(line, state) {
   if (TURN_INPUT_METHODS.has(method)) {
     const knownProvider = threadContext?.provider ?? null;
     provider ??= knownProvider;
+    routedCustomPlatform = customPlatformForProvider(provider, state);
+    routedDeepSeekModel = deepSeekRouteModel(requestedModel, routedCustomPlatform);
+    if (routedDeepSeekModel) requestedModel = routedDeepSeekModel;
     if (method === "turn/start" && knownProvider && provider && knownProvider !== provider) {
       return jsonRpcError(message.id, "同一任务不能切换模型供应商；请新建任务后再选择目标模型");
     }
-    if (!normalizedModel(params.model) && requestedModel) {
+    if (routedDeepSeekModel) {
+      params.model = routedDeepSeekModel;
+    } else if (!normalizedModel(params.model) && requestedModel) {
       params.model = requestedModel;
     }
-    if (provider === DEEPSEEK_PROVIDER) {
-      if (!state.deepSeekEnabled) {
-        return jsonRpcError(message.id, "DeepSeek 尚未启用或 API Key 为空");
-      }
-      if (method === "turn/start" &&
-        params.effort != null && !ALLOWED_DEEPSEEK_EFFORTS.has(params.effort)) {
-        return jsonRpcError(message.id, "DeepSeek V4 Flash 的推理深度仅支持 low、high、max");
-      }
-      if (containsImageInput(params.input)) {
-        return jsonRpcError(message.id, "DeepSeek Responses API 当前不支持图片输入");
-      }
-      if (method === "turn/start") {
-        params.summary = "none";
-        params.serviceTier = null;
-      }
-    }
-    const customPlatform = customPlatformForProvider(provider, state);
+    const customPlatform = routedCustomPlatform;
     if (isCustomProvider(provider)) {
       if (!customPlatform?.enabled) {
         return jsonRpcError(message.id, "该额外模型平台尚未启用或 API Key 为空");
       }
       const selectedModel = state.customModels.get(requestedModel ?? threadContext?.model);
       if (containsImageInput(params.input) && !selectedModel?.supportsImage) {
-        return jsonRpcError(message.id, "该额外模型未配置图片输入能力");
+        return jsonRpcError(message.id, "该模型的自动检测结果不支持图片输入");
       }
       if (method === "turn/start") {
         if (selectedModel?.reasoningEfforts.length) {
@@ -624,6 +624,10 @@ function rewriteServerLine(line, state) {
   const pending = state.pendingRequests.get(message.id);
   if (!pending) return line;
   state.pendingRequests.delete(message.id);
+  if (pending.internalHostToolReload) {
+    handleHostToolReloadResponse(message, pending, state);
+    return "";
+  }
   if (isMcpStatusListMethod(pending.method)) {
     state.hostHealth?.observeStatusList(message.result, message.error);
     return line;
@@ -695,6 +699,66 @@ function rewriteServerLine(line, state) {
   return line;
 }
 
+function requestCodexAppToolsReload(state) {
+  if (state.hostToolReloadInFlight) return;
+  state.hostToolReloadInFlight = true;
+  state.hostHealth?.observeReloadStarted();
+  sendHostToolReloadRequest(state, MCP_CONFIG_RELOAD_METHOD, "reload");
+}
+
+function sendHostToolReloadRequest(state, method, phase) {
+  const id = `codex-quota-host-tools-${phase}-${randomUUID()}`;
+  rememberPendingRequest(state, id, {
+    method,
+    internalHostToolReload: true,
+    phase,
+  });
+  try {
+    // The official schema models config/mcpServer/reload as a unit request,
+    // while mcpServerStatus/list requires an object even when all fields use
+    // defaults. Keep both requests schema-exact for stricter app-server builds.
+    state.sendUpstream(method === MCP_CONFIG_RELOAD_METHOD
+      ? { id, method }
+      : { id, method, params: {} });
+  } catch (error) {
+    state.pendingRequests.delete(id);
+    state.hostHealth?.observeReloadFailed(error);
+    finishHostToolReload(state);
+    return;
+  }
+  clearTimeout(state.hostToolReloadTimer);
+  state.hostToolReloadTimer = setTimeout(() => {
+    const pending = state.pendingRequests.get(id);
+    if (pending) pending.expired = true;
+    state.hostHealth?.observeReloadFailed(new Error("官方 app-server 重载任务工具超时"));
+    finishHostToolReload(state);
+  }, HOST_TOOL_RELOAD_TIMEOUT_MS);
+  state.hostToolReloadTimer.unref?.();
+}
+
+function handleHostToolReloadResponse(message, pending, state) {
+  if (pending.expired) return;
+  clearTimeout(state.hostToolReloadTimer);
+  state.hostToolReloadTimer = null;
+  if (message.error) {
+    state.hostHealth?.observeReloadFailed(message.error);
+    finishHostToolReload(state);
+    return;
+  }
+  if (pending.phase === "reload") {
+    sendHostToolReloadRequest(state, MCP_STATUS_LIST_METHOD, "verify");
+    return;
+  }
+  state.hostHealth?.observeStatusList(message.result, message.error);
+  finishHostToolReload(state);
+}
+
+function finishHostToolReload(state) {
+  clearTimeout(state.hostToolReloadTimer);
+  state.hostToolReloadTimer = null;
+  state.hostToolReloadInFlight = false;
+}
+
 function rewriteModelListResponse(line, message, state, pending) {
   const models = message?.result?.data;
   if (!Array.isArray(models)) {
@@ -705,23 +769,14 @@ function rewriteModelListResponse(line, message, state, pending) {
   if (pending.cursor != null && String(pending.cursor).trim()) return line;
   const customModelIds = new Set(state.customModels.keys());
   const existingCustomModels = new Map();
-  let existingDeepSeekModel = null;
   const baseModels = [];
   for (const model of models) {
     const modelId = normalizedModel(model?.id) ?? normalizedModel(model?.model);
-    if (modelId === DEEPSEEK_MODEL) existingDeepSeekModel = model;
-    else if (customModelIds.has(modelId)) existingCustomModels.set(modelId, model);
+    if (customModelIds.has(modelId)) existingCustomModels.set(modelId, model);
+    else if (isDeepSeekRoutableModel(modelId)) continue;
     else baseModels.push(model);
   }
   let additions = 0;
-  const extensionModels = [];
-  if (state.deepSeekEnabled) {
-    const declaredDeepSeek = createDeepSeekAppServerModel();
-    extensionModels.push(existingDeepSeekModel
-      ? { ...existingDeepSeekModel, ...declaredDeepSeek }
-      : declaredDeepSeek);
-    if (!existingDeepSeekModel) additions += 1;
-  }
   const orderedCustomModels = [];
   for (const platform of state.customPlatforms.values()) {
     if (!platform.enabled) continue;
@@ -732,7 +787,7 @@ function rewriteModelListResponse(line, message, state, pending) {
       if (!existing) additions += 1;
     }
   }
-  const orderedModels = [...baseModels, ...extensionModels, ...orderedCustomModels];
+  const orderedModels = [...baseModels, ...orderedCustomModels];
   const orderChanged = orderedModels.length !== models.length ||
     orderedModels.some((model, index) => model !== models[index]);
   if (additions === 0 && !orderChanged) {
@@ -744,7 +799,7 @@ function rewriteModelListResponse(line, message, state, pending) {
     additions > 0 ? "injected" : "sorted",
     additions > 0
       ? `model/list 缺少 ${additions} 个扩展模型，已补齐并置于官方模型之后`
-      : "已将 DeepSeek 和自定义模型移动到官方模型之后",
+      : "已将自定义模型移动到官方模型之后",
   );
   return JSON.stringify({
     ...message,
@@ -775,39 +830,6 @@ function createCustomAppServerModel(platform, model) {
     additionalSpeedTiers: [],
     serviceTiers: [],
     defaultServiceTier: null,
-    isDefault: false,
-  };
-}
-
-function createDeepSeekAppServerModel() {
-  const reasoningLevels = Array.isArray(deepSeekModel.supported_reasoning_levels)
-    ? deepSeekModel.supported_reasoning_levels
-    : [];
-  const inputModalities = Array.isArray(deepSeekModel.input_modalities)
-    ? deepSeekModel.input_modalities.filter((value) => ["text", "image", "audio"].includes(value))
-    : [];
-  return {
-    id: deepSeekModel.slug,
-    model: deepSeekModel.slug,
-    upgrade: deepSeekModel.upgrade ?? null,
-    upgradeInfo: null,
-    availabilityNux: deepSeekModel.availability_nux ?? null,
-    displayName: deepSeekModel.display_name,
-    description: deepSeekModel.description,
-    hidden: deepSeekModel.visibility === "hide",
-    supportedReasoningEfforts: reasoningLevels.map((level) => ({
-      reasoningEffort: level.effort,
-      description: level.description,
-    })),
-    defaultReasoningEffort: deepSeekModel.default_reasoning_level ??
-      reasoningLevels[0]?.effort ?? "high",
-    inputModalities,
-    supportsPersonality: Object.keys(
-      deepSeekModel.model_messages?.instructions_variables ?? {},
-    ).some((key) => key.startsWith("personality_")),
-    additionalSpeedTiers: [],
-    serviceTiers: [],
-    defaultServiceTier: deepSeekModel.default_service_tier ?? null,
     isDefault: false,
   };
 }
@@ -1077,7 +1099,6 @@ function normalizedModel(value) {
 }
 
 function providerForModel(model, state) {
-  if (model === DEEPSEEK_MODEL) return DEEPSEEK_PROVIDER;
   if (typeof model === "string" && state.customModelProviders.has(model)) {
     return state.customModelProviders.get(model);
   }
@@ -1085,12 +1106,9 @@ function providerForModel(model, state) {
   return null;
 }
 
-function deepSeekThreadConfig(config) {
-  return {
-    ...(config && typeof config === "object" ? config : {}),
-    model_reasoning_summary: "none",
-    service_tier: null,
-  };
+function deepSeekRouteModel(model, customPlatform) {
+  if (customPlatform?.preset !== "deepseek") return null;
+  return canonicalDeepSeekModelId(normalizedModel(model) ?? DEEPSEEK_CANONICAL_MODEL_ID);
 }
 
 function customThreadConfig(config, model) {
@@ -1113,7 +1131,7 @@ function isCustomProvider(provider) {
 }
 
 function isExtensionProvider(provider) {
-  return provider === DEEPSEEK_PROVIDER || isCustomProvider(provider);
+  return isCustomProvider(provider);
 }
 
 function customPlatformForProvider(provider, state) {
@@ -1127,18 +1145,45 @@ function readCustomPlatforms(settings) {
     if (!id) continue;
     const providerId = customProviderId(id);
     const models = Array.isArray(value?.models)
-      ? value.models.map((model) => ({
-          id: String(model?.id ?? "").trim(),
-          displayName: String(model?.displayName ?? model?.id ?? "").trim(),
-          supportsImage: Boolean(model?.supportsImage),
-          chatCompatibility: Boolean(model?.chatCompatibility),
-          reasoningEfforts: Array.isArray(model?.reasoningEfforts)
-            ? [...new Set(model.reasoningEfforts
-                .map((effort) => String(effort ?? "").trim())
-                .filter((effort) => ALLOWED_CUSTOM_EFFORTS.has(effort)))]
-            : [],
-          defaultReasoningEffort: String(model?.defaultReasoningEffort ?? "").trim(),
-        })).filter((model) => model.id)
+      ? value.models.filter((model) => model?.selected !== false).map((model) => {
+          const compatibility = model?.compatibility && typeof model.compatibility === "object"
+            ? model.compatibility
+            : null;
+          const currentCompatibility = compatibility?.status === "verified" &&
+            compatibility?.probeVersion === MODEL_CAPABILITY_PROBE_VERSION;
+          const protocol = ["responses", "chat"].includes(compatibility?.protocol)
+            ? compatibility.protocol
+            : model?.chatCompatibility ? "chat" : "responses";
+          return {
+            id: String(model?.id ?? "").trim(),
+            displayName: String(model?.displayName ?? model?.id ?? "").trim(),
+            supportsImage: currentCompatibility
+              ? compatibility?.supportsImage === true
+              : !compatibility && Boolean(model?.supportsImage),
+            chatCompatibility: protocol === "chat",
+            routes: {
+              default: protocol,
+              imageInput: currentCompatibility &&
+                ["responses", "chat"].includes(compatibility?.routes?.imageInput)
+                ? compatibility.routes.imageInput
+                : protocol,
+            },
+            historyMode: protocol === "chat"
+              ? "chat"
+              : compatibility?.historyMode === "reasoning-text-only"
+                ? "reasoning-text-only"
+                : "responses-full",
+            capabilities: currentCompatibility
+              ? normalizeRelayCapabilities(compatibility.capabilities)
+              : null,
+            reasoningEfforts: Array.isArray(model?.reasoningEfforts)
+              ? [...new Set(model.reasoningEfforts
+                  .map((effort) => String(effort ?? "").trim())
+                  .filter((effort) => ALLOWED_CUSTOM_EFFORTS.has(effort)))]
+              : [],
+            defaultReasoningEffort: String(model?.defaultReasoningEffort ?? "").trim(),
+          };
+        }).filter((model) => model.id)
       : [];
     for (const model of models) {
       if (!model.reasoningEfforts.includes(model.defaultReasoningEffort)) {
@@ -1148,6 +1193,7 @@ function readCustomPlatforms(settings) {
     platforms.set(providerId, {
       id,
       providerId,
+      preset: value?.preset === "deepseek" ? "deepseek" : null,
       name: String(value?.name ?? providerId).trim() || providerId,
       baseUrl: String(value?.baseUrl ?? "").trim(),
       apiKey: String(value?.apiKey ?? "").trim(),
@@ -1156,6 +1202,22 @@ function readCustomPlatforms(settings) {
     });
   }
   return platforms;
+}
+
+function normalizeRelayCapabilities(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    ...value,
+    transport: value.transport && typeof value.transport === "object"
+      ? { ...value.transport }
+      : null,
+    hostedTools: value.hostedTools && typeof value.hostedTools === "object"
+      ? { ...value.hostedTools }
+      : {},
+    nativeCustomTools: Array.isArray(value.nativeCustomTools)
+      ? [...value.nativeCustomTools]
+      : [],
+  };
 }
 
 function customProviderId(id) {
@@ -1468,10 +1530,10 @@ function parseLinuxProcessStartTicks(statText) {
 
 function clearRelayEnvironment(env) {
   for (const key of [
+    PRIMARY_APP_SERVER_ENV,
     "CODEX_QUOTA_RELAY_CONFIG",
     "CODEX_QUOTA_ROLE",
     "CODEX_QUOTA_UPSTREAM_CODEX_CLI",
-    "CODEX_QUOTA_PROVIDER_SETTINGS",
     "CODEX_QUOTA_EXTRA_MODEL_SETTINGS",
     "CODEX_QUOTA_MODEL_CATALOG",
     "CODEX_QUOTA_RELAY_STATE",
@@ -1486,6 +1548,14 @@ function clearRelayEnvironment(env) {
   ]) {
     delete env[key];
   }
+}
+
+export function shouldPublishHostState(_args, environment = process.env) {
+  // Only the desktop launch bridge owns these process-global files. Auxiliary
+  // app-servers are not guaranteed to retain their parent's --listen argument;
+  // inferring ownership from argv lets a short-lived task replace the desktop
+  // Relay PID and leave host health permanently stale after it exits.
+  return String(environment?.[PRIMARY_APP_SERVER_ENV] ?? "").trim() === "1";
 }
 
 async function removeRelayState(path, processIdentity = null) {

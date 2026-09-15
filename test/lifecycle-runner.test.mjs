@@ -135,7 +135,7 @@ test("[A HAR-03 LCH-06] 恢复任务只接受当前项目运行目录内的控�
   }), /不属于当前项目/);
 });
 
-test("[A HAR-04 LCH-01] 生命周期报告按公共、Windows、WSL 和切换链分别汇总", async (t) => {
+test("[platform:windows-native][platform:wsl-native] [A HAR-04 LCH-01] 生命周期报告按公共、Windows、WSL 和切换链分别汇总", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({

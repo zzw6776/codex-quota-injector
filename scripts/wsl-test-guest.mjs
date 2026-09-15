@@ -105,6 +105,7 @@ try {
       "--test-reporter=./scripts/test-json-reporter.mjs",
       "--test-reporter-destination=stdout",
       `--test-reporter-destination=${eventPath}`,
+      ...(stage.testNamePattern ? [`--test-name-pattern=${stage.testNamePattern}`] : []),
       ...stage.files,
     ];
     const env = {

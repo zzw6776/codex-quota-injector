@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 
+import { normalizeToolParametersSchema } from "./tool-schema-compat.mjs";
+
 // Responses Lite places declarations in additional_tools items. Normalize that
 // representation and ordinary Responses declarations at one protocol boundary.
-export function collectResponseTools(source, inherited = []) {
+export function collectResponseTools(source, inherited = [], { ignoredTypes = new Set() } = {}) {
   const declarations = [...(Array.isArray(source.tools) ? source.tools : [])];
   for (const item of Array.isArray(source.input) ? source.input : []) {
     if (item?.type === "additional_tools" && Array.isArray(item.tools)) declarations.push(...item.tools);
@@ -12,6 +14,8 @@ export function collectResponseTools(source, inherited = []) {
   const visit = (tool, namespace = null) => {
     if (tool?.type === "namespace") {
       for (const child of tool.tools ?? []) visit(child, namespace ? `${namespace}.${tool.name}` : tool.name);
+    } else if (ignoredTypes.has(tool?.type)) {
+      return;
     } else if (["function", "custom"].includes(tool?.type) && typeof tool.name === "string") {
       tools.push({ ...tool, namespace: tool.namespace ?? namespace });
     } else if (tool) {
@@ -39,7 +43,11 @@ export function toChatTools(tools) {
       fn.description += "\nSupply the complete raw tool input in the input string. Do not JSON-encode that string a second time.";
       fn.parameters = { type: "object", properties: { input: { type: "string" } }, required: ["input"], additionalProperties: false };
     } else {
-      if (tool.parameters && typeof tool.parameters === "object") fn.parameters = tool.parameters;
+      if (Object.hasOwn(tool, "parameters") &&
+        (typeof tool.parameters === "boolean" ||
+          (tool.parameters && typeof tool.parameters === "object"))) {
+        fn.parameters = normalizeToolParametersSchema(tool.parameters);
+      }
       if (tool.strict != null) fn.strict = Boolean(tool.strict);
     }
     const converted = { type: "function", function: fn };

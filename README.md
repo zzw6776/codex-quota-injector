@@ -16,7 +16,8 @@
 - 当前账号的 Token 由 Codex 管理并实时同步回账户库；非当前账号仅在不足 5 分钟、已过期或接口明确返回 401 时续期，切换前先完成凭证交接；
 - OpenAI OAuth 等待状态提供“取消授权”，取消后立即关闭本地回调服务并恢复面板操作；
 - OpenAI OAuth 使用客户端登记的固定回调地址 `http://localhost:1455/auth/callback`；
-- macOS 和 Windows 的 Codex 客户端均支持 DeepSeek V4 Flash 与官方模型共存；
+- macOS 和 Windows 的 Codex 客户端均支持 DeepSeek Flash（`deepseek-flash`，原生图片输入）与官方模型共存；
+- 模型管理内置 DeepSeek 官方预设，只需填写 API Key、选择模型并启用；模型下拉列表通过 DeepSeek 官方 `/models` 接口实时刷新，DeepSeek 卡片内可查询余额，窗口最底部继续显示余额汇总；上下文由用户按 K 填写，不用不可靠的请求压测猜测上限；其他兼容 Responses 或 Chat 的第三方平台仍可手动添加。启用时按模型实际探测 Responses/Chat、流式输出、函数与原始文本/命名空间工具、工具结果续接、并行与指定工具、服务端网页搜索、`low/medium/high/xhigh/max` 推理强度、推理模式工具选择、推理历史和图片输入，再以一条包含 Codex 复杂工具 schema 的组合请求验收。第三方请求统一把本地 `$defs/$ref` 工具 schema 编译成无引用的可移植结构；Responses 的核心续接、必要工具转换、流式输出和组合请求全部通过时保留 Responses，只把供应商未原生支持的 custom/namespace 工具自动转换为标准 function；图片可通过另一协议时只对含图片的请求自动分流，不改变文本和工具请求的默认协议。其中任一必需阶段明确不兼容时自动尝试 Chat，认证、限流、网络及服务端临时故障不会触发协议降级，普通用户无需判断协议和能力开关；
 - 接管 app-server 时持续检查 `codex_app` 任务工具；悬浮面板关闭按钮左侧始终显示彩色状态点（绿色正常、黄色启动中、红色异常、蓝色直连），不显示状态文字且使用普通鼠标指针。悬停时正常状态展示四项常用功能的易读名称，不显示状态码和 API 名；异常状态只列缺失功能，并补充处理建议、诊断、状态码和状态更新时间。状态文件变化会在 100 毫秒防抖后刷新；正常时仅每 30 秒兜底检查，启动中或异常时每 3 秒自愈检查，监听不可用时自动回退快速轮询。检查本身不重绘页面，Tooltip 可稳定保持；启动失败或缺少常用只读入口 `list_threads`、`read_thread`、`list_projects`、`get_usage_limits` 时还会显示常驻诊断，并提供重新检查、重启 Codex 和打开日志；
 - macOS 使用原生无界面启动器接收 Finder 的重复打开事件；重复双击会接管旧注入器，Codex 已开放调试端口时保留当前客户端；
 - 退出 Codex 后，后台注入工作进程与 macOS 原生入口都会同步退出，不残留后台进程；
@@ -62,7 +63,7 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。�
 
 ## 定时唤醒
 
-在账号额度面板顶部点击时钟图标 `◷`（定时任务），进入与 DeepSeek、额外模型、模型上下文并列的“每日唤醒”独立设置页。所有 OAuth 账号直接平铺展示，每个账号均可独立添加一个或多个 24 小时时刻（例如 `08:00`、`13:00`、`18:00`），勾选“开启每日定时唤醒”并保存，也可点击该账号的“立即唤醒”。各账号的编辑互不影响，返回账号额度或关闭面板会丢弃未保存编辑。时间按电脑本地时区每天重复，设置及最近一次结果保存在加密账号库中。API Key 账号不提供此功能。
+在账号额度面板顶部点击时钟图标 `◷`（定时任务），进入与模型管理、模型上下文并列的“每日唤醒”独立设置页。所有 OAuth 账号直接平铺展示，每个账号均可独立添加一个或多个 24 小时时刻（例如 `08:00`、`13:00`、`18:00`），勾选“开启每日定时唤醒”并保存，也可点击该账号的“立即唤醒”。各账号的编辑互不影响，返回账号额度或关闭面板会丢弃未保存编辑。时间按电脑本地时区每天重复，设置及最近一次结果保存在加密账号库中。API Key 账号不提供此功能。
 
 账号卡片第一行的“唤醒”胶囊按钮放在倒数第二位（套餐标签之前），与切换、移除按钮风格一致：紫色点亮表示已开启每日唤醒，灰色表示未开启。鼠标停留 300ms 后，仅显示配置时间，以及最近一次唤醒的具体执行时间和成功状态；尚未执行时显示对应提示。点击可打开设置页并定位到对应账号。切换按钮简写为“切换”，鼠标停留 300ms 后显示完整文字“切换到此账号”。是否点亮表示定时开关，执行是否成功以悬浮结果为准。
 
@@ -134,7 +135,7 @@ npm run test:lifecycle -- --plan
 
 `npm test` 运行免费基础回归；`npm run test:offline` 运行当前平台完整 A，不消耗模型 Token。A 由只跑一次的公共组件和原生 Relay 组件组成：macOS 执行 `A-common + A-macos-native-relay`，Windows 分别执行 `A-common + A-windows-native-relay + A-wsl-native-relay`。Windows 与 WSL 使用各自的 Node.js、依赖、官方 CLI、实际 PE/ELF SEA Relay 和临时目录，结果不能互相继承；报告同时记录当前桌面运行环境与本平台全部支持环境的状态。各平台使用临时配置、测试凭据和本地模型端点，macOS 额外使用 Seatbelt 限制出站。若请求没有到达本地端点，测试会失败。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI、浏览器和 Relay 摘要。
 
-测试固定分为三批。A 为 `npm run test:offline` 免费回归，代码、配置或测试修改完成后默认自动执行。A 通过后应主动展示后续计划并询问用户：B1 只测 Codex 官方模型，B2 只测 DeepSeek。每个 B 都拆成 `test:live:*` 后台组件和 `test:desktop` 真实桌面组件；两者必须绑定同一源码、平台、运行环境和供应商并全部通过，整批才通过。B1、B2 分别授权、分别报告，每次默认读取当前桌面运行环境，也可追加 `--runtime=macos-native|windows-native|wsl-native` 选择一个环境；脚本不切换桌面设置。桌面执行器会先打开实时报告页，再由目标模型的真实 Codex 任务调用 codex_app 的 `list_threads`/`read_thread`、functions.exec、web.run、computer use 和用户补充输入，细节见[桌面入口验收](docs/testing-desktop-host.md)。
+测试固定分为三批。A 为 `npm run test:offline` 免费回归，只有用户明确要求时才运行指定范围。A 通过后应主动展示后续计划并询问用户：B1 只测 Codex 官方模型；B2 只从模型管理中读取当前已验证的 DeepSeek Flash，隔离运行时不携带 DeepSeek Pro、其他自定义平台或 TokenHub。每个 B 都拆成 `test:live:*` 后台组件和 `test:desktop` 真实桌面组件；两者必须绑定同一源码、平台、运行环境和供应商并全部通过，整批才通过。B1、B2 分别授权、分别报告，每次默认读取当前桌面运行环境，也可追加 `--runtime=macos-native|windows-native|wsl-native` 选择一个环境；脚本不切换桌面设置。桌面执行器会先打开实时报告页，再由目标模型的真实 Codex 任务调用 codex_app 的 `list_threads`/`read_thread`、functions.exec、web.run、computer use 和用户补充输入，细节见[桌面入口验收](docs/testing-desktop-host.md)。
 
 C 为 `npm run test:lifecycle -- --plan`，只读核对正式包、进程、中继协议、账号条件和计划中的一次官方冒烟；单独获得当次同意后，`--confirm-restart` 才会执行安装、接管、重连、关闭重开和账号往返。Windows 会自动保存原设置，依次切换并验证 Windows 原生 Relay 与 WSL 原生 Relay，随后精确恢复，用户无需手动切换。测试开始前会在独立浏览器页实时显示步骤，macOS 由 launchd 监督，Windows 由带恢复策略的任务计划程序监督，因此 Codex 被关闭后控制程序仍能继续记录和恢复。
 

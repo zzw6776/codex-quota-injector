@@ -74,6 +74,63 @@ test("说明与工具参数按流式增量计时，重复完成事件和工具�
   assert.equal(generationSpeedWindow(generation).durationMs, 3_000);
 });
 
+test("工具准备阶段从输出项出现开始，到输出项完成结束", () => {
+  let time = 10_000;
+  const toolCalls = [];
+  const observer = createResponseObservation({
+    requestStartedAt: time,
+    requireCompleted: true,
+    clock: () => time,
+    onUsage: () => {},
+    onToolCall: (call) => toolCalls.push(call),
+    onGeneration: () => {},
+  });
+  const send = (offset, payload) => {
+    time = 10_000 + offset;
+    observer.recordPayload(payload);
+  };
+
+  send(4_000, {
+    type: "response.output_item.added",
+    item: { type: "function_call", id: "tool-item", call_id: "tool-call", name: "exec" },
+  });
+  send(5_000, {
+    type: "response.function_call_arguments.delta",
+    item_id: "tool-item",
+    call_id: "tool-call",
+    delta: "{\"cmd\":",
+  });
+  send(7_000, {
+    type: "response.function_call_arguments.delta",
+    item_id: "tool-item",
+    call_id: "tool-call",
+    delta: "\"pwd\"}",
+  });
+  send(9_000, {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      id: "tool-item",
+      call_id: "tool-call",
+      name: "exec",
+      arguments: "{\"cmd\":\"pwd\"}",
+    },
+  });
+  send(20_000, {
+    type: "response.completed",
+    response: { id: "response-tool", output: [] },
+  });
+  observer.finish();
+
+  assert.deepEqual(toolCalls, [{
+    referenceId: "tool-call",
+    toolName: "exec",
+    preparationStartedAt: 14_000,
+    readyAt: 19_000,
+  }]);
+  assert.equal(toolCalls[0].readyAt - toolCalls[0].preparationStartedAt, 5_000);
+});
+
 test("一次性工具内容或无可测生成阶段的其他输出，不伪造极高速率", () => {
   const recorder = observation();
   recorder.send(100, { type: "response.output_item.added", item: { type: "function_call", id: "t", call_id: "call" } });

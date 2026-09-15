@@ -4,12 +4,12 @@ import { startChatCompatibilityProxy } from "../src/chat-compat-proxy.mjs";
 import { ResponsesHistory } from "../src/responses-history.mjs";
 import { json, readJsonRequest, startHttpServer } from "./helpers.mjs";
 
-async function fixture(t, handler) {
+async function fixture(t, handler, model = {}) {
   const seen = [];
   const { origin } = await startHttpServer(t, async (request, response) => {
     const body = await readJsonRequest(request); seen.push(body); handler(body, response);
   });
-  const platform = { id: "test", enabled: true, baseUrl: `${origin}/v1/`, models: [{ id: "chat", chatCompatibility: true }] };
+  const platform = { id: "test", enabled: true, baseUrl: `${origin}/v1/`, models: [{ id: "chat", chatCompatibility: true, ...model }] };
   const proxy = await startChatCompatibilityProxy(new Map([[platform.id, platform]]));
   t.after(() => proxy.close());
   return { seen, post: body => fetch(new URL("responses", proxy.baseUrlFor(platform)), {
@@ -73,6 +73,49 @@ test("[A MOD-04 TOOL-04] Chat 不支持的原生工具能力明确拒绝，不�
   const response = await f.post({ tools: [{ type: "web_search" }], input: "fixture" });
   assert.equal(response.status, 502);
   assert.match(await response.text(), /不支持工具类型 web_search/);
+  assert.equal(f.seen.length, 0);
+});
+
+test("[A MOD-04 TOOL-04] 能力探针确认不支持的可选 Hosted 工具会被过滤，其他 Codex 工具继续执行", async t => {
+  const f = await fixture(t, (body, response) => {
+    assert.deepEqual(body.tools.map((tool) => tool.function.name), ["lookup"]);
+    json(response, { id: "filtered", choices: [{ message: { content: "continued" }, finish_reason: "stop" }] });
+  }, {
+    displayName: "Capability Model",
+    capabilities: {
+      hostedTools: { web_search: "unsupported" },
+      toolChoice: "native",
+      parallelTools: "native",
+    },
+  });
+  const response = await f.post({
+    tools: [
+      { type: "function", name: "lookup", parameters: { type: "object" } },
+      { type: "web_search" },
+      { type: "future_hosted_tool" },
+    ],
+    input: "fixture",
+  });
+  assert.equal(response.status, 200);
+  assert.equal(f.seen.length, 1);
+});
+
+test("[A MOD-04 TOOL-04] 明确选择不支持的 Hosted 工具仍返回清晰错误", async t => {
+  const f = await fixture(t, () => assert.fail("不应访问模型"), {
+    displayName: "Capability Model",
+    capabilities: {
+      hostedTools: { web_search: "unsupported" },
+      toolChoice: "native",
+      parallelTools: "native",
+    },
+  });
+  const response = await f.post({
+    tools: [{ type: "web_search" }],
+    tool_choice: { type: "web_search" },
+    input: "fixture",
+  });
+  assert.equal(response.status, 502);
+  assert.match(await response.text(), /Capability Model 不支持服务端工具 web_search/);
   assert.equal(f.seen.length, 0);
 });
 

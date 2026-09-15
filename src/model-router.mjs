@@ -11,17 +11,22 @@ import {
 } from "node:zlib";
 import WebSocket, { WebSocketServer } from "ws";
 
-import { startChatCompatibilityProxy } from "./chat-compat-proxy.mjs";
+import { startModelCompatibilityProxy } from "./chat-compat-proxy.mjs";
+import {
+  canonicalDeepSeekModelId,
+  DEEPSEEK_CANONICAL_MODEL_ID,
+  DEEPSEEK_FLASH_MODEL_IDS,
+} from "./deepseek-model-profile.mjs";
+import { MODEL_CAPABILITY_PROBE_VERSION } from "./model-capability-probe.mjs";
 import { GENERATION_METRICS_VERSION } from "./relay-contract.mjs";
 import { ResponsesHistory } from "./responses-history.mjs";
+import { applyResponsesCapabilityPolicy } from "./responses-tool-adapter.mjs";
+import { readCodexDelegationInput } from "./codex-delegation.mjs";
 
 export const MODEL_ROUTER_PROVIDER_ID = "codex_quota_router";
 export const MODEL_ROUTER_TOKEN_ENV = "CODEX_QUOTA_ROUTER_TOKEN";
 export const MODEL_ROUTER_TOKEN_HEADER = "x-codex-quota-router-token";
 
-const DEEPSEEK_MODEL = "deepseek-v4-flash";
-const DEEPSEEK_PROVIDER = "deepseek";
-const DEEPSEEK_API_BASE_URL = "https://api.deepseek.com/";
 const CUSTOM_PROVIDER_PREFIX = "custom_";
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1/";
 const CHATGPT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex/";
@@ -60,7 +65,6 @@ export class ModelRouterManager {
   constructor({
     officialApiBaseUrl = OPENAI_API_BASE_URL,
     officialCodexBaseUrl = CHATGPT_CODEX_BASE_URL,
-    deepSeekBaseUrl = DEEPSEEK_API_BASE_URL,
     endpointReuseWaitMs = DEFAULT_ENDPOINT_REUSE_WAIT_MS,
     networkProbeIntervalMs = DEFAULT_NETWORK_PROBE_INTERVAL_MS,
     networkProbeTimeoutMs = DEFAULT_NETWORK_PROBE_TIMEOUT_MS,
@@ -95,7 +99,6 @@ export class ModelRouterManager {
       apiKey: officialApiBaseUrl,
       oauth: officialCodexBaseUrl,
     };
-    this.deepSeekBaseUrl = deepSeekBaseUrl;
     this.onRequestShape = typeof onRequestShape === "function"
       ? onRequestShape
       : null;
@@ -113,7 +116,6 @@ export class ModelRouterManager {
   }
 
   async configure({
-    deepSeek,
     extraModels,
     officialAuthMode = null,
     observeOfficial = false,
@@ -122,10 +124,8 @@ export class ModelRouterManager {
   }) {
     if (this.closed) throw new Error("模型路由器已关闭");
     const normalized = normalizeRoutingConfiguration({
-      deepSeek,
       extraModels,
       officialAuthMode,
-      deepSeekBaseUrl: this.deepSeekBaseUrl,
     });
     if (normalized.targets.size === 0 && !observeOfficial) {
       await this.disable();
@@ -138,7 +138,7 @@ export class ModelRouterManager {
     const snapshotSignature = `${normalized.signature}:observe-official=${Boolean(observeOfficial)}`;
     if (snapshotSignature !== this.snapshotSignature) {
       const replacingSnapshot = this.snapshotSignature !== null;
-      const nextCompatibilityProxy = await startChatCompatibilityProxy(normalized.platforms);
+      const nextCompatibilityProxy = await startModelCompatibilityProxy(normalized.platforms);
       const previousCompatibilityProxy = this.chatCompatibilityProxy;
       this.chatCompatibilityProxy = nextCompatibilityProxy;
       this.snapshot = buildRoutingSnapshot(normalized, nextCompatibilityProxy);
@@ -149,7 +149,7 @@ export class ModelRouterManager {
       }
       if (previousCompatibilityProxy) {
         void previousCompatibilityProxy.close().catch((error) => {
-          console.error(`[model-router] 旧 Chat 兼容代理关闭失败: ${error.message}`);
+          console.error(`[model-router] 旧模型兼容代理关闭失败: ${error.message}`);
         });
       }
     } else if (this.snapshot) {
@@ -1311,29 +1311,12 @@ export class ModelRouterManager {
 }
 
 function normalizeRoutingConfiguration({
-  deepSeek,
   extraModels,
   officialAuthMode,
-  deepSeekBaseUrl = DEEPSEEK_API_BASE_URL,
 }) {
   const targets = new Map();
   const legacyProviderIds = new Set();
   const platforms = new Map();
-  if (deepSeek?.enabled && deepSeek?.configured && deepSeek.apiKey) {
-    targets.set(DEEPSEEK_MODEL, {
-      kind: "custom",
-      routeKey: DEEPSEEK_PROVIDER,
-      baseUrl: deepSeekBaseUrl,
-      apiKey: String(deepSeek.apiKey),
-      displayName: deepSeek.model?.displayName ?? DEEPSEEK_MODEL,
-      supportsImage: false,
-      reasoningEfforts: Array.isArray(deepSeek.model?.reasoningEfforts)
-        ? deepSeek.model.reasoningEfforts
-        : ["low", "high", "max"],
-      defaultReasoningEffort: "high",
-    });
-    legacyProviderIds.add(DEEPSEEK_PROVIDER);
-  }
   for (const value of Array.isArray(extraModels?.platforms) ? extraModels.platforms : []) {
     const id = nonEmptyString(value?.id);
     const baseUrl = nonEmptyString(value?.baseUrl);
@@ -1344,11 +1327,12 @@ function normalizeRoutingConfiguration({
     const platform = {
       id,
       providerId,
+      preset: value?.preset === "deepseek" ? "deepseek" : null,
       name: nonEmptyString(value.name) ?? providerId,
       baseUrl,
       apiKey,
       enabled: true,
-      models: models.map(normalizeModel).filter((model) => model.id),
+      models: models.filter((model) => model?.selected !== false).map(normalizeModel).filter((model) => model.id),
     };
     if (platform.models.length === 0) continue;
     platforms.set(id, platform);
@@ -1356,17 +1340,27 @@ function normalizeRoutingConfiguration({
   }
   for (const platform of platforms.values()) {
     for (const model of platform.models) {
-      targets.set(model.id, {
+      const target = {
         kind: "custom",
         routeKey: platform.providerId,
         baseUrl: platform.baseUrl,
         apiKey: platform.apiKey,
         displayName: model.displayName,
+        canonicalModelId: platform.preset === "deepseek"
+          ? canonicalDeepSeekModelId(model.id)
+          : null,
         supportsImage: model.supportsImage,
+        routes: model.routes,
+        historyMode: model.historyMode,
+        capabilities: model.capabilities,
         reasoningEfforts: model.reasoningEfforts,
         defaultReasoningEffort: model.defaultReasoningEffort,
         platform,
-      });
+      };
+      targets.set(model.id, target);
+      if (platform.preset === "deepseek" && model.id === DEEPSEEK_CANONICAL_MODEL_ID) {
+        for (const modelId of DEEPSEEK_FLASH_MODEL_IDS) targets.set(modelId, target);
+      }
     }
   }
   return {
@@ -1376,16 +1370,7 @@ function normalizeRoutingConfiguration({
     officialAuthMode: ["oauth", "apiKey"].includes(officialAuthMode)
       ? officialAuthMode
       : null,
-    signature: JSON.stringify({
-      deepSeek: deepSeek?.enabled && deepSeek?.configured && deepSeek?.apiKey
-        ? {
-            enabled: true,
-            apiKey: deepSeek.apiKey,
-            model: deepSeek.model ?? null,
-          }
-        : null,
-      platforms: [...platforms.values()],
-    }),
+    signature: JSON.stringify({ platforms: [...platforms.values()] }),
   };
 }
 
@@ -1404,11 +1389,37 @@ function buildRoutingSnapshot(normalized, compatibilityProxy) {
 }
 
 function normalizeModel(value) {
+  const compatibility = value?.compatibility && typeof value.compatibility === "object"
+    ? value.compatibility
+    : null;
+  const currentProbe = compatibility?.status === "verified" &&
+    compatibility?.probeVersion === MODEL_CAPABILITY_PROBE_VERSION;
+  const protocol = ["responses", "chat"].includes(compatibility?.protocol)
+    ? compatibility.protocol
+    : value?.chatCompatibility ? "chat" : "responses";
+  const routes = {
+    default: protocol,
+    imageInput: currentProbe && ["responses", "chat"].includes(compatibility?.routes?.imageInput)
+      ? compatibility.routes.imageInput
+      : protocol,
+  };
   return {
     id: nonEmptyString(value?.id),
     displayName: nonEmptyString(value?.displayName ?? value?.id) ?? "自定义模型",
-    supportsImage: Boolean(value?.supportsImage),
-    chatCompatibility: Boolean(value?.chatCompatibility),
+    supportsImage: currentProbe
+      ? compatibility.supportsImage === true
+      : value?.documentedSupportsImage === true || Boolean(value?.supportsImage),
+    chatCompatibility: protocol === "chat",
+    routes,
+    historyMode: protocol === "chat"
+      ? "chat"
+      : compatibility?.historyMode === "reasoning-text-only"
+        ? "reasoning-text-only"
+        : "responses-full",
+    // A stale probe keeps only conservative capability states. This lets an
+    // upgraded runtime suppress unverified optional fields until re-detection,
+    // while positive image support still requires the current probe version.
+    capabilities: normalizeRuntimeCapabilities(compatibility?.capabilities),
     reasoningEfforts: Array.isArray(value?.reasoningEfforts)
       ? [...new Set(value.reasoningEfforts.map(nonEmptyString).filter(Boolean))]
       : [],
@@ -1436,12 +1447,15 @@ function inferOfficialAuthMode(headers) {
 
 function prepareCustomRequest(body, target) {
   if (containsImageInput(body.input) && !target.supportsImage) {
-    throw httpError(400, `${target.displayName} 未配置图片输入能力`);
+    throw httpError(400, `${target.displayName} 的自动检测结果不支持图片输入`);
   }
   const next = structuredClone(body);
+  if (target.canonicalModelId) next.model = target.canonicalModelId;
   next.input = normalizeCodexDelegationInput(next.input);
   stripCodexInternalInputMetadata(next.input);
-  if (target.routeKey === DEEPSEEK_PROVIDER) stripUnsupportedDeepSeekReasoningFields(next.input);
+  if (target.historyMode === "reasoning-text-only") {
+    stripUnsupportedDeepSeekReasoningFields(next.input);
+  }
   next.store = false;
   delete next.service_tier;
   if (next.reasoning && typeof next.reasoning === "object") {
@@ -1459,33 +1473,42 @@ function prepareCustomRequest(body, target) {
     }
     if (Object.keys(next.reasoning).length === 0) delete next.reasoning;
   }
+  applyModelCapabilityPolicy(next, target);
   return next;
+}
+
+function normalizeRuntimeCapabilities(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    ...value,
+    transport: value.transport && typeof value.transport === "object"
+      ? { ...value.transport }
+      : null,
+    hostedTools: value.hostedTools && typeof value.hostedTools === "object"
+      ? { ...value.hostedTools }
+      : {},
+    nativeCustomTools: Array.isArray(value.nativeCustomTools)
+      ? [...value.nativeCustomTools]
+      : [],
+  };
+}
+
+function applyModelCapabilityPolicy(body, target) {
+  applyResponsesCapabilityPolicy(body, target, {
+    errorFactory: (message) => httpError(400, message),
+  });
 }
 
 function normalizeCodexDelegationInput(input) {
   if (!Array.isArray(input)) return input;
   return input.map((item) => {
-    if (
-      !item
-      || typeof item !== "object"
-      || Array.isArray(item)
-      || item.type !== "function_call_output"
-      || nonEmptyString(item.call_id)
-      || item.name !== "send_message_to_thread"
-      || item.namespace !== "codex_app"
-    ) {
-      return item;
-    }
-    const output = nonEmptyString(item.output);
-    if (!output) return item;
-    const delegation = output.match(
-      /^\s*<codex_delegation>\s*<source_thread_id>[^<]+<\/source_thread_id>\s*<input>([\s\S]*)<\/input>\s*<\/codex_delegation>\s*$/,
-    );
-    if (!delegation) return item;
+    if (item?.type !== "function_call_output") return item;
+    const inputText = readCodexDelegationInput(item);
+    if (inputText === null) return item;
     return {
       type: "message",
       role: "user",
-      content: [{ type: "input_text", text: delegation[1] }],
+      content: [{ type: "input_text", text: inputText }],
     };
   });
 }

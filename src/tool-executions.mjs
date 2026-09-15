@@ -1,5 +1,6 @@
-// Rollout item lifecycles are the source of individual execution durations.
-// Never parse an exec program to invent child calls or divide its wall time.
+// Rollout item lifecycles are the preferred source of individual execution
+// durations. Exec source is inspected only for direct child identities; source,
+// arguments and results are never retained, and wrapper time is never divided.
 const projectionCache = new WeakMap();
 
 export function simplifyToolExecutionRecord(record, currentTurnId) {
@@ -122,6 +123,61 @@ export function simplifyToolExecutionRecord(record, currentTurnId) {
     flushCommand();
     return labels;
   };
+  const directExecToolNames = (source) => {
+    if (typeof source !== "string" || !source) return [];
+    let clean = "";
+    let state = "code";
+    let escaped = false;
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+      const next = source[index + 1];
+      if (state === "code") {
+        if (char === "/" && next === "/") {
+          clean += "  ";
+          state = "line-comment";
+          index += 1;
+        } else if (char === "/" && next === "*") {
+          clean += "  ";
+          state = "block-comment";
+          index += 1;
+        } else if (char === "'" || char === '"' || char === "`") {
+          clean += " ";
+          state = char === "'" ? "single" : char === '"' ? "double" : "template";
+          escaped = false;
+        } else {
+          clean += char;
+        }
+      } else if (state === "line-comment") {
+        clean += char === "\n" ? "\n" : " ";
+        if (char === "\n") state = "code";
+      } else if (state === "block-comment") {
+        if (char === "*" && next === "/") {
+          clean += "  ";
+          state = "code";
+          index += 1;
+        } else {
+          clean += char === "\n" ? "\n" : " ";
+        }
+      } else {
+        clean += char === "\n" ? "\n" : " ";
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if ((state === "single" && char === "'") ||
+          (state === "double" && char === '"') || (state === "template" && char === "`")) {
+          state = "code";
+        }
+      }
+    }
+    const names = [];
+    const pattern = /(^|[^\w$.])tools\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
+    for (let match; (match = pattern.exec(clean)) && names.length < 32;) {
+      const name = compact(match[2]);
+      if (name && !names.includes(name)) names.push(name);
+    }
+    return names;
+  };
   const p = record?.payload;
   if (!p) return null;
   const turnId = text(p.turn_id || p.internal_chat_message_metadata_passthrough?.turn_id || currentTurnId);
@@ -131,7 +187,10 @@ export function simplifyToolExecutionRecord(record, currentTurnId) {
   if (record.type === "response_item") {
     // Classify protocol structures, not a list of tool names.
     if (["function_call", "custom_tool_call"].includes(p.type) && text(p.call_id)) {
-      return { ...base, kind: "call", id: p.call_id, toolName: compact(p.name) || "工具调用",
+      const toolName = compact(p.name) || "工具调用";
+      const nestedToolNames = toolName === "exec" ? directExecToolNames(p.input) : [];
+      return { ...base, kind: "call", id: p.call_id, toolName,
+        ...(nestedToolNames.length ? { nestedToolNames } : {}),
         startedAt: Number.isFinite(at) ? at : null };
     }
     if (["function_call_output", "custom_tool_call_output"].includes(p.type) && text(p.call_id)) {
@@ -291,9 +350,12 @@ export function normalizeToolExecutionLedger(value) {
       if (!text(entry?.id) || seen.has(entry.id)) return [];
       seen.add(entry.id);
       const detailList = key === "items" ? normalizeToolExecutionDetailList(entry.detailList) : null;
+      const nestedToolNames = key === "calls" && Array.isArray(entry.nestedToolNames)
+        ? [...new Set(entry.nestedToolNames.map(text).filter(Boolean))].slice(0, 32) : [];
       return [{ id: text(entry.id), toolName: text(entry.toolName),
         startedAt: number(entry.startedAt), completedAt: number(entry.completedAt),
-        ...(key === "calls" ? { responseId: text(entry.responseId) || null } : {
+        ...(key === "calls" ? { responseId: text(entry.responseId) || null,
+          ...(nestedToolNames.length ? { nestedToolNames } : {}) } : {
           description: text(entry.description), durationMs: number(entry.durationMs), status: text(entry.status),
           ...(detailList ? { detailList } : {}),
         }) }];
@@ -342,8 +404,15 @@ export function projectToolExecutions(ledger, responseId) {
     const projection = projections.get(id);
     for (const parent of parents) {
       if (covered.has(parent.id)) continue;
-      projection.calls.push({ id: parent.id, toolName: parent.toolName, description: "单项明细未记录",
-        startedAt: parent.startedAt, durationMs: null, measured: false });
+      const nestedToolNames = Array.isArray(parent.nestedToolNames) ? parent.nestedToolNames : [];
+      const outerDuration = parent.startedAt != null && parent.completedAt != null &&
+        parent.completedAt >= parent.startedAt ? parent.completedAt - parent.startedAt : null;
+      projection.calls.push({ id: parent.id,
+        toolName: nestedToolNames.length === 1 ? nestedToolNames[0] : parent.toolName,
+        description: nestedToolNames.length > 1 ? "整体调用耗时" : "调用耗时",
+        startedAt: parent.startedAt, durationMs: outerDuration,
+        durationSource: parent.toolName === "exec" ? "outer-exec" : "outer-call",
+        measured: false });
     }
     projection.calls.sort((left, right) => (left.startedAt ?? Infinity) - (right.startedAt ?? Infinity));
     const complete = parents.every((call) => call.startedAt != null && call.completedAt != null &&

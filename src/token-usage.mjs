@@ -41,7 +41,8 @@ import {
 // Version 21 replaces inferred command purposes with argument-free commands.
 // Version 22 preserves expandable file/command lists and Node entry points.
 // Version 23 adds request-level output coverage and attributable phase speeds.
-const CACHE_VERSION = 23;
+// Version 24 retains sanitized direct child identities for exec fallbacks.
+const CACHE_VERSION = 24;
 const MIN_SUPPORTED_CACHE_VERSION = 11;
 const MIN_GENERATION_METRICS_CACHE_VERSION = 14;
 const DISCOVERY_INTERVAL_MS = 5_000;
@@ -52,7 +53,7 @@ const MAX_HISTORICAL_THREADS = 2_048;
 const MAX_HISTORICAL_SEGMENTS = 128;
 const READ_CHUNK_BYTES = 1024 * 1024;
 const COST_CACHE_VERSION = 3;
-const ROLLOUT_PARSER_VERSION = 9;
+const ROLLOUT_PARSER_VERSION = 10;
 const MAX_SEEN_EVENT_IDS = 50_000;
 const MAX_SEEN_USAGE_RESPONSE_IDS = 4_096;
 const MAX_PENDING_USAGE_RECORDS = 512;

@@ -8,9 +8,12 @@ import {
 } from "../runtime-tests/support/offline-runtime.mjs";
 import {
   COMMON_COMPONENT,
+  MACOS_NATIVE,
   WINDOWS_NATIVE,
   WSL_NATIVE,
+  classifyContractTestTitles,
   currentRuntimeTarget,
+  exactContractNamePattern,
   prepareWindowsNativeRelay,
   resolveRuntimeSelection,
   runWslTestSuite,
@@ -29,11 +32,16 @@ import {
   sourceSnapshot,
   writeReport,
 } from "./test-support.mjs";
+import { resolveMacOSCodexShim } from "../src/macos-shim.mjs";
 
 const COMMON_RUNTIME_FILES = new Set([
   "runtime-tests/browser-host.test.mjs",
   "runtime-tests/desktop-fixture.test.mjs",
   "runtime-tests/widget-browser.test.mjs",
+]);
+
+const PLATFORM_RUNTIME_TARGETS = new Map([
+  ["runtime-tests/windows-computer-use-fixture.test.mjs", new Set([WINDOWS_NATIVE])],
 ]);
 
 const runtimeArgument = process.argv.slice(2).find((argument) => argument.startsWith("--runtime="));
@@ -80,11 +88,17 @@ try {
   ]);
 
   const contractFiles = await testFiles("test");
+  const contractFilesByScope = await groupContractFiles(contractFiles);
   const allRuntimeFiles = await testFiles("runtime-tests");
   const commonRuntimeFiles = allRuntimeFiles.filter((file) => COMMON_RUNTIME_FILES.has(file));
   const relayRuntimeFiles = allRuntimeFiles.filter((file) => !COMMON_RUNTIME_FILES.has(file));
   const commonStages = [
-    await runLocalStage({ id: "common-contracts", files: contractFiles, sandboxed: false }),
+    await runLocalStage({
+      id: "common-contracts",
+      files: contractFilesByScope.get(COMMON_COMPONENT).files,
+      sandboxed: false,
+      namePattern: contractFilesByScope.get(COMMON_COMPONENT).namePattern,
+    }),
     await runLocalStage({
       id: "common-browser",
       files: commonRuntimeFiles,
@@ -109,9 +123,11 @@ try {
         });
         continue;
       }
+      const targetRuntimeFiles = runtimeFilesForTarget(relayRuntimeFiles, runtimeTarget);
+      const targetContracts = contractFilesByScope.get(runtimeTarget);
       report.components.push(runtimeTarget === WSL_NATIVE
-        ? await runWslComponent(relayRuntimeFiles)
-        : await runLocalRuntimeComponent(runtimeTarget, relayRuntimeFiles));
+        ? await runWslComponent(targetRuntimeFiles, targetContracts)
+        : await runLocalRuntimeComponent(runtimeTarget, targetRuntimeFiles, targetContracts));
     }
   } else {
     for (const runtimeTarget of supportedTargets) {
@@ -195,23 +211,39 @@ if (report.status !== "passed") {
   process.exitCode = 1;
 }
 
-async function runLocalRuntimeComponent(runtimeTarget, files) {
+async function runLocalRuntimeComponent(runtimeTarget, files, contracts) {
   try {
     let relayArtifact = null;
     if (runtimeTarget === WINDOWS_NATIVE) {
       relayArtifact = await prepareWindowsNativeRelay({ root: ROOT });
     }
-    const stages = [await runLocalStage({
+    const runtimeEnv = {
+      CODEX_TEST_RUNTIME_TARGET: runtimeTarget,
+      ...(relayArtifact ? { CODEX_TEST_RELAY_EXECUTABLE: relayArtifact.path } : {}),
+      ...(runtimeTarget === MACOS_NATIVE
+        ? { CODEX_TEST_MACOS_SHIM: await resolveMacOSCodexShim() }
+        : {}),
+    };
+    const stages = [];
+    if (contracts.files.length) {
+      stages.push(await runLocalStage({
+        id: `contracts-${runtimeTarget}`,
+        files: contracts.files,
+        sandboxed: false,
+        env: runtimeEnv,
+        component: runtimeComponentId(runtimeTarget),
+        runtimeTarget,
+        namePattern: contracts.namePattern,
+      }));
+    }
+    stages.push(await runLocalStage({
       id: `runtime-${runtimeTarget}`,
       files,
       sandboxed: true,
-      env: {
-        CODEX_TEST_RUNTIME_TARGET: runtimeTarget,
-        ...(relayArtifact ? { CODEX_TEST_RELAY_EXECUTABLE: relayArtifact.path } : {}),
-      },
+      env: runtimeEnv,
       component: runtimeComponentId(runtimeTarget),
       runtimeTarget,
-    })];
+    }));
     return componentFromStages(runtimeComponentId(runtimeTarget), stages, {
       runtimeTarget,
       label: runtimeTargetLabel(runtimeTarget),
@@ -226,27 +258,42 @@ async function runLocalRuntimeComponent(runtimeTarget, files) {
   }
 }
 
-async function runWslComponent(files) {
+async function runWslComponent(files, contracts) {
   const id = runtimeComponentId(WSL_NATIVE);
   try {
-    const stage = {
-      id: "runtime-wsl-native",
-      files,
-      eventFile: "offline-wsl-native-events.jsonl",
-    };
+    const stages = [
+      ...(contracts.files.length ? [{
+        id: "contracts-wsl-native",
+        files: contracts.files,
+        eventFile: "offline-contracts-wsl-native-events.jsonl",
+        testNamePattern: contracts.namePattern,
+      }] : []),
+      {
+        id: "runtime-wsl-native",
+        files,
+        eventFile: "offline-wsl-native-events.jsonl",
+      },
+    ];
     const result = await runWslTestSuite({
       root: ROOT,
       resultDirectory: RESULTS,
-      stages: [stage],
+      stages,
       sourceSha256: snapshot.sha256,
       kind: "offline",
       browserPath: report.runtimeSnapshot.browser?.path,
       expectedBrowserSha256: report.runtimeSnapshot.browser?.sha256,
     });
-    const events = await readEvents(join(RESULTS, stage.eventFile), id, WSL_NATIVE, stage.id);
-    allEvents.push(...events);
-    const tests = events.filter((event) => ["test:pass", "test:fail"].includes(event.type));
-    const summary = events.filter((event) => event.type === "test:summary").at(-1) ?? null;
+    const stageEvidence = [];
+    for (const stage of stages) {
+      const events = await readEvents(join(RESULTS, stage.eventFile), id, WSL_NATIVE, stage.id);
+      allEvents.push(...events);
+      stageEvidence.push({
+        stage,
+        tests: events.filter((event) => ["test:pass", "test:fail"].includes(event.type)),
+        summary: events.filter((event) => event.type === "test:summary").at(-1) ?? null,
+      });
+    }
+    const tests = stageEvidence.flatMap((item) => item.tests);
     let status = result.status;
     if (status === "passed" && tests.length === 0) status = "failed";
     else if (status === "passed" && tests.some((event) => event.skip)) status = "incomplete";
@@ -258,9 +305,10 @@ async function runWslComponent(files) {
       reason: result.error?.message ?? null,
       runtimeSnapshot: result.runtimeSnapshot ?? null,
       artifact: result.runtimeSnapshot?.relay ?? null,
-      stages: (result.stages ?? []).map((item) => item.id === stage.id
-        ? { ...item, tests, summary }
-        : item),
+      stages: (result.stages ?? []).map((item) => {
+        const evidence = stageEvidence.find((candidate) => candidate.stage.id === item.id);
+        return evidence ? { ...item, tests: evidence.tests, summary: evidence.summary } : item;
+      }),
     };
   } catch (error) {
     return blockedComponent(WSL_NATIVE, error);
@@ -274,6 +322,7 @@ async function runLocalStage({
   env = {},
   component = COMMON_COMPONENT,
   runtimeTarget = null,
+  namePattern = null,
 }) {
   const eventPath = join(RESULTS, `offline-${id}-events.jsonl`);
   const args = [
@@ -283,6 +332,7 @@ async function runLocalStage({
     "--test-reporter=./scripts/test-json-reporter.mjs",
     "--test-reporter-destination=stdout",
     `--test-reporter-destination=${eventPath}`,
+    ...(namePattern ? [`--test-name-pattern=${namePattern}`] : []),
     ...files,
   ];
   const command = sandboxed
@@ -362,6 +412,36 @@ async function testFiles(directory) {
     .filter((file) => file.endsWith(".test.mjs"))
     .sort()
     .map((file) => `${directory}/${file}`);
+}
+
+async function groupContractFiles(files) {
+  const groups = new Map([
+    [COMMON_COMPONENT, { files: new Set(), titles: [] }],
+    [MACOS_NATIVE, { files: new Set(), titles: [] }],
+    [WINDOWS_NATIVE, { files: new Set(), titles: [] }],
+    [WSL_NATIVE, { files: new Set(), titles: [] }],
+  ]);
+  for (const file of files) {
+    const source = await readFile(join(ROOT, file), "utf8");
+    const classified = classifyContractTestTitles(source);
+    for (const [scope, titles] of classified) {
+      if (titles.length) {
+        groups.get(scope).files.add(file);
+        groups.get(scope).titles.push(...titles);
+      }
+    }
+  }
+  return new Map([...groups].map(([scope, group]) => [scope, {
+    files: [...group.files],
+    namePattern: exactContractNamePattern(group.titles),
+  }]));
+}
+
+function runtimeFilesForTarget(files, runtimeTarget) {
+  return files.filter((file) => {
+    const targets = PLATFORM_RUNTIME_TARGETS.get(file);
+    return !targets || targets.has(runtimeTarget);
+  });
 }
 
 function markStale(message) {

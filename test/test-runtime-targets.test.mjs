@@ -3,10 +3,13 @@ import test from "node:test";
 
 import {
   COMMON_COMPONENT,
+  CONTRACT_PLATFORM_MARKERS,
   MACOS_NATIVE,
   WINDOWS_NATIVE,
   WSL_NATIVE,
+  classifyContractTestTitles,
   currentRuntimeTarget,
+  exactContractNamePattern,
   resolveRuntimeSelection,
   runtimeComponentId,
   runtimeTargetsForPlatform,
@@ -14,6 +17,23 @@ import {
   summarizeSelectedRuntimeComponents,
   summarizeRuntimeComponents,
 } from "../scripts/test-runtime-targets.mjs";
+
+test("[A HAR-01] 平台契约必须显式标记，标题提到其他平台仍属于公共逻辑", () => {
+  const source = [
+    'test("Windows 与 WSL 结果不能互相继承", () => {});',
+    `test("${CONTRACT_PLATFORM_MARKERS[MACOS_NATIVE]} macOS 原生进程", () => {});`,
+    `test("${CONTRACT_PLATFORM_MARKERS[WINDOWS_NATIVE]} Windows 原生进程", () => {});`,
+    `test("${CONTRACT_PLATFORM_MARKERS[WSL_NATIVE]} WSL 原生进程", () => {});`,
+  ].join("\n");
+  const groups = classifyContractTestTitles(source);
+  assert.deepEqual(groups.get(COMMON_COMPONENT), ["Windows 与 WSL 结果不能互相继承"]);
+  assert.deepEqual(groups.get(MACOS_NATIVE), ["[platform:macos-native] macOS 原生进程"]);
+  assert.deepEqual(groups.get(WINDOWS_NATIVE), ["[platform:windows-native] Windows 原生进程"]);
+  assert.deepEqual(groups.get(WSL_NATIVE), ["[platform:wsl-native] WSL 原生进程"]);
+  const commonPattern = new RegExp(exactContractNamePattern(groups.get(COMMON_COMPONENT)));
+  assert.equal(commonPattern.test("test/file.test.mjs\nWindows 与 WSL 结果不能互相继承"), true);
+  assert.equal(commonPattern.test("test/file.test.mjs\n[platform:windows-native] Windows 原生进程"), false);
+});
 
 test("[A HAR-01 HAR-04] Windows 与 WSL 是独立运行环境，公共证据只复用一次", async () => {
   assert.deepEqual(runtimeTargetsForPlatform("darwin"), [MACOS_NATIVE]);

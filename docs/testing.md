@@ -73,13 +73,13 @@ A 中官方 CLI 使用临时 HOME、CODEX_HOME、XDG/APPDATA 目录和测试凭�
 | [官方工作流](../runtime-tests/official-workflows.test.mjs) | 官方直接路径、Swift shim、官方经 Router、第三方 Responses/Chat、生产生成目录；文件读写/补丁/并行失败命令、2 MiB 内容、PTY、历史/分叉/归档恢复、输入队列恰好执行一次 |
 | [交互](../runtime-tests/official-interactions.test.mjs) | MCP 发现/资源/只读调用/错误；写入型 MCP 在 `never` 下拒绝且无副作用，MCP elicitation 直接终结；Plan 用户输入、动态工具回调、中断与再继续、Skills 和项目 |
 | [上下文](../runtime-tests/official-context.test.mjs) | 官方手动压缩、压缩后状态与用量；有效图片/附件/产物；steer、设置、历史注入；真实加载和信任后的 Hooks 执行 |
-| [第三方历史兼容](../runtime-tests/deepseek-history.test.mjs) | 实际官方 app-server 经内置 DeepSeek 路由恢复并分叉任务，模拟真实 `reasoning_text` 流并保留消息和工具调用/结果关联；恢复、分叉、压缩及压缩后续接请求剥离 Codex 私有消息元数据和 DeepSeek 不支持的推理字段 |
+| [DeepSeek Flash 历史兼容](../runtime-tests/deepseek-history.test.mjs) | 实际官方 app-server 经模型管理的 DeepSeek Flash 预设路由恢复并分叉任务，按当前实测的 `responses-full` 能力保留 `reasoning_text`、`summary` 与 `encrypted_content`，同时保留消息和工具调用/结果关联，并验证恢复、分叉、压缩及压缩后续接 |
 | [DeepSeek 工具链](../runtime-tests/deepseek-tools.test.mjs) | 实际官方 app-server 经当前平台生产中继入口连接本地 Responses/MCP；首个请求直接暴露 MCP 命名空间，不依赖 `tool_search`，在 `never` 下执行只读 MCP 并验证独立事件与工具结果续接 |
 | [任务状态](../runtime-tests/official-task-state.test.mjs) | 目标实际执行文件任务并完成、官方自动压缩、时间线分页、分组/删除、会话式文件搜索 |
 | [扩展](../runtime-tests/official-extensions.test.mjs) | 默认和实验协议 Schema 摘要核对；当前平台设备验证状态的实际只读判定；本地插件实际安装/停用/卸载；Git 真实差异审查 |
 | [Widget 浏览器](../runtime-tests/widget-browser.test.mjs) | 真实 DOM 注入/替换/销毁、点击/输入、全部面板动作、表单到配置管理器、不同尺寸/主题/任务节点变化、原生输入及工具按钮仍可操作 |
 | [工具宿主组合](../runtime-tests/browser-host.test.mjs)、[桌面材料](../runtime-tests/desktop-fixture.test.mjs)、[Windows 原生 Computer Use 材料](../runtime-tests/windows-computer-use-fixture.test.mjs) | 同一桌面宿主的浏览器契约由公共组件运行一次；原生组件另行覆盖各自官方 CLI/app-server 的动态工具往返。Windows 还动态编译非浏览器 WinForms 材料并验证随机标记、单次提交和独立证据；CDP 断开后仍回收测试浏览器；免费材料不冒充真实桌面 web.run/CUA |
-| [协议回归](../test/relay-protocol.test.mjs)、[Chat 工具契约](../test/chat-tool-contracts.test.mjs)、[新增格式](../test/chat-protocol-tools.test.mjs)、[路由恢复](../test/model-router-recovery.test.mjs) | 双向请求/ID/分页/大消息，Responses Lite/custom/namespace，历史关联、指定工具、预热/断流/错误/取消、不同供应商隔离与观察故障 |
+| [协议回归](../test/relay-protocol.test.mjs)、[Responses 工具适配](../test/responses-tool-adapter.test.mjs)、[Chat 工具契约](../test/chat-tool-contracts.test.mjs)、[新增格式](../test/chat-protocol-tools.test.mjs)、[路由恢复](../test/model-router-recovery.test.mjs) | 双向请求/ID/分页/大消息，Responses Lite/custom/namespace 的选择性转换与 SSE 还原，历史关联、指定工具、预热/断流/错误/取消、不同供应商隔离与观察故障 |
 | [账号可靠性](../test/account-reliability.test.mjs)、[OAuth](../test/account-oauth.test.mjs)、[账号迁移](../test/account-transfer.test.mjs)、[唤醒进程](../test/wakeup-client.test.mjs) | 并发/写入和 rename 失败/损坏数据保护；测试 OAuth 的 PKCE/state、端口冲突/超时/取消，以及迁移前刷新、源端状态、目标接管和恢复；真实子进程的最低价选择、刷新、异常和清理 |
 | [基础测试目录](../test)、[测试边界](../test/testing-boundaries.test.mjs) | 原有账号、模型配置、计价、计量、CDP、单实例等契约继续执行；未授权 B 不读取账号或启动模型，场景索引不能漏项 |
 
@@ -91,7 +91,7 @@ A 中官方 CLI 使用临时 HOME、CODEX_HOME、XDG/APPDATA 目录和测试凭�
 
 后台 B 使用当前凭据登录临时、仅内存保存认证的官方 app-server，再经过所选运行环境的生产 Relay、目录生成器、Router/Chat 代理。当前账号的 auth.json、Keychain、日常配置及任务不被写入。B 默认读取当前桌面运行环境，也可显式选择本平台一个运行环境；它不切换桌面设置。认证过期而需要未实现的桌面刷新交互时失败，不改写日常账号来绕过。
 
-B1 只选择 Codex 官方模型，B2 只选择已配置的 DeepSeek 模型；两批都核对真实文件修改、只读 MCP 结果、历史恢复/分叉、压缩后口令、动态工具结果和用户输入回调。声明支持图片的模型额外识图，官方模型额外执行原生网页搜索。网页搜索必须产生官方 `webSearch` 事件，并返回路径属于 app-server 的 OpenAI 文档站或 `openai/codex` 官方仓库链接，不能只按单一站点域名判断。MCP 使用 `never` 策略下可执行的只读工具，先直调预检，再由模型调用，并核对两次独立事件。审批允许/拒绝弹窗不属于测试项。
+B1 只选择 Codex 官方模型；B2 只从模型管理中读取已启用、完成当前版本兼容检测的 DeepSeek 预设 `deepseek-flash`。B2 的隔离运行时不得携带 DeepSeek Pro、其他自定义平台或 TokenHub；这些供应商和模型只有用户另行点名时才单独计划。两批都核对真实文件修改、只读 MCP 结果、历史恢复/分叉、压缩后口令、动态工具结果和用户输入回调。声明支持图片的模型额外识图，官方模型额外执行原生网页搜索。网页搜索必须产生官方 `webSearch` 事件，并返回路径属于 app-server 的 OpenAI 文档站或 `openai/codex` 官方仓库链接，不能只按单一站点域名判断。MCP 使用 `never` 策略下可执行的只读工具，先直调预检，再由模型调用，并核对两次独立事件。审批允许/拒绝弹窗不属于测试项。
 
 每个隔离阶段的默认停止阈值为观察到 500,000 Token 或启动 40 个常规轮次；可用 `CODEX_TEST_LIVE_MAX_TOKENS`、`CODEX_TEST_LIVE_MAX_TURNS` 调低。它们是停止条件，**不是预估费用或严格账单上限**，在途请求、压缩与工具费用可能超出；实际唤醒单独增加一次最小请求。每次运行前都必须展示对应计划并取得当次明确同意；B1 的同意不覆盖 B2，B1/B2 的同意也不覆盖 C。
 
@@ -113,6 +113,6 @@ B1 只选择 Codex 官方模型，B2 只选择已配置的 DeepSeek 模型；两
 
 本轮回归复现并修复了 Responses Lite/命名空间/原始文本工具无法正确转换、WS 本地预热丢失增量历史、账号写入失败留下虚假内存状态、取消 OAuth 后仍可能保存授权、唤醒进程继承日常 HOME、Widget 主题切换不同步、隔离 Chrome 误探测日常 macOS 钥匙串、真实测试错误拒绝写入型 MCP 工具、原生网页搜索错误排除 OpenAI 官方仓库来源、Codex 私有历史元数据被转发给第三方 Responses API，以及 Codex 重放的推理历史含有 DeepSeek 不支持字段等问题。Codex 从 CLI `0.153.4` 升级到 `0.154.0-alpha.6.2` 后，动态 app tools 开始校验到进程祖父级，旧的 `ChatGPT → shim → Node RPC relay → 官方 codex` 拓扑会因未签名 Node 位于祖先链而返回 `missing-code-signing-identity`；当前 macOS shim 把 RPC relay 改成官方 app-server 的 sidecar，并原位启动官方 codex，保留官方签名链。此前启动门禁只核对进程和中继，也不消费 `codex_app` 启动终态或证明常用入口已注册；当前按会话、generation、PID 和运行环境持久化宿主健康状态，要求 `list_threads`、`read_thread`、`list_projects`、`get_usage_limits` 四个常用只读入口齐全。Widget 在所有面板关闭按钮左侧常驻显示无文字彩色状态点；正常悬浮只列易读功能名，异常悬浮只强调缺失项、处理建议与技术诊断。健康检查改为目录事件驱动：状态文件原子替换后 100 毫秒防抖刷新，正常状态每 30 秒兜底，启动中或异常状态每 3 秒自愈；监听不可用时回退到 3 秒轮询。检查时间不进入页面视图模型，避免刷新导致 Tooltip 闪烁；生命周期门禁继续拒绝未核验目录。DeepSeek 目录原先同时声明搜索工具和未指定工具模式，导致 app-server 延迟 MCP 工具并让模型反复发出无意义命令；当前目录关闭该模型不具备的搜索工具能力，使 MCP 从第一轮以直接命名空间暴露。真实 B 原先把所有场景堆在一个长任务中，压缩后的累计上下文会先撞到 Token 阈值；当前后台按工具、历史、压缩、app-server 回调四个独立任务运行，桌面入口作为另一个必需组件单独留证。
 
-MCP 回归固定 `never` 下写入拒绝无副作用和只读工具实际执行两条路径，宿主 URL 使用明确的回环 HTTP 契约；网页来源回归同时固定官方正例和仿冒/无关反例；第三方历史回归实际经过官方 app-server 和内置 DeepSeek 路由，覆盖真实推理项、工具历史、恢复、分叉和压缩。修复针对共享数据流和测试边界，并有实际失效断言。
+MCP 回归固定 `never` 下写入拒绝无副作用和只读工具实际执行两条路径，宿主 URL 使用明确的回环 HTTP 契约；网页来源回归同时固定官方正例和仿冒/无关反例；第三方历史回归实际经过官方 app-server 和模型管理的 DeepSeek 预设路由，覆盖真实推理项、工具历史、恢复、分叉和压缩。模型能力探针不再把任意 custom/namespace 的原生支持当作 Responses 准入条件：Responses 核心续接通过后，代理仅转换探针确认缺失的工具形态，并在返回 JSON、SSE 事件和后续工具结果中恢复 Codex 原始语义；转换后的工具续接、流式输出或组合请求明确不兼容时继续验证 Chat，认证、限流、网络或服务端临时故障则停止检测而不降级。Router 和无 Router 的直接 app-server Relay 共用同一请求能力策略，直接 Relay 只加载当前探针版本中已验证的能力矩阵。修复针对共享数据流和测试边界，并有实际失效断言。
 
-发布版本为 `0.1.219`，Widget 运行时 `128`，中继协议 `58`；账号新增临时与已转出状态及迁移时间，因此账号存储版本为 `3`。源码版本和日常 Codex 实际加载版本分别记录，只有 lifecycle 报告中的正式包哈希及中继 generation 能证明本次加载。
+发布版本为 `0.1.235`，Widget 运行时 `150`，中继协议 `69`；账号存储版本为 `3`，模型配置存储版本为 `13`。源码版本和日常 Codex 实际加载版本分别记录，只有 lifecycle 报告中的正式包哈希及中继 generation 能证明本次加载。

@@ -2,6 +2,15 @@ import { createServer, request as requestHttp } from "node:http";
 import { request as requestHttps } from "node:https";
 import { randomUUID } from "node:crypto";
 import { chatToolName, collectResponseTools, findResponseTool, responseCall, toChatCall, toChatTools } from "./chat-tool-adapter.mjs";
+import {
+  applyResponsesCapabilityPolicy,
+  createResponsesToolStreamTranslator,
+  needsResponsesCapabilityPolicy,
+  needsResponsesToolBridge,
+  prepareResponsesToolRequest,
+  translateResponsesPayload,
+} from "./responses-tool-adapter.mjs";
+import { normalizeResponsesRequestToolSchemas } from "./tool-schema-compat.mjs";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -17,14 +26,14 @@ const HOP_BY_HOP_HEADERS = new Set([
 const MAX_CACHED_RESPONSES = 512;
 
 /**
- * Bridges the Codex-required Responses wire protocol to Chat Completions for
- * platforms whose native Responses implementation cannot continue tool calls.
+ * Normalizes third-party Responses history and tool shapes, and bridges a
+ * request to Chat Completions when the detected capability route requires it.
  */
 export async function startChatCompatibilityProxy(platforms) {
   const targets = new Map(
     [...platforms.values()]
       .filter((platform) =>
-        platform.enabled && platform.models.some((model) => model.chatCompatibility),
+        platform.enabled && platform.models.some(needsModelCompatibility),
       )
       .map((platform) => [platform.id, platform]),
   );
@@ -38,7 +47,7 @@ export async function startChatCompatibilityProxy(platforms) {
   const address = server.address();
   if (!address || typeof address === "string") {
     await closeServer(server);
-    throw new Error("Chat 兼容代理未获取到本地监听端口");
+    throw new Error("模型兼容代理未获取到本地监听端口");
   }
   const origin = `http://127.0.0.1:${address.port}`;
   return {
@@ -60,17 +69,105 @@ async function proxyRequest(request, response, targets, history) {
       return;
     }
     const body = await readJsonBody(request);
-    if (!route.target.models.some((model) => model.id === text(body?.model) && model.chatCompatibility)) {
-      forwardJson(request.headers, response, route.url, body);
+    const model = route.target.models.find((item) => item.id === text(body?.model));
+    const preparedBody = model?.historyMode === "reasoning-text-only"
+      ? stripReasoningEnvelope(body)
+      : body;
+    if (!model || !needsModelCompatibility(model)) {
+      forwardJson(request.headers, response, route.url, preparedBody);
       return;
     }
     const scopedHistory = history.forPlatform(route.target.id);
-    const prepared = prepareChatRequest(body, scopedHistory);
+    if (!shouldUseChatCompatibility(model, preparedBody)) {
+      const normalizedBody = normalizeResponsesRequestToolSchemas(preparedBody);
+      const unavailableHostedTools = applyResponsesCapabilityPolicy(normalizedBody, model);
+      if (!needsResponsesToolBridge(model)) {
+        forwardJson(request.headers, response, route.url, normalizedBody);
+        return;
+      }
+      const previousResponseId = text(preparedBody?.previous_response_id);
+      const restored = {
+        ...normalizedBody,
+        input: restoreToolCalls(normalizedBody, scopedHistory),
+      };
+      const prepared = prepareResponsesToolRequest(restored, {
+        inheritedTools: scopedHistory.getTools(previousResponseId),
+        nativeCustomTools: model.capabilities?.customTools === "native"
+          ? ["*"]
+          : model.capabilities?.nativeCustomTools,
+        nativeNamespaceTools: model.capabilities?.namespaceTools === "native",
+        ignoredToolTypes: unavailableHostedTools,
+      });
+      forwardResponsesToolRequest(
+        request.headers,
+        response,
+        route.url,
+        prepared,
+        scopedHistory,
+      );
+      return;
+    }
+    const prepared = prepareChatRequest(preparedBody, scopedHistory, model);
     const targetUrl = new URL(`chat/completions${route.search}`, route.target.baseUrl);
     forwardChatRequest(request.headers, response, targetUrl, prepared, scopedHistory);
   } catch (error) {
-    writeError(response, 502, `Chat 兼容代理请求失败：${error.message}`);
+    writeError(response, 502, `模型兼容代理请求失败：${error.message}`);
   }
+}
+
+export const startModelCompatibilityProxy = startChatCompatibilityProxy;
+
+function needsModelCompatibility(model) {
+  // Every third-party model crosses this boundary so Codex tool schemas use a
+  // provider-portable shape even when no other protocol bridge is needed.
+  return Boolean(model);
+}
+
+function shouldUseChatCompatibility(model, body) {
+  if (model?.chatCompatibility) return true;
+  return model?.routes?.imageInput === "chat" && containsImageInput(body?.input);
+}
+
+function containsImageInput(value) {
+  if (Array.isArray(value)) return value.some(containsImageInput);
+  if (!value || typeof value !== "object") return false;
+  if (["image", "localImage", "input_image", "image_url"].includes(value.type)) return true;
+  return Object.values(value).some(containsImageInput);
+}
+
+function unsupportedChatToolTypes(model, body) {
+  const capabilities = model?.capabilities;
+  const unavailable = new Set(Object.keys(capabilities?.hostedTools ?? {}));
+  if (!capabilities) return unavailable;
+  const visit = (tool) => {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) return;
+    if (tool.type === "namespace") {
+      for (const child of tool.tools ?? []) visit(child);
+      return;
+    }
+    const type = text(tool.type);
+    if (type && !["function", "custom"].includes(type)) {
+      unavailable.add(type);
+    }
+  };
+  for (const tool of Array.isArray(body?.tools) ? body.tools : []) visit(tool);
+  for (const item of Array.isArray(body?.input) ? body.input : []) {
+    if (item?.type === "additional_tools") {
+      for (const tool of Array.isArray(item.tools) ? item.tools : []) visit(tool);
+    }
+  }
+  return unavailable;
+}
+
+function stripReasoningEnvelope(body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.input)) return body;
+  const next = structuredClone(body);
+  for (const item of next.input) {
+    if (!item || typeof item !== "object" || Array.isArray(item) || item.type !== "reasoning") continue;
+    delete item.summary;
+    delete item.encrypted_content;
+  }
+  return next;
 }
 
 function resolveTarget(requestUrl, targets) {
@@ -78,7 +175,7 @@ function resolveTarget(requestUrl, targets) {
   const [, rawPlatformId, ...pathParts] = incoming.pathname.split("/");
   const platformId = decodeURIComponent(rawPlatformId ?? "");
   const target = targets.get(platformId);
-  if (!target) throw new Error("未知的 Chat 兼容平台路由");
+  if (!target) throw new Error("未知的模型兼容平台路由");
   return {
     target,
     path: `/${pathParts.join("/")}`,
@@ -104,11 +201,23 @@ async function readJsonBody(request) {
   }
 }
 
-function prepareChatRequest(request, history) {
+function prepareChatRequest(request, history, modelProfile = null) {
   if (!request || typeof request !== "object") throw new Error("Responses 请求体无效");
-  const model = text(request.model);
-  if (!model) throw new Error("Responses 请求缺少模型 ID");
-  const declarations = collectResponseTools(request, history.getTools(text(request.previous_response_id)));
+  const modelId = text(request.model);
+  if (!modelId) throw new Error("Responses 请求缺少模型 ID");
+  const unavailableHostedTools = unsupportedChatToolTypes(modelProfile, request);
+  const selectedUnavailableType = requiredUnavailableToolType(
+    request.tool_choice,
+    unavailableHostedTools,
+  );
+  if (selectedUnavailableType) {
+    throw new Error(`${modelProfile?.displayName || modelProfile?.id || "当前模型"} 不支持服务端工具 ${selectedUnavailableType}`);
+  }
+  const declarations = collectResponseTools(
+    request,
+    history.getTools(text(request.previous_response_id)),
+    { ignoredTypes: unavailableHostedTools },
+  );
   const input = restoreToolCalls(request, history);
   const messages = [];
   const instructions = contentText(request.instructions);
@@ -117,7 +226,7 @@ function prepareChatRequest(request, history) {
 
   // Responses and Chat use opposite defaults for streaming. Preserve the caller's
   // explicit choice instead of changing a non-streaming request into SSE.
-  const chat = { model, messages, stream: Boolean(request.stream) };
+  const chat = { model: modelId, messages, stream: Boolean(request.stream) };
   if (chat.stream) chat.stream_options = { include_usage: true };
   const maxTokens = request.max_output_tokens ?? request.max_tokens ?? request.max_completion_tokens;
   if (Number.isFinite(Number(maxTokens)) && Number(maxTokens) > 0) {
@@ -126,7 +235,23 @@ function prepareChatRequest(request, history) {
   for (const key of ["temperature", "top_p", "tool_choice", "parallel_tool_calls"]) {
     if (request[key] != null) chat[key] = request[key];
   }
-  if (["function", "custom"].includes(request.tool_choice?.type) && text(request.tool_choice.name)) {
+  const reasoningEffort = text(request.reasoning?.effort) ||
+    text(modelProfile?.defaultReasoningEffort);
+  if (reasoningEffort) chat.reasoning_effort = reasoningEffort;
+  const reasoningEnabled = Boolean(reasoningEffort && reasoningEffort !== "none");
+  const toolChoiceCapability = reasoningEnabled
+    ? modelProfile?.capabilities?.reasoningToolChoice
+    : modelProfile?.capabilities?.toolChoice;
+  if (modelProfile?.capabilities && toolChoiceCapability !== "native") {
+    if (toolChoiceCapability === "auto-only" && isForcedToolChoice(chat.tool_choice)) {
+      chat.tool_choice = "auto";
+    } else if (toolChoiceCapability !== "auto-only") {
+      delete chat.tool_choice;
+    }
+  }
+  if (modelProfile?.capabilities && modelProfile.capabilities.parallelTools !== "native") delete chat.parallel_tool_calls;
+  if ((!modelProfile?.capabilities || toolChoiceCapability === "native") &&
+    ["function", "custom"].includes(request.tool_choice?.type) && text(request.tool_choice.name)) {
     const tool = findResponseTool(declarations, request.tool_choice.name, request.tool_choice.namespace);
     chat.tool_choice = { type: "function", function: { name: tool ? chatToolName(tool) : request.tool_choice.name } };
   }
@@ -137,6 +262,135 @@ function prepareChatRequest(request, history) {
     delete chat.parallel_tool_calls;
   }
   return { source: { ...request, tools: declarations }, chat };
+}
+
+function forwardResponsesToolRequest(requestHeaders, response, targetUrl, prepared, history) {
+  const body = Buffer.from(JSON.stringify(prepared.body));
+  const headers = normalizedHeaders(requestHeaders, true);
+  headers["content-type"] = "application/json";
+  headers["content-length"] = String(body.length);
+  headers["accept-encoding"] = "identity";
+  const transport = targetUrl.protocol === "https:" ? requestHttps : requestHttp;
+  const upstream = transport(targetUrl, { method: "POST", headers }, (upstreamResponse) => {
+    if ((upstreamResponse.statusCode ?? 502) < 200 || (upstreamResponse.statusCode ?? 502) >= 300) {
+      void forwardUpstreamError(upstreamResponse, response, "Responses");
+      return;
+    }
+    if (prepared.body.stream) {
+      response.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      pipeResponsesToolStream(upstreamResponse, response, prepared, history);
+      return;
+    }
+    void forwardResponsesToolJson(upstreamResponse, response, prepared, history);
+  });
+  upstream.once("error", (error) => writeError(response, 502, `Responses 上游请求失败：${error.message}`));
+  forwardClientCancellation(response, upstream);
+  upstream.end(body);
+}
+
+async function forwardResponsesToolJson(upstream, response, prepared, history) {
+  try {
+    const body = JSON.parse(await readBodyText(upstream));
+    if (body?.error) throw new Error(extractErrorMessage(JSON.stringify(body)));
+    const converted = translateResponsesPayload(body, prepared.plan);
+    history.remember(converted, prepared.source.tools);
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify(converted));
+  } catch (error) {
+    writeError(response, 502, `Responses 工具转换失败：${error.message}`);
+  }
+}
+
+function pipeResponsesToolStream(upstream, response, prepared, history) {
+  const translator = createResponsesToolStreamTranslator(prepared.plan);
+  let pending = "";
+  let failed = false;
+  upstream.setEncoding("utf8");
+  const acceptBlock = (block) => {
+    if (failed || !block.trim()) return;
+    const lines = block.split(/\r?\n/);
+    const declaredEventName = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
+    const data = lines.filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart()).join("\n");
+    if (!data) {
+      response.write(`${block}\n\n`);
+      return;
+    }
+    if (data === "[DONE]") {
+      response.write(`data: [DONE]\n\n`);
+      return;
+    }
+    try {
+      const value = JSON.parse(data);
+      const eventName = declaredEventName || text(value?.type) || "message";
+      for (const output of translator.accept(eventName, value)) {
+        writeSse(response, output.event, output.data);
+        if (["response.completed", "response.incomplete"].includes(output.data?.type)) {
+          history.remember(output.data.response, prepared.source.tools);
+        }
+      }
+    } catch (error) {
+      failed = true;
+      writeSse(response, "response.failed", {
+        type: "response.failed",
+        response: {
+          status: "failed",
+          error: { type: "tool_translation_error", message: error.message },
+          output: [],
+        },
+      });
+    }
+  };
+  upstream.on("data", (chunk) => {
+    pending += chunk;
+    const blocks = pending.split(/\r?\n\r?\n/);
+    pending = blocks.pop() ?? "";
+    for (const block of blocks) acceptBlock(block);
+  });
+  upstream.once("end", () => {
+    if (pending.trim()) acceptBlock(pending);
+    response.end();
+  });
+  upstream.once("error", (error) => {
+    if (!response.destroyed && !failed) {
+      writeSse(response, "response.failed", {
+        type: "response.failed",
+        response: {
+          status: "failed",
+          error: { type: "upstream_error", message: `Responses 流中断：${error.message}` },
+          output: [],
+        },
+      });
+    }
+    response.end();
+  });
+}
+
+function isForcedToolChoice(value) {
+  if (value === "required") return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (["function", "custom", "namespace"].includes(text(value.type))) return true;
+  return value.type === "allowed_tools" && value.mode === "required";
+}
+
+function requiredUnavailableToolType(toolChoice, unavailableTypes) {
+  if (!toolChoice || typeof toolChoice !== "object" || unavailableTypes.size === 0) return null;
+  const type = text(toolChoice.type);
+  if (type && unavailableTypes.has(type)) return type;
+  if (type !== "allowed_tools" || toolChoice.mode !== "required" ||
+    !Array.isArray(toolChoice.tools)) return null;
+  const unavailable = toolChoice.tools
+    .map((tool) => text(tool?.type))
+    .filter((toolType) => toolType && unavailableTypes.has(toolType));
+  const hasAvailable = toolChoice.tools.some((tool) => {
+    const toolType = text(tool?.type);
+    return !toolType || !unavailableTypes.has(toolType);
+  });
+  return unavailable.length > 0 && !hasAvailable ? unavailable[0] : null;
 }
 
 function restoreToolCalls(request, history) {
@@ -164,7 +418,7 @@ function restoreToolCalls(request, history) {
   if (!cachedCalls?.length) {
     throw new Error(
       `未找到 previous_response_id=${previousResponseId} 对应的工具调用；` +
-      "请新建任务后再使用 Chat 兼容模式",
+      "请新建任务后再使用当前模型兼容模式",
     );
   }
   const restored = cachedCalls.filter((item) => missingCallIds.has(text(item.call_id)));
@@ -265,7 +519,7 @@ function forwardChatRequest(requestHeaders, response, targetUrl, prepared, histo
   const transport = targetUrl.protocol === "https:" ? requestHttps : requestHttp;
   const upstream = transport(targetUrl, { method: "POST", headers }, (upstreamResponse) => {
     if ((upstreamResponse.statusCode ?? 502) < 200 || (upstreamResponse.statusCode ?? 502) >= 300) {
-      void forwardUpstreamError(upstreamResponse, response);
+      void forwardUpstreamError(upstreamResponse, response, "Chat");
       return;
     }
     if (prepared.chat.stream) {
@@ -284,12 +538,12 @@ function forwardChatRequest(requestHeaders, response, targetUrl, prepared, histo
   upstream.end(body);
 }
 
-async function forwardUpstreamError(upstream, response) {
+async function forwardUpstreamError(upstream, response, protocol) {
   try {
     const body = await readBodyText(upstream);
-    writeError(response, upstream.statusCode ?? 502, `Chat 上游返回错误：${extractErrorMessage(body)}`);
+    writeError(response, upstream.statusCode ?? 502, `${protocol} 上游返回错误：${extractErrorMessage(body)}`);
   } catch (error) {
-    writeError(response, 502, `Chat 上游错误响应中断：${error.message}`);
+    writeError(response, 502, `${protocol} 上游错误响应中断：${error.message}`);
   }
 }
 

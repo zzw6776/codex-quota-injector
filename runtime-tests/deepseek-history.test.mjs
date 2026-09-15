@@ -19,40 +19,51 @@ function inputShape(body) {
   }));
 }
 
+function fullReasoning(text) {
+  return {
+    ...reasoning(text),
+    summary: [{ type: "summary_text", text: `SUMMARY_${text}` }],
+    encrypted_content: `ENCRYPTED_${text}`,
+  };
+}
+
 function assertDeepSeekReasoningHistory(body) {
   const reasoningItems = body.input.filter(item => item?.type === "reasoning");
   assert.ok(reasoningItems.length > 0, "测试历史必须包含 DeepSeek reasoning 项");
   for (const item of reasoningItems) {
-    assert.equal(item.summary, undefined, "DeepSeek 历史不支持 reasoning.summary");
-    assert.equal(item.encrypted_content, undefined, "DeepSeek 历史不支持 reasoning.encrypted_content");
+    assert.ok(Array.isArray(item.summary),
+      "检测为 responses-full 后必须保留 reasoning.summary");
+    assert.equal(typeof item.encrypted_content, "string",
+      "检测为 responses-full 后必须保留 reasoning.encrypted_content");
     assert.ok(item.content?.every(part => part.type === "reasoning_text"),
-      "DeepSeek 支持的 reasoning_text 正文必须保留");
+      "reasoning_text 正文必须保留");
   }
 }
 
-test("[A MOD-03 SES-01 SES-02 SES-06] DeepSeek Responses 的恢复、分叉和压缩保留兼容历史", { timeout: 30_000 }, async t => {
+test("[A MOD-03 SES-01 SES-02 SES-06] 模型配置平台的 DeepSeek Flash 按检测结果保留完整推理历史", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "deepseek" });
+  assert.equal(r.model, "deepseek-flash");
   r.enqueue(
-    [reasoning("FIRST_PRIVATE_REASONING"),
+    [fullReasoning("FIRST_PRIVATE_REASONING"),
       customCall("exec", `text(await tools.exec_command({cmd:${JSON.stringify(process.platform === "win32" ? "Write-Output FIRST_TOOL" : "/bin/echo FIRST_TOOL")},login:false}));`)],
     body => {
       assert.match(JSON.stringify(body.input), /FIRST_TOOL/);
       assertDeepSeekReasoningHistory(body);
-      return [reasoning("TOOL_PRIVATE_REASONING"), message("FIRST_REPLY")];
+      return [fullReasoning("TOOL_PRIVATE_REASONING"), message("FIRST_REPLY")];
     },
   );
   const { thread } = await r.thread();
   await r.turn(thread.id, "FIRST_INPUT");
   await r.rpc.request("thread/resume", { threadId: thread.id });
   await r.rpc.request("thread/settings/update", { threadId: thread.id, effort: "low", approvalPolicy: "never" });
-  r.enqueue([reasoning("RESUME_PRIVATE_REASONING"), message("RESUMED_REPLY")]);
+  r.enqueue([fullReasoning("RESUME_PRIVATE_REASONING"), message("RESUMED_REPLY")]);
   await r.turn(thread.id, "RESUME_INPUT");
   const fork = await r.rpc.request("thread/fork", { threadId: thread.id, cwd: r.cwd });
   let forkRequest;
   r.enqueue(body => {
     forkRequest = structuredClone(body);
     assert.doesNotMatch(JSON.stringify(body.input), /internal_chat_message_metadata_passthrough/,
-      "第三方 Responses 请求不能携带 Codex 私有历史元数据");
+      "第三方 Responses 请求不能携带 Codex 私有消息元数据");
     assertDeepSeekReasoningHistory(body);
     return "FORK_REPLY";
   });

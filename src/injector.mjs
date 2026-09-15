@@ -3,12 +3,12 @@ import { AccountWakeupManager } from "./account-wakeup.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { CodexContextManager } from "./codex-context.mjs";
 import { prepareCodexLaunch, refreshCodexModelCatalog } from "./codex-bridge.mjs";
-import { DeepSeekManager } from "./deepseek-manager.mjs";
 import { ExtraModelManager } from "./extra-model-manager.mjs";
 import {
   directHostHealth,
   hostHealthPollInterval,
   readHostHealthViewModel,
+  requestHostToolReload,
   watchHostHealthFiles,
 } from "./host-health.mjs";
 import { ModelRouterManager } from "./model-router.mjs";
@@ -39,7 +39,6 @@ export async function runInjector({
   injectionMode = null,
   accountManager = new AccountManager(),
   contextManager = new CodexContextManager(),
-  deepSeekManager = new DeepSeekManager(),
   extraModelManager = new ExtraModelManager(),
   modelRouterManager = new ModelRouterManager(),
   tokenUsageManager = new TokenUsageManager(),
@@ -47,7 +46,6 @@ export async function runInjector({
   accountManagerInitialized = false,
   prepareLaunch = () => prepareCodexLaunch({
     accountManager,
-    deepSeekManager,
     extraModelManager,
     contextManager,
     modelRouterManager,
@@ -62,7 +60,6 @@ export async function runInjector({
   if (!accountManagerInitialized) await accountManager.initialize();
   if (!managersInitialized) {
     await contextManager.initialize();
-    await deepSeekManager.initialize();
     await extraModelManager.initialize();
   }
   const tokenInitialization = tokenUsageManager.initialize().catch((error) => {
@@ -73,6 +70,7 @@ export async function runInjector({
   let targetId = null;
   let widgetInstalled = false;
   let lastStaticJson = null;
+  let lastStaticCoreJson = null;
   let lastTokenUsageSignatures = new Map();
   let lastTokenUsageStatus = null;
   let lastTokenUsageError = null;
@@ -86,6 +84,7 @@ export async function runInjector({
   let lastStableTokenUsageAt = 0;
   let removeTokenUsageListener = () => {};
   let removeNetworkListener = () => {};
+  let removeExtraModelListener = () => {};
   let activeAction = null;
   let restartingCodex = false;
   let hasSeenCodexProcess = false;
@@ -262,9 +261,10 @@ export async function runInjector({
     removeTokenUsageListener = () => {};
     removeNetworkListener();
     removeNetworkListener = () => {};
+    removeExtraModelListener();
+    removeExtraModelListener = () => {};
     cdp?.close();
     accountManager.close();
-    deepSeekManager.close();
     extraModelManager.close();
     tokenUsageManager.close();
     modelRouterClosePromise ??= modelRouterManager.close().catch((error) => {
@@ -446,7 +446,6 @@ export async function runInjector({
     const viewModel = {
       ...accountManager.getViewModel(),
       context: contextManager.getViewModel(),
-      deepSeek: deepSeekManager.getViewModel(),
       extraModels: extraModelManager.getViewModel(),
       network: modelRouterManager.getNetworkViewModel?.() ?? null,
       tokenUsage: stableTokenUsage,
@@ -462,12 +461,13 @@ export async function runInjector({
       currentAccountId: viewModel.currentAccountId,
       operation: viewModel.operation,
       context: viewModel.context,
-      deepSeek: viewModel.deepSeek,
       extraModels: viewModel.extraModels,
       network: viewModel.network,
       hostHealth,
     };
     const staticJson = JSON.stringify(staticViewModel);
+    const { extraModels: _extraModels, ...staticCoreViewModel } = staticViewModel;
+    const staticCoreJson = JSON.stringify(staticCoreViewModel);
     const nextTokenUsageSignatures = new Map();
     const tokenUsageUpdates = [];
     for (const turn of Array.isArray(stableTokenUsage.turns) ? stableTokenUsage.turns : []) {
@@ -489,12 +489,26 @@ export async function runInjector({
       (stableTokenUsage.error ?? null) !== lastTokenUsageError ||
       tokenUsageUpdates.length > 0 || removedTurnIds.length > 0;
     if (staticJson !== lastStaticJson) {
-      await currentCdp.evaluate(widget.widgetUpdateExpressionJson(
-        JSON.stringify({ ...staticViewModel, tokenUsage: stableTokenUsage }),
-        ++widgetUpdateRevision,
-      ));
+      if (lastStaticJson != null && staticCoreJson === lastStaticCoreJson) {
+        await currentCdp.evaluate(widget.widgetExtraModelsUpdateExpressionJson(
+          JSON.stringify(staticViewModel.extraModels),
+          ++widgetUpdateRevision,
+        ));
+        if (tokenUsageChanged) {
+          await currentCdp.evaluate(widget.widgetTokenUsageDeltaUpdateExpressionJson(
+            JSON.stringify(tokenUsageDelta),
+            ++widgetUpdateRevision,
+          ));
+        }
+      } else {
+        await currentCdp.evaluate(widget.widgetUpdateExpressionJson(
+          JSON.stringify({ ...staticViewModel, tokenUsage: stableTokenUsage }),
+          ++widgetUpdateRevision,
+        ));
+      }
       if (cdp === currentCdp) {
         lastStaticJson = staticJson;
+        lastStaticCoreJson = staticCoreJson;
         lastTokenUsageSignatures = nextTokenUsageSignatures;
         lastTokenUsageStatus = stableTokenUsage.status;
         lastTokenUsageError = stableTokenUsage.error ?? null;
@@ -544,6 +558,12 @@ export async function runInjector({
       console.error(`[model-router] 网络状态 Widget 刷新失败: ${error.message}`);
     });
   }) ?? (() => {});
+  removeExtraModelListener = extraModelManager.onChange?.(() => {
+    markWidgetDataDirty();
+    void requestWidgetUpdate().catch((error) => {
+      console.error(`[extra-models] 面板状态刷新失败: ${error.message}`);
+    });
+  }) ?? (() => {});
 
   async function startAction(action) {
     markWidgetDataDirty();
@@ -551,6 +571,7 @@ export async function runInjector({
       switch (action?.type) {
         case "host-health-recheck":
           hostHealthActionError = null;
+          await requestHostToolReload(getLaunchOptions?.()?.relay);
           lastHostHealthCheckAt = 0;
           await syncHostHealth({ force: true });
           break;
@@ -622,29 +643,32 @@ export async function runInjector({
           await contextManager.resetAll();
           await restartForConfigurationChange({ context: true });
           break;
-        case "deepseek-save":
-          await deepSeekManager.save({ apiKey: action.apiKey, enabled: action.enabled });
-          await restartForConfigurationChange({ modelProviders: true });
+        case "extra-deepseek-refresh-balance":
+          await extraModelManager.refreshDeepSeekBalance();
           break;
-        case "deepseek-remove":
-          await deepSeekManager.remove();
-          await restartForConfigurationChange({ modelProviders: true });
-          break;
-        case "deepseek-refresh-balance":
-          await deepSeekManager.refreshBalance();
-          break;
-        case "extra-platform-save":
+        case "extra-platform-save": {
           await extraModelManager.savePlatform(action.platform, {
-            reservedModelIds: [
-              ...contextManager.getViewModel().models.map((model) => model.slug),
-              deepSeekManager.getViewModel().model.slug,
-            ],
+            reservedModelIds: contextManager.getViewModel().models.map((model) => model.slug),
           });
-          await restartForConfigurationChange({ modelProviders: true });
+          if (action.platform?.preset === "deepseek" && action.platform?.apiKey) {
+            await extraModelManager.refreshDeepSeekBalance().catch((error) => {
+              console.error(`[deepseek-balance] ${error.message}`);
+            });
+            scheduleDeepSeekBalanceRefresh();
+          }
           break;
+        }
+        case "extra-platform-models-refresh":
+          await extraModelManager.refreshPresetModels(action.platform);
+          break;
+        case "extra-platform-detect": {
+          await extraModelManager.redetectPlatform(action.platformId, {
+            reservedModelIds: contextManager.getViewModel().models.map((model) => model.slug),
+          });
+          break;
+        }
         case "extra-platform-remove":
           await extraModelManager.removePlatform(action.platformId);
-          await restartForConfigurationChange({ modelProviders: true });
           break;
         case "switch-account":
           await accountManager.switchAccount(action.accountId);
@@ -662,11 +686,8 @@ export async function runInjector({
       if (String(action?.type ?? "").startsWith("context-")) {
         contextManager.setError(error.message);
       }
-      if (String(action?.type ?? "").startsWith("deepseek-") &&
-        action?.type !== "deepseek-refresh-balance") {
-        deepSeekManager.setError(error.message);
-      }
-      if (String(action?.type ?? "").startsWith("extra-platform-")) {
+      if (String(action?.type ?? "").startsWith("extra-platform-") &&
+        action?.type !== "extra-deepseek-refresh-balance") {
         extraModelManager.setError(error.message);
       }
       console.error(`[action] ${error.message}`);
@@ -678,6 +699,7 @@ export async function runInjector({
     try {
       const options = await prepareLaunch();
       await restartCodex(port, options);
+      extraModelManager.markRestarted();
       if (options.officialCatalogChanged) {
         if (options.officialCatalogSource === "bundled") {
           contextManager.markBundledCatalogCurrent({ restarted: true });
@@ -698,6 +720,7 @@ export async function runInjector({
       const options = await prepareLaunch();
       if (options.preparationError) throw new Error(options.preparationError);
       await restartCodex(port, options);
+      extraModelManager.markRestarted();
       resetAfterCodexRestart();
       lastHostHealthCheckAt = 0;
       await syncHostHealth({ force: true });
@@ -706,7 +729,7 @@ export async function runInjector({
     }
   }
 
-  async function restartForConfigurationChange({ context = false, modelProviders = false } = {}) {
+  async function restartForConfigurationChange({ context = false } = {}) {
     restartingCodex = true;
     try {
       const options = await prepareLaunch();
@@ -714,11 +737,8 @@ export async function runInjector({
         throw new Error(`模型中继准备失败，配置尚未生效：${options.preparationError}`);
       }
       await restartCodex(port, options);
+      extraModelManager.markRestarted();
       if (context) contextManager.markRestarted();
-      if (modelProviders) {
-        deepSeekManager.markRestarted();
-        extraModelManager.markRestarted();
-      }
       scheduleDeepSeekBalanceRefresh();
       resetAfterCodexRestart();
     } finally {
@@ -788,6 +808,7 @@ export async function runInjector({
               : "[models] 模型中继目录版本已变化，正在重启 Codex 重新加载",
           );
           await restartCodex(port, options);
+          extraModelManager.markRestarted();
           if (catalogReloadRequired) {
             if (options.officialCatalogSource === "bundled") {
               contextManager.markBundledCatalogCurrent({ restarted: true });
@@ -830,11 +851,11 @@ export async function runInjector({
 
   function scheduleDeepSeekBalanceRefresh() {
     clearTimeout(deepSeekBalanceTimer);
-    const deepSeek = deepSeekManager.getViewModel();
-    if (stopped || !deepSeek.enabled || !deepSeek.configured) return;
+    const target = deepSeekBalanceTarget();
+    if (stopped || !target) return;
     deepSeekBalanceTimer = setTimeout(async () => {
       try {
-        await deepSeekManager.refreshBalance();
+        await target.refresh();
       } catch (error) {
         console.error(`[deepseek-balance] ${error.message}`);
       } finally {
@@ -847,6 +868,12 @@ export async function runInjector({
     }, DEEPSEEK_BALANCE_REFRESH_MS);
   }
 
+  function deepSeekBalanceTarget() {
+    const managed = extraModelManager.getViewModel().platforms
+      .find((platform) => platform.preset === "deepseek" && platform.enabled && platform.apiKey);
+    return managed ? { refresh: () => extraModelManager.refreshDeepSeekBalance() } : null;
+  }
+
   if (once) {
     await runQuotaRefresh();
   } else {
@@ -857,9 +884,9 @@ export async function runInjector({
     });
     void runQuotaRefresh();
     scheduleModelCatalogRefresh();
-    const deepSeek = deepSeekManager.getViewModel();
-    if (deepSeek.enabled && deepSeek.configured) {
-      void deepSeekManager.refreshBalance()
+    const balanceTarget = deepSeekBalanceTarget();
+    if (balanceTarget) {
+      void balanceTarget.refresh()
         .then(() => {
           markWidgetDataDirty();
           return requestWidgetUpdate();
@@ -900,7 +927,10 @@ export async function runInjector({
       restartingCodex = true;
       try {
         const restarted = await recoverLaunch();
-        if (restarted) resetAfterCodexRestart();
+        if (restarted) {
+          extraModelManager.markRestarted();
+          resetAfterCodexRestart();
+        }
       } catch (error) {
         console.error(`[lifecycle] Codex 启动状态恢复失败: ${error.message}`);
       } finally {

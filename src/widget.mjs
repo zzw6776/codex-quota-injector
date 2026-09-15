@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 128;
+export const WIDGET_RUNTIME_VERSION = 156;
 
 export function paginateGenerationDetails(details, visibleCount = 20) {
   const ordered = Array.isArray(details)
@@ -141,12 +141,14 @@ export function formatGenerationPhaseText(detail) {
 
 export function generationToolRows(detail) {
   if (Array.isArray(detail?.toolExecutions?.calls)) return detail.toolExecutions.calls;
-  // Older router records know the outer calls, not executions inside exec.
-  // Preserve their identities but do not present wrapper time as child time.
+  // Older router records know only the outer call round trip. Preserve that
+  // useful timing while labelling its source instead of presenting it as a
+  // native child execution duration.
   const calls = Array.isArray(detail?.toolTiming?.calls) && detail.toolTiming.calls.length
     ? detail.toolTiming.calls
     : (Array.isArray(detail?.toolNames) ? detail.toolNames.map((toolName) => ({ toolName })) : []);
-  return calls.map((call) => ({ toolName: call.toolName, description: "单项明细未记录", durationMs: null }));
+  return calls.map((call) => ({ toolName: call.toolName, description: "调用耗时",
+    durationMs: call.durationMs ?? null, durationSource: call.toolName === "exec" ? "outer-exec" : "outer-call" }));
 }
 
 export function generationExecutionRemainder(detail) {
@@ -197,9 +199,13 @@ export function createGenerationToolRow(document, call, formatDuration) {
   duration.textContent = `${call?.approximate && call.durationMs != null ? "约" : ""}${durationText}`;
   duration.title = call?.durationMs == null
     ? "当前记录没有可确认的单项耗时，不拆分外层执行时间"
-    : call?.approximate
-      ? "整体调用耗时扣除子工具上报耗时覆盖区间后的剩余值，不能直接归因为网络或调度耗时"
-      : "此工具自身上报的执行耗时；同组工具可能并行，耗时不能直接相加";
+    : call?.durationSource === "outer-exec"
+      ? "由外层 exec 计时：从调用发出到结果回传的往返耗时，包含嵌套工具、调度和结果处理，不等同于子工具自身执行耗时"
+      : call?.durationSource === "outer-call"
+        ? "由外层工具调用计时：从调用发出到结果回传的往返耗时，包含调度和结果处理，不等同于工具自身上报的执行耗时"
+      : call?.approximate
+        ? "整体调用耗时扣除子工具上报耗时覆盖区间后的剩余值，不能直接归因为网络或调度耗时"
+        : "此工具自身上报的执行耗时；同组工具可能并行，耗时不能直接相加";
   row.append(name, duration);
   if (entries.length === 0) return row;
 
@@ -404,7 +410,7 @@ export function installQuotaWidget(
   const MAX_CONVERSATION_USAGE_CACHE = 240;
   const CONVERSATION_TOOLTIP_DELAY_MS = 500;
   const ACCOUNT_TOOLTIP_DELAY_MS = 300;
-  const CUSTOM_REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"];
+  const CUSTOM_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   if (window[GLOBAL_KEY]?.version === VERSION) return VERSION;
   try {
     window[GLOBAL_KEY]?.destroy?.();
@@ -443,6 +449,52 @@ export function installQuotaWidget(
     }
   }
 
+  function currentDeepSeekBalanceView() {
+    const extraModels = state.data.extraModels ?? {};
+    const managed = extraModels.platforms?.find?.((platform) =>
+      platform?.preset === "deepseek" && platform?.apiKey);
+    const balance = extraModels.deepSeekBalance ?? {};
+    return {
+      configured: Boolean(managed),
+      balance: balance.balance ?? null,
+      updatedAt: balance.updatedAt ?? null,
+      error: balance.error ?? null,
+      refreshing: Boolean(balance.refreshing),
+    };
+  }
+
+  function renderPanelBalance() {
+    const accounts = Array.isArray(state.data.accounts) ? state.data.accounts : [];
+    const currentAccount = accounts.find((account) => account.current) ?? accounts[0] ?? null;
+    const credits = currentAccount?.credits ?? state.data.credits ?? null;
+    const codexBalance = !credits
+      ? ""
+      : credits.unlimited
+        ? "无限"
+        : credits.formattedUsd ||
+          (Number.isFinite(credits.creditQuantity) ? `${credits.creditQuantity} 点` : "");
+    const deepSeekBalance = (currentDeepSeekBalanceView().balance?.items ?? [])
+      .map((item) => `${escapeHtml(item.currency)} ${escapeHtml(item.totalBalance)}`)
+      .join(" · ");
+    const items = [];
+    if (codexBalance) items.push(`Codex 余额 ${escapeHtml(codexBalance)}`);
+    if (deepSeekBalance) items.push(`DeepSeek 余额 ${deepSeekBalance}`);
+    return items.length
+      ? `<span class="panel-balance">${items.join(" · ")}</span>`
+      : "";
+  }
+
+  function patchPanelBalance(wrap) {
+    const current = wrap.querySelector(".panel-balance");
+    const next = renderPanelBalance();
+    if (current) {
+      if (next) current.outerHTML = next;
+      else current.remove();
+    } else if (next) {
+      wrap.querySelector(".panel-version-text")?.insertAdjacentHTML("beforebegin", next);
+    }
+  }
+
   const state = {
     data: {
       accounts: [],
@@ -451,7 +503,6 @@ export function installQuotaWidget(
       currentAccountId: null,
       operation: null,
       context: { status: "unavailable", models: [], overriddenCount: 0 },
-      deepSeek: { enabled: false, apiKey: "", balance: null },
       extraModels: { platforms: [] },
       tokenUsage: { status: "ready", turns: [] },
       hostHealth: { required: false, status: "direct" },
@@ -473,10 +524,13 @@ export function installQuotaWidget(
     wakeupDrafts: new Map(),
     accountTooltipTimer: null,
     contextEditingSlug: null,
-    deepSeekKeyDraft: null,
-    deepSeekEnabledDraft: null,
-    deepSeekSubmittedKey: null,
     extraPlatformDraft: null,
+    extraModelDiscoveryRevision: 0,
+    extraModelOperationDraft: null,
+    detailPanelBaseSize: null,
+    detailPanelSize: null,
+    detailPanelResize: null,
+    detailPanelResizeCleanup: null,
     conversationRenderFrame: null,
     conversationTooltip: null,
     conversationTooltipBridge: null,
@@ -522,22 +576,31 @@ export function installQuotaWidget(
     .is-warning { color: #d97706 !important; }
     .is-critical { color: #dc4c3f !important; }
     .quota-popover {
-      position: fixed; inset: auto auto 58px 12px; margin: 0; width: min(430px, calc(100vw - 24px));
-      max-height: 720px; overflow: auto;
-      overflow-anchor: none;
-      padding: 14px; border-radius: 16px;
+      position: fixed; inset: auto auto 58px 12px; margin: 0;
+      width: min(430px, calc(100vw - 24px)); max-height: 720px; overflow: hidden;
+      padding: 0; border-radius: 16px;
       color: var(--token-foreground, #f4f4f7); background: var(--token-main-surface-primary, #191923);
+      background-clip: padding-box;
       border: 1px solid var(--token-border, rgba(255,255,255,.09));
       box-shadow: 0 16px 44px rgba(0,0,0,.38);
       opacity: 0; visibility: hidden; transform: translateY(5px) scale(.985);
       transform-origin: right bottom; pointer-events: none;
       transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
     }
-    .quota-popover.context-popover { width: min(620px, calc(100vw - 24px)); }
-    .quota-popover.provider-popover { width: min(520px, calc(100vw - 24px)); }
-    .quota-popover.wakeup-popover { width: min(520px, calc(100vw - 24px)); }
-    .quota-popover.migration-popover { width: min(540px, calc(100vw - 24px)); }
-    .quota-popover.extra-models-popover { width: min(660px, calc(100vw - 24px)); }
+    .panel-scroll {
+      width: 100%; max-height: inherit; overflow: auto; overflow-anchor: none;
+      padding: 14px; border-radius: inherit;
+    }
+    .detail-popover { padding: 6px 6px 0 0; }
+    .detail-popover .panel-scroll {
+      height: 100%; padding: 8px 8px 14px 14px;
+    }
+    .panel-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+    .panel-scroll::-webkit-scrollbar-track { margin-block: 12px; background: transparent; }
+    .panel-scroll::-webkit-scrollbar-thumb {
+      border: 3px solid transparent; border-radius: 999px; background: rgba(127,127,137,.62);
+      background-clip: content-box;
+    }
     .quota-wrap.is-open .quota-popover {
       opacity: 1; visibility: visible; transform: translateY(0) scale(1); pointer-events: auto;
     }
@@ -710,29 +773,60 @@ export function installQuotaWidget(
     .wakeup-form { margin-top: 9px; padding: 0; }
     .extra-platform-list { display: grid; gap: 8px; }
     .extra-platform-card { padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
-    .extra-platform-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .extra-platform-card .btn { padding: 2px 7px; border-radius: 7px; font-size: 10px; line-height: 16px; }
+    .extra-platform-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .extra-platform-head .badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
     .extra-platform-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
     .extra-platform-url { margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--token-text-secondary, #aaaab5); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .extra-platform-meta { margin-top: 6px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
-    .extra-platform-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .extra-platform-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
     .extra-platform-form { display: grid; gap: 9px; padding: 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
     .extra-models-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 3px; font-size: 11px; font-weight: 650; }
     .extra-model-list { display: grid; gap: 7px; }
-    .extra-model-row { display: grid; grid-template-columns: minmax(120px,1fr) minmax(110px,1fr) 94px auto auto auto; align-items: end; gap: 6px; padding: 8px; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; }
+    .extra-model-row { display: grid; grid-template-columns: minmax(0,1fr); align-items: end; gap: 7px; padding: 8px; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; }
     .extra-model-row .provider-field { min-width: 0; }
     .extra-model-row .provider-toggle { align-self: center; white-space: nowrap; }
-    .extra-model-remove { align-self: end; }
-    .extra-model-reasoning { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) 132px; align-items: end; gap: 8px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,.07); }
+    .extra-model-remove { justify-self: end; }
+    .extra-model-capabilities { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .extra-model-capabilities .model-label { margin-right: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+    .extra-model-capabilities .badge.pending { color: #e5b86a; }
+    .extra-platform-model-status { display: grid; gap: 5px; margin-top: 7px; }
+    .extra-platform-progress:empty, .extra-model-feedback:empty { display: none; }
+    .extra-platform-progress .operation, .extra-model-feedback .operation { margin-top: 7px; white-space: normal; overflow-wrap: anywhere; }
+    .extra-model-progress { display: flex; align-items: flex-start; gap: 7px; }
+    .extra-model-progress::before { content: ""; width: 10px; height: 10px; flex: 0 0 auto; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: extra-model-spin .8s linear infinite; }
+    .extra-model-progress-body { display: grid; flex: 1 1 auto; min-width: 0; gap: 5px; }
+    .extra-model-progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .extra-model-progress-title { min-width: 0; overflow-wrap: anywhere; }
+    .extra-model-progress-percent { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+    .extra-model-progress-track { height: 4px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.09); }
+    .extra-model-progress-track i { display: block; height: 100%; border-radius: inherit; background: currentColor; transition: width .18s ease; }
+    .extra-model-progress-detail { color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    @keyframes extra-model-spin { to { transform: rotate(360deg); } }
+    .extra-model-reasoning { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr); align-items: end; gap: 8px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,.07); }
     .extra-model-efforts { display: flex; flex-wrap: wrap; gap: 6px 10px; }
     .extra-model-efforts-label { width: 100%; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
     .extra-model-efforts .provider-toggle { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+    .preset-model-picker { border: 1px solid rgba(255,255,255,.07); border-radius: 9px; overflow: hidden; }
+    .preset-model-picker summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 9px; cursor: pointer; color: inherit; }
+    .preset-model-picker summary::marker { color: var(--token-text-secondary, #aaaab5); }
+    .preset-model-options { display: grid; gap: 0; padding: 0 9px 7px; }
+    .preset-model-option { display: grid; gap: 7px; padding: 7px 0; border-top: 1px solid rgba(255,255,255,.07); }
+    .preset-model-option-select { display: grid; grid-template-columns: auto minmax(0,1fr); align-items: start; gap: 7px; }
+    .preset-model-option-select > input { width: auto; margin: 2px 0 0; }
+    .preset-model-option-main { min-width: 0; }
+    .preset-model-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 650; }
+    .preset-model-option-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--token-text-secondary, #aaaab5); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .preset-model-context { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 6px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .preset-model-context input { min-width: 0; margin: 0; }
+    .preset-platform-note { display: grid; gap: 3px; padding: 8px 9px; border-radius: 8px; background: rgba(255,255,255,.035); color: var(--token-text-secondary, #aaaab5); font-size: 10px; line-height: 15px; }
     .balance-section { margin-top: 10px; }
     .balance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; font-size: 11px; }
     .balance-grid { display: grid; gap: 7px; }
-    .balance-card { padding: 9px 10px; border: 1px solid rgba(255,255,255,.07); border-radius: 10px; background: rgba(255,255,255,.025); }
-    .balance-currency { color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
-    .balance-total { margin-top: 3px; font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .balance-detail { margin-top: 4px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
+    .balance-card { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 9px 10px; border: 1px solid rgba(255,255,255,.07); border-radius: 10px; background: rgba(255,255,255,.025); font-size: 10px; white-space: nowrap; }
+    .balance-currency { flex: 0 0 auto; color: var(--token-text-secondary, #aaaab5); font-size: inherit; }
+    .balance-total { flex: 0 0 auto; font-size: inherit; font-weight: inherit; font-variant-numeric: tabular-nums; }
+    .balance-detail { min-width: 0; margin-left: auto; overflow: hidden; color: var(--token-text-secondary, #aaaab5); font-size: inherit; text-overflow: ellipsis; }
     .quota-wrap.is-light .quota-popover { color: #202124; background: #fff; border-color: rgba(0,0,0,.12); box-shadow: 0 16px 44px rgba(0,0,0,.18); }
     .quota-wrap.is-light .account-card { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }
     .quota-wrap.is-light .account-card.current { border-color: rgba(116,69,143,.35); background: rgba(116,69,143,.055); }
@@ -765,6 +859,7 @@ export function installQuotaWidget(
     .quota-wrap.is-light .add-panel, .quota-wrap.is-light .panel-version, .quota-wrap.is-light details { border-color: rgba(0,0,0,.09); }
     .quota-wrap.is-light input, .quota-wrap.is-light textarea, .quota-wrap.is-light select { color: #202124; border-color: rgba(0,0,0,.13); background: rgba(0,0,0,.025); }
     .quota-wrap.is-light .operation { color: #666670; background: rgba(0,0,0,.04); }
+    .quota-wrap.is-light .extra-model-progress-track { background: rgba(0,0,0,.09); }
     .quota-wrap.is-light .context-summary, .quota-wrap.is-light .model-card,
     .quota-wrap.is-light .provider-summary, .quota-wrap.is-light .provider-form,
     .quota-wrap.is-light .balance-card, .quota-wrap.is-light .extra-platform-card,
@@ -834,10 +929,11 @@ export function installQuotaWidget(
   function render() {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (!wrap) return;
+    cancelDetailPanelResize();
     hideAccountTooltip();
-    const previousPopover = wrap.querySelector(".quota-popover");
-    const previousScrollTop = previousPopover?.scrollTop ?? 0;
-    const previousScrollLeft = previousPopover?.scrollLeft ?? 0;
+    const previousScroller = wrap.querySelector(".panel-scroll");
+    const previousScrollTop = previousScroller?.scrollTop ?? 0;
+    const previousScrollLeft = previousScroller?.scrollLeft ?? 0;
     const wakeupFocus = state.shadow.activeElement?.closest?.(".wakeup-popover")
       ? state.shadow.activeElement.id : null;
     wrap.classList.toggle("is-light", isLightTheme());
@@ -887,7 +983,6 @@ export function installQuotaWidget(
       : "";
     const busy = state.data.operation?.state === "loading";
     const contextPage = state.page === "context";
-    const providerPage = state.page === "provider";
     const extraModelsPage = state.page === "extra-models";
     const wakeupPage = state.page === "wakeup";
     const migrationPage = state.page === "migration";
@@ -897,37 +992,15 @@ export function installQuotaWidget(
       : state.data.injectionMode === "windows"
         ? { label: "Windows", title: "注入运行时：Windows" }
         : null;
-    const codexBalance = (() => {
-      const credits = currentCredits;
-      if (!credits) return "";
-      if (credits.unlimited) return "无限";
-      if (credits.formattedUsd) return credits.formattedUsd;
-      if (Number.isFinite(credits.creditQuantity)) return `${credits.creditQuantity} 点`;
-      return "";
-    })();
-    const deepSeekBalance = (() => {
-      const provider = state.data.deepSeek ?? {};
-      const items = Array.isArray(provider.balance?.items) ? provider.balance.items : [];
-      return items
-        .map((item) => `${escapeHtml(item.currency)} ${escapeHtml(item.totalBalance)}`)
-        .join(" · ");
-    })();
-    const balanceItems = [];
-    if (codexBalance) balanceItems.push(`Codex 余额 ${codexBalance}`);
-    if (deepSeekBalance) balanceItems.push(`DeepSeek 余额 ${deepSeekBalance}`);
-    const balanceHtml = balanceItems.length
-      ? `<span class="panel-balance">${balanceItems.join(" · ")}</span>`
-      : "";
+    const balanceHtml = renderPanelBalance();
     const popoverClass = contextPage
-      ? "quota-popover context-popover"
+      ? "quota-popover detail-popover context-popover"
       : wakeupPage
-        ? "quota-popover wakeup-popover"
+        ? "quota-popover detail-popover wakeup-popover"
       : migrationPage
-        ? "quota-popover migration-popover"
-      : providerPage
-        ? "quota-popover provider-popover"
-        : extraModelsPage
-          ? "quota-popover extra-models-popover"
+        ? "quota-popover detail-popover migration-popover"
+      : extraModelsPage
+          ? "quota-popover detail-popover extra-models-popover"
         : "quota-popover";
     const popoverContent = contextPage
       ? renderContextPage(busy)
@@ -935,16 +1008,13 @@ export function installQuotaWidget(
         ? renderWakeupPage(busy)
       : migrationPage
         ? renderMigrationPage(accounts, busy, operation)
-      : providerPage
-        ? renderProviderPage()
-        : extraModelsPage
+      : extraModelsPage
           ? renderExtraModelsPage()
         : `
         <header class="panel-head accounts-head">
           <div class="panel-title-wrap">
             <div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div>
-            <button class="icon-btn provider-icon-btn provider-open" type="button" aria-label="DeepSeek 设置" title="DeepSeek 设置"><span aria-hidden="true">DS</span></button>
-            <button class="icon-btn provider-icon-btn extra-models-open" type="button" aria-label="额外模型管理" title="额外模型管理"><span aria-hidden="true">M+</span></button>
+            <button class="icon-btn provider-icon-btn extra-models-open" type="button" aria-label="模型管理" title="模型管理"><span aria-hidden="true">M+</span></button>
             <button class="icon-btn provider-icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.3 2.2h3.4l.5 2.6 3 1.7 2.5-.9 1.7 2.9-2 1.8v3.4l2 1.8-1.7 2.9-2.5-.9-3 1.7-.5 2.6h-3.4l-.5-2.6-3-1.7-2.5.9-1.7-2.9 2-1.8v-3.4l-2-1.8 1.7-2.9 2.5.9 3-1.7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
             <button class="icon-btn provider-icon-btn wakeup-open" type="button" aria-label="定时任务" title="定时任务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h6"/></svg></button>
           </div>
@@ -970,12 +1040,13 @@ export function installQuotaWidget(
       : "";
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="${hostHealth.status === "degraded" ? "Codex 任务工具异常；查看账号额度与诊断" : "查看账号额度"}">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : providerPage ? "DeepSeek 设置" : extraModelsPage ? "额外模型管理" : "Codex 账号与额度"}">${hostHealthBanner}${popoverContent}${versionFooter}</section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${versionFooter}</div></section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       nextPopover.showPopover();
-      nextPopover.scrollTop = previousScrollTop;
-      nextPopover.scrollLeft = previousScrollLeft;
+      const nextScroller = nextPopover.querySelector(".panel-scroll");
+      nextScroller.scrollTop = previousScrollTop;
+      nextScroller.scrollLeft = previousScrollLeft;
     }
     positionPopover(wrap);
     bindEvents(wrap);
@@ -1002,7 +1073,7 @@ export function installQuotaWidget(
       <div>${escapeHtml(health.message ?? title)}</div>
       ${detail ? `<div class="host-health-detail">${escapeHtml(detail)}</div>` : ""}
       ${missing}
-      <div class="host-health-actions"><button class="btn host-health-recheck" type="button">重新检查</button>${restart}${logs}</div>
+      <div class="host-health-actions"><button class="btn host-health-recheck" type="button">重新加载并检查</button>${restart}${logs}</div>
     </aside>`;
   }
 
@@ -1039,7 +1110,7 @@ export function installQuotaWidget(
       } else if (health?.message) {
         details.push(String(health.message));
       }
-      details.push("建议：先重新检查，仍异常则重启 Codex");
+      details.push("建议：先重新加载并检查，仍异常则重启 Codex");
       if (missingTools.length) details.push(`诊断：${missingTools.join("、")} 未注册`);
       if (health?.detail) details.push(`详情：${health.detail}`);
       if (health?.actionError) details.push(`操作失败：${health.actionError}`);
@@ -1842,35 +1913,20 @@ export function installQuotaWidget(
       ${statusMessage}`;
   }
 
-  function renderProviderPage() {
-    const provider = state.data.deepSeek ?? {};
-    const key = state.deepSeekKeyDraft ?? provider.apiKey ?? "";
-    const enabled = state.deepSeekEnabledDraft ?? Boolean(provider.enabled);
-    const configured = Boolean(provider.apiKey);
-    const supported = provider.supported !== false;
-    const pendingRestart = Boolean(provider.pendingRestart);
-    const balanceItems = Array.isArray(provider.balance?.items) ? provider.balance.items : [];
-    const balanceHtml = balanceItems.length
-      ? balanceItems.map((item) => `<div class="balance-card"><div class="balance-currency">${escapeHtml(item.currency)}</div><div class="balance-total">${escapeHtml(item.totalBalance)}</div><div class="balance-detail">赠送余额 ${escapeHtml(item.grantedBalance)} · 充值余额 ${escapeHtml(item.toppedUpBalance)}</div></div>`).join("")
+  function renderManagedDeepSeekBalance(data, platform) {
+    const view = data?.deepSeekBalance ?? {};
+    const configured = Boolean(platform?.apiKey);
+    const items = Array.isArray(view.balance?.items) ? view.balance.items : [];
+    const cards = items.length
+      ? items.map((item) => `<div class="balance-card"><div class="balance-currency">${escapeHtml(item.currency)}</div><div class="balance-total">${escapeHtml(item.totalBalance)}</div><div class="balance-detail">赠送余额 ${escapeHtml(item.grantedBalance)} · 充值余额 ${escapeHtml(item.toppedUpBalance)}</div></div>`).join("")
       : `<div class="context-empty">${configured ? "暂无可用余额数据" : "保存 API Key 后可查询余额"}</div>`;
-    const statusMessage = provider.message
-      ? `<div class="operation ${provider.messageState === "error" ? "error" : "success"}">${escapeHtml(provider.message)}</div>`
+    const error = view.error
+      ? `<div class="quota-error">${escapeHtml(view.error)}（保留上次成功余额）</div>`
       : "";
-    const balanceError = provider.balanceError
-      ? `<div class="quota-error">${escapeHtml(provider.balanceError)}（保留上次成功余额）</div>`
+    const status = view.balance
+      ? ` · ${view.balance.available ? "账户可用" : "账户不可用"}`
       : "";
-    return `
-      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn provider-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">DeepSeek 模型</div><div class="panel-subtitle">${escapeHtml(provider.model?.displayName ?? "DeepSeek V4 Flash")} · 推理深度 low / high / max</div></div></div>${renderPanelControls()}</header>
-      <section class="provider-summary"><div class="provider-status"><span class="${provider.enabled ? "enabled" : "disabled"}">${provider.enabled ? "已启用" : "未启用"}</span><span class="badge">${escapeHtml(provider.model?.slug ?? "deepseek-v4-flash")}</span></div><div class="provider-note">启用后，OpenAI 官方模型和 DeepSeek 会同时出现在模型列表。供应商在新建任务时确定，同一任务不能中途切换。</div></section>
-      <form class="provider-form deepseek-form">
-        <label class="provider-toggle"><input name="enabled" type="checkbox" ${enabled ? "checked" : ""} ${supported && !pendingRestart ? "" : "disabled"}>在模型列表中启用 DeepSeek</label>
-        <div class="provider-field"><label>DeepSeek API Key（本地明文保存并完整回显）</label><input class="provider-key" name="apiKey" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(key)}" placeholder="sk-..." ${supported && !pendingRestart ? "" : "disabled"}></div>
-        <div class="provider-warning">Key 保存在 ${escapeHtml(provider.settingsPath ?? "本地 provider-settings.json")}；不会写入系统安全存储。保存、停用或删除后都会重启 Codex。</div>
-        <div class="provider-actions"><button class="btn deepseek-remove" type="button" ${configured && !pendingRestart ? "" : "disabled"}>删除并重启 Codex</button><button class="btn primary" type="submit" ${supported && !pendingRestart ? "" : "disabled"}>保存并重启 Codex</button></div>
-        ${supported ? "" : '<div class="quota-error">DeepSeek 模型共存当前仅支持 macOS 和 Windows。</div>'}
-      </form>
-      ${statusMessage}
-      <section class="balance-section"><div class="balance-head"><span>账户余额${provider.balance ? ` · ${provider.balance.available ? "账户可用" : "账户不可用"}` : ""} · ${escapeHtml(formatUpdatedAt(provider.balanceUpdatedAt))}</span><button class="btn deepseek-refresh-balance" type="button" ${!configured || provider.balanceRefreshing ? "disabled" : ""}>${provider.balanceRefreshing ? "查询中" : "查询余额"}</button></div><div class="balance-grid">${balanceHtml}</div>${balanceError}</section>`;
+    return `<section class="balance-section managed-deepseek-balance" data-platform-id="${escapeHtml(platform?.id ?? "")}"><div class="balance-head"><span>账户余额${status} · ${escapeHtml(formatUpdatedAt(view.updatedAt))}</span><button class="btn extra-deepseek-refresh-balance" type="button" ${!configured || view.refreshing ? "disabled" : ""}>${view.refreshing ? "查询中" : "查询余额"}</button></div><div class="balance-grid">${cards}</div>${error}</section>`;
   }
 
   function renderExtraModelsPage() {
@@ -1878,33 +1934,159 @@ export function installQuotaWidget(
     const platforms = Array.isArray(data.platforms) ? data.platforms : [];
     const supported = data.supported !== false;
     const pendingRestart = Boolean(data.pendingRestart);
+    const modelOperation = data.operation ?? state.extraModelOperationDraft;
+    const operationBusy = modelOperation?.state === "loading";
     const catalogConflicts = Array.isArray(data.catalogConflicts) ? data.catalogConflicts : [];
-    const statusMessage = data.message
-      ? `<div class="operation ${data.messageState === "error" ? "error" : "success"}">${escapeHtml(data.message)}</div>`
-      : "";
+    const statusMessage = renderExtraModelFeedback(data, modelOperation);
     const catalogConflictMessage = catalogConflicts.length
       ? `<div class="quota-error">以下自定义模型 ID 已被新官方目录占用，本次注入优先使用官方模型，其他自定义模型不受影响：${catalogConflicts.map((item) => escapeHtml(item.modelId)).join("、")}</div>`
       : "";
     const content = state.extraPlatformDraft
-      ? renderExtraPlatformForm(state.extraPlatformDraft, supported && !pendingRestart)
-      : `<div class="extra-platform-toolbar"><span>先添加平台，再在平台下配置一个或多个 Responses 模型</span><button class="btn primary extra-platform-add" type="button" ${supported && !pendingRestart ? "" : "disabled"}>添加平台</button></div>
+      ? renderExtraPlatformForm(state.extraPlatformDraft, supported && !operationBusy)
+      : `<div class="extra-platform-toolbar"><span>DeepSeek 已内置；其他兼容平台仍可手动添加</span><button class="btn primary extra-platform-add" type="button" ${supported && !operationBusy ? "" : "disabled"}>添加平台</button></div>
         <div class="extra-platform-list">${platforms.length
-          ? platforms.map((platform) => `<article class="extra-platform-card">
-              <div class="extra-platform-head"><div class="extra-platform-name">${escapeHtml(platform.name)}</div><div class="badges"><span class="badge ${platform.enabled ? "current" : ""}">${platform.enabled ? "已启用" : "未启用"}</span><button class="btn extra-platform-edit" type="button" data-platform-id="${escapeHtml(platform.id)}" ${pendingRestart ? "disabled" : ""}>编辑</button></div></div>
+          ? platforms.map((platform) => `<article class="extra-platform-card" data-platform-id="${escapeHtml(platform.id)}">
+              <div class="extra-platform-head"><div class="extra-platform-name">${escapeHtml(platform.name)}</div><div class="badges">${platform.preset === "deepseek" ? '<span class="badge">官方预设</span>' : ""}<span class="badge ${platform.enabled ? "current" : ""}">${platform.enabled ? "已启用" : "未启用"}</span><button class="btn extra-platform-detect" type="button" data-platform-id="${escapeHtml(platform.id)}" ${operationBusy || !platform.enabled ? "disabled" : ""}>${modelOperation?.platformId === platform.id && modelOperation?.phase === "detecting" ? "检测中…" : "重新检测"}</button><button class="btn extra-platform-edit" type="button" data-platform-id="${escapeHtml(platform.id)}" ${operationBusy ? "disabled" : ""}>${platform.preset === "deepseek" ? "设置" : "编辑"}</button></div></div>
               <div class="extra-platform-url">${escapeHtml(platform.baseUrl)}</div>
-              <div class="extra-platform-meta">${platform.models.length} 个模型 · ${platform.models.filter((model) => model.chatCompatibility).length ? `${platform.models.filter((model) => model.chatCompatibility).length} 个 Chat 兼容` : "原生 Responses"}</div>
+              <div class="extra-platform-meta">${platform.models.filter((model) => model.selected !== false).length} / ${platform.models.length} 个模型已选 · 自动检测连接方式和模型能力</div>
+              <div class="extra-platform-progress">${modelOperation?.platformId === platform.id ? renderExtraModelProgress(modelOperation) : ""}</div>
+              <div class="extra-platform-model-status">${platform.models.filter((model) => model.selected !== false).map((model) => renderExtraModelCompatibility(model, true)).join("")}</div>
+              ${platform.preset === "deepseek" ? renderManagedDeepSeekBalance(data, platform) : ""}
             </article>`).join("")
           : '<div class="context-empty">尚未添加额外模型平台</div>'}</div>`;
     return `
-      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn extra-models-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">额外模型管理</div><div class="panel-subtitle">Responses API · 平台与模型分层管理</div></div></div>${renderPanelControls()}</header>
-      <section class="provider-summary"><div class="provider-status"><span class="${platforms.some((platform) => platform.enabled) ? "enabled" : "disabled"}">${platforms.some((platform) => platform.enabled) ? "已配置启用平台" : "暂无启用平台"}</span><span class="badge">${platforms.length} 个平台</span></div><div class="provider-note">默认使用原生 Responses，并关闭服务端响应存储以兼容无状态平台；仅为有工具调用续传兼容问题的模型勾选 Chat 兼容。每个模型可声明支持的推理强度，留空则由平台决定。只统计 Token，不计算费用。保存、停用或删除平台后会重启 Codex。</div></section>
+      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn extra-models-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">模型管理</div><div class="panel-subtitle">平台、模型与兼容能力</div></div></div>${renderPanelControls()}</header>
+      <section class="provider-summary"><div class="provider-status"><span class="${platforms.some((platform) => platform.enabled) ? "enabled" : "disabled"}">${platforms.some((platform) => platform.enabled) ? "已配置启用平台" : "暂无启用平台"}</span><span class="badge">${platforms.length} 个平台</span>${pendingRestart ? '<span class="badge pending-restart">等待重启生效</span>' : ""}</div><div class="provider-note">启用平台时会发送少量真实模型请求，自动验证连接方式、流式输出、工具续接、推理与推理强度、模型内置联网和图片输入。上下文由你按 K 填写，不参与自动探测。检测和模型请求会产生少量 Token。</div></section>
       ${content}
       ${catalogConflictMessage}
       ${supported ? "" : '<div class="quota-error">额外模型共存当前仅支持 macOS 和 Windows。</div>'}
-      ${statusMessage}`;
+      <div class="extra-model-feedback" aria-live="polite">${statusMessage}</div>`;
+  }
+
+  function renderExtraModelFeedback(data, operation = data?.operation) {
+    if (operation?.state === "loading") return renderExtraModelProgress(operation);
+    return data?.message
+      ? `<div class="operation ${data.messageState === "error" ? "error" : "success"}">${escapeHtml(data.message)}</div>`
+      : "";
+  }
+
+  function renderExtraModelProgress(operation) {
+    if (operation?.state !== "loading") return "";
+    const current = Math.max(1, Math.floor(Number(operation.current) || 1));
+    const total = Math.max(current, Math.floor(Number(operation.total) || current));
+    const step = Math.max(0, Math.floor(Number(operation.step) || 0));
+    const steps = Math.max(step, Math.floor(Number(operation.steps) || 0));
+    if (operation.phase !== "detecting" || steps === 0) {
+      return `<div class="operation extra-model-progress" role="status">${escapeHtml(operation.message || "正在处理模型配置")}</div>`;
+    }
+    const modelProgress = Math.min(1, step / steps);
+    const percent = Math.max(1, Math.min(100, Math.round(
+      ((current - 1 + modelProgress) / total) * 100,
+    )));
+    const detail = `${step}/${steps} · ${operation.detail || "正在检测模型能力"}${operation.retry ? " · 重试中" : ""}`;
+    return `<div class="operation extra-model-progress" role="status" aria-live="polite">
+      <div class="extra-model-progress-body">
+        <div class="extra-model-progress-head"><span class="extra-model-progress-title">${escapeHtml(operation.message || "正在检测模型")}</span><span class="extra-model-progress-percent">${percent}%</span></div>
+        <span class="extra-model-progress-track" aria-hidden="true"><i style="width:${percent}%"></i></span>
+        <div class="extra-model-progress-detail">${escapeHtml(detail)}</div>
+      </div>
+    </div>`;
+  }
+
+  function applyExtraModelDiscovery(extraModels) {
+    const discovery = extraModels?.modelDiscovery;
+    if (state.extraPlatformDraft?.preset !== "deepseek" ||
+      discovery?.platformId !== state.extraPlatformDraft.id ||
+      Number(discovery.revision) <= state.extraModelDiscoveryRevision) return false;
+    state.extraModelDiscoveryRevision = Number(discovery.revision);
+    state.extraPlatformDraft = {
+      ...state.extraPlatformDraft,
+      models: Array.isArray(discovery.models)
+        ? discovery.models.map((model) => ({
+            ...model,
+            compatibility: model.compatibility ? { ...model.compatibility } : { status: "pending" },
+          }))
+        : state.extraPlatformDraft.models,
+      modelsUpdatedAt: discovery.modelsUpdatedAt ?? state.extraPlatformDraft.modelsUpdatedAt,
+    };
+    return true;
+  }
+
+  function patchExtraModelsDom(extraModels, { clearDraftOperation = false } = {}) {
+    const discoveryChanged = applyExtraModelDiscovery(extraModels);
+    state.data = { ...state.data, extraModels: extraModels ?? { platforms: [] } };
+    if (clearDraftOperation) state.extraModelOperationDraft = null;
+    const wrap = state.shadow?.querySelector(".quota-wrap");
+    if (!wrap) return;
+    patchPanelBalance(wrap);
+    if (state.page !== "extra-models") return;
+    const data = state.data.extraModels ?? {};
+    const platforms = Array.isArray(data.platforms) ? data.platforms : [];
+    const operation = data.operation ?? state.extraModelOperationDraft;
+    const busy = operation?.state === "loading";
+    const feedback = wrap.querySelector(".extra-model-feedback");
+    if (feedback) feedback.innerHTML = renderExtraModelFeedback(data, operation);
+    const pendingBadge = wrap.querySelector(".pending-restart");
+    if (data.pendingRestart && !pendingBadge) {
+      const status = wrap.querySelector(".provider-status");
+      status?.insertAdjacentHTML("beforeend", '<span class="badge pending-restart">等待重启生效</span>');
+    } else if (!data.pendingRestart) {
+      pendingBadge?.remove();
+    }
+    wrap.querySelector(".extra-platform-add")?.toggleAttribute("disabled", busy);
+    for (const card of wrap.querySelectorAll(".extra-platform-card")) {
+      const platform = platforms.find((item) => item.id === card.dataset.platformId);
+      if (!platform) continue;
+      const progress = card.querySelector(".extra-platform-progress");
+      if (progress) progress.innerHTML = operation?.platformId === platform.id
+        ? renderExtraModelProgress(operation)
+        : "";
+      const status = card.querySelector(".extra-platform-model-status");
+      if (status) status.innerHTML = platform.models
+        .filter((model) => model.selected !== false)
+        .map((model) => renderExtraModelCompatibility(model, true))
+        .join("");
+      if (platform.preset === "deepseek") {
+        const balance = card.querySelector(".managed-deepseek-balance");
+        if (balance) balance.outerHTML = renderManagedDeepSeekBalance(data, platform);
+      }
+      const meta = card.querySelector(".extra-platform-meta");
+      if (meta) meta.textContent = `${platform.models.filter((model) => model.selected !== false).length} / ${platform.models.length} 个模型已选 · 自动检测连接方式和模型能力`;
+      const detect = card.querySelector(".extra-platform-detect");
+      if (detect) {
+        detect.disabled = busy || !platform.enabled;
+        detect.textContent = operation?.platformId === platform.id && operation?.phase === "detecting"
+          ? "检测中…"
+          : "重新检测";
+      }
+      const edit = card.querySelector(".extra-platform-edit");
+      if (edit) edit.disabled = busy;
+    }
+    const form = wrap.querySelector(".extra-platform-form");
+    form?.querySelector('button[type="submit"]')?.toggleAttribute("disabled", busy);
+    form?.querySelector(".preset-model-refresh")?.toggleAttribute("disabled", busy);
+    if (discoveryChanged && state.extraPlatformDraft?.preset === "deepseek") {
+      const picker = form?.querySelector(".preset-model-picker");
+      if (picker) picker.outerHTML = renderDeepSeekModelPicker(state.extraPlatformDraft.models, !busy);
+    }
+    bindManagedDeepSeekBalanceButtons(wrap);
+  }
+
+  function showExtraModelOperation({ message, platformId = null, phase = "starting" }) {
+    state.extraModelOperationDraft = { state: "loading", message, platformId, phase };
+    patchExtraModelsDom(state.data.extraModels);
+  }
+
+  function bindManagedDeepSeekBalanceButtons(scope) {
+    for (const button of scope.querySelectorAll(".extra-deepseek-refresh-balance")) {
+      if (button.dataset.bound === "true") continue;
+      button.dataset.bound = "true";
+      button.addEventListener("click", () => enqueue({ type: "extra-deepseek-refresh-balance" }));
+    }
   }
 
   function renderExtraPlatformForm(platform, editable) {
+    if (platform.preset === "deepseek") return renderDeepSeekPresetForm(platform, editable);
     const models = Array.isArray(platform.models) && platform.models.length
       ? platform.models
       : [blankExtraModel()];
@@ -1917,14 +2099,74 @@ export function installQuotaWidget(
       <div class="extra-model-list">${models.map((model, index) => `<div class="extra-model-row" data-model-index="${index}">
         <div class="provider-field"><label>模型 ID</label><input name="modelId" value="${escapeHtml(model.id ?? "")}" placeholder="model-id" required ${editable ? "" : "disabled"}></div>
         <div class="provider-field"><label>显示名称</label><input name="displayName" value="${escapeHtml(model.displayName ?? "")}" placeholder="模型显示名称" ${editable ? "" : "disabled"}></div>
-        <div class="provider-field"><label>上下文</label><input name="contextWindow" type="number" min="1" step="1" value="${escapeHtml(model.contextWindow ?? 128000)}" required ${editable ? "" : "disabled"}></div>
-        <label class="provider-toggle"><input name="supportsImage" type="checkbox" ${model.supportsImage ? "checked" : ""} ${editable ? "" : "disabled"}>图片</label><label class="provider-toggle"><input name="chatCompatibility" type="checkbox" ${model.chatCompatibility ? "checked" : ""} ${editable ? "" : "disabled"}>Chat 兼容</label>
+        <div class="provider-field"><label>上下文（K）</label><input name="contextWindow" type="number" min="1" step="0.001" value="${escapeHtml(contextTokensToK(model.contextWindow ?? 128000))}" required ${editable ? "" : "disabled"}></div>
         <button class="btn extra-model-remove" type="button" ${editable && models.length > 1 ? "" : "disabled"}>移除</button>
+        ${renderExtraModelCompatibility(model)}
         ${renderExtraModelReasoning(model, editable)}
       </div>`).join("")}</div>
-      <div class="provider-warning">Key 保存在 ${escapeHtml(state.data.extraModels?.settingsPath ?? "本地 extra-model-settings.json")}；不写入系统安全存储。模型 ID 在所有额外平台中必须唯一。</div>
-      <div class="provider-actions">${platform.id ? '<button class="btn extra-platform-remove" type="button">删除平台</button>' : ""}<button class="btn extra-platform-cancel" type="button">取消</button><button class="btn primary" type="submit" ${editable ? "" : "disabled"}>保存并重启 Codex</button></div>
+      <div class="provider-warning">Key 保存在 ${escapeHtml(state.data.extraModels?.settingsPath ?? "本地 extra-model-settings.json")}；不写入系统安全存储。启用时将自动检测每个模型并产生少量 Token；检测通过后保存，重启 Codex 后生效。</div>
+      <div class="provider-actions">${platform.id ? '<button class="btn extra-platform-remove" type="button">删除平台</button>' : ""}<button class="btn extra-platform-cancel" type="button">取消</button><button class="btn primary" type="submit" ${editable ? "" : "disabled"}>${platform.enabled ? "检测并保存" : "保存停用配置"}</button></div>
     </form>`;
+  }
+
+  function renderDeepSeekPresetForm(platform, editable) {
+    const models = Array.isArray(platform.models) ? platform.models : [];
+    const refreshed = platform.modelsUpdatedAt
+      ? `最近读取：${escapeHtml(formatUpdatedAt(platform.modelsUpdatedAt))}`
+      : "首次保存时读取当前 Key 可用模型";
+    return `<form class="extra-platform-form preset-platform-form" data-platform-id="${escapeHtml(platform.id ?? "")}" data-platform-preset="deepseek">
+      <label class="provider-toggle"><input name="enabled" type="checkbox" ${platform.enabled ? "checked" : ""} ${editable ? "" : "disabled"}>在模型列表中启用 DeepSeek</label>
+      <div class="provider-field"><label>DeepSeek API Key（本地明文保存并完整回显）</label><input class="provider-key" name="apiKey" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(platform.apiKey ?? "")}" placeholder="sk-..." ${editable ? "" : "disabled"}></div>
+      <div class="preset-platform-note"><span>官方地址：${escapeHtml(platform.baseUrl)}</span><span>模型列表由 DeepSeek 官方 /models 接口读取；连接、工具、推理、内置联网和图片能力自动检测。上下文由你按 K 填写。</span><span>${refreshed}</span></div>
+      ${renderDeepSeekModelPicker(models, editable)}
+      <div class="provider-warning">启用并保存时会先读取可用模型，再对已选模型发送少量真实请求完成能力检测，因此会产生少量 Token。Key 保存在 ${escapeHtml(state.data.extraModels?.settingsPath ?? "本地 extra-model-settings.json")}。保存后等待重启 Codex 生效。</div>
+      <div class="provider-actions"><button class="btn preset-model-refresh" type="button" ${editable ? "" : "disabled"}>读取最新模型</button><button class="btn extra-platform-cancel" type="button">取消</button><button class="btn primary" type="submit" ${editable ? "" : "disabled"}>${platform.enabled ? "检测并保存" : "保存停用配置"}</button></div>
+    </form>`;
+  }
+
+  function renderDeepSeekModelPicker(models, editable) {
+    const selectedCount = models.filter((model) => model.selected !== false).length;
+    return `<details class="preset-model-picker" ${models.length <= 3 ? "open" : ""}><summary><span>可用模型</span><span class="badge current preset-model-count">已选 ${selectedCount} / ${models.length}</span></summary><div class="preset-model-options">${models.map((model) => `<div class="preset-model-option"><label class="preset-model-option-select"><input name="presetModel" type="checkbox" value="${escapeHtml(model.id)}" ${model.selected !== false ? "checked" : ""} ${editable ? "" : "disabled"}><div class="preset-model-option-main"><div class="preset-model-option-name">${escapeHtml(model.displayName || model.id)}</div><div class="preset-model-option-id">${escapeHtml(model.id)}</div>${renderExtraModelCompatibility(model)}</div></label><label class="preset-model-context"><span>上下文</span><input name="presetContextWindow" data-model-id="${escapeHtml(model.id)}" type="number" min="1" step="0.001" value="${escapeHtml(contextTokensToK(model.contextWindow ?? 128000))}" required ${editable ? "" : "disabled"}><span>K</span></label></div>`).join("")}</div></details>`;
+  }
+
+  function renderExtraModelCompatibility(model, compact = false) {
+    const compatibility = model?.compatibility ?? {};
+    const modelLabel = compact
+      ? `<span class="model-label" title="${escapeHtml(model?.displayName || model?.id || "模型")}">${escapeHtml(model?.displayName || model?.id || "模型")}</span>`
+      : '<span class="model-label">自动检测</span>';
+    if (compatibility.status === "verified") {
+      const capabilities = compatibility.capabilities ?? {};
+      const bridgedTools = capabilities.customTools === "bridged" ||
+        capabilities.namespaceTools === "bridged";
+      const protocolId = compatibility.protocol === "chat" ? "chat" : "responses";
+      const protocol = protocolId === "chat" ? "Chat 转换" : "Responses";
+      const tools = bridgedTools ? "工具已自动适配" : "工具可用";
+      const hostedSearch = capabilities.hostedTools?.web_search === "native";
+      const search = hostedSearch ? "内置联网可用" : "内置联网不可用";
+      const imageSupported = compatibility.imageStatus === "supported";
+      const imageProtocol = compatibility.routes?.imageInput === "chat" ? "chat" : protocolId;
+      const image = imageSupported
+        ? imageProtocol === protocolId ? "支持图片" : "支持图片 · Chat"
+        : "不支持图片";
+      const reasoningSupported = capabilities.reasoning === "native";
+      const reasoning = reasoningSupported ? "推理：支持" : "推理：不支持";
+      const reasoningEfforts = Array.isArray(model.reasoningEfforts)
+        ? model.reasoningEfforts.filter((effort) => CUSTOM_REASONING_EFFORTS.includes(effort))
+        : [];
+      const effortBadge = reasoningEfforts.length
+        ? `<span class="badge current">推理强度：${escapeHtml(reasoningEfforts.join(" / "))}（实测接受）</span>`
+        : "";
+      const checkedAt = compatibility.checkedAt
+        ? ` title="检测于 ${escapeHtml(formatUpdatedAt(compatibility.checkedAt))}"`
+        : "";
+      return `<div class="extra-model-capabilities"${checkedAt}>${modelLabel}<span class="badge current">${protocol}</span><span class="badge current">${tools}</span><span class="badge${reasoningSupported ? " current" : ""}">${reasoning}</span>${effortBadge}<span class="badge${hostedSearch ? " current" : ""}" title="由模型供应商在请求内执行的联网搜索；Codex 独立 web.run 属于另一项能力">${search}</span><span class="badge${imageSupported ? " current" : ""}">${image}</span></div>`;
+    }
+    const legacy = compatibility.status === "legacy";
+    const outdated = compatibility.status === "pending" && Number(compatibility.probeVersion) > 0;
+    const pendingLabel = legacy
+      ? "沿用旧设置 · 待重新检测"
+      : outdated ? "检测规则已更新 · 需重新检测" : "待检测";
+    return `<div class="extra-model-capabilities">${modelLabel}<span class="badge pending">${pendingLabel}</span></div>`;
   }
 
   function renderExtraModelReasoning(model, editable) {
@@ -1934,11 +2176,14 @@ export function installQuotaWidget(
     const defaultEffort = selectedEfforts.includes(model.defaultReasoningEffort)
       ? model.defaultReasoningEffort
       : selectedEfforts[0] ?? "";
+    if (model?.compatibility?.status !== "verified") {
+      return '<div class="extra-model-reasoning"><span class="extra-model-efforts-label">推理能力和可用强度将在保存时自动检测</span></div>';
+    }
+    if (selectedEfforts.length === 0) return "";
     const options = selectedEfforts.length
       ? selectedEfforts.map((effort) => `<option value="${effort}" ${effort === defaultEffort ? "selected" : ""}>${effort}</option>`).join("")
       : '<option value="">平台默认</option>';
     return `<div class="extra-model-reasoning">
-      <div class="extra-model-efforts"><span class="extra-model-efforts-label">支持的推理强度（不选择则不发送 effort）</span>${CUSTOM_REASONING_EFFORTS.map((effort) => `<label class="provider-toggle"><input name="reasoningEffort" type="checkbox" value="${effort}" ${selectedEfforts.includes(effort) ? "checked" : ""} ${editable ? "" : "disabled"}>${effort}</label>`).join("")}</div>
       <div class="provider-field"><label>默认强度</label><select name="defaultReasoningEffort" ${editable && selectedEfforts.length ? "" : "disabled"}>${options}</select></div>
     </div>`;
   }
@@ -1948,8 +2193,7 @@ export function installQuotaWidget(
       id: "",
       displayName: "",
       contextWindow: 128000,
-      supportsImage: false,
-      chatCompatibility: false,
+      compatibility: { status: "pending" },
       reasoningEfforts: [],
       defaultReasoningEffort: "",
     };
@@ -1957,20 +2201,41 @@ export function installQuotaWidget(
 
   function readExtraPlatformForm(form) {
     if (!form) return state.extraPlatformDraft;
+    if (form.dataset.platformPreset === "deepseek") {
+      const selected = new Set([...form.querySelectorAll('[name="presetModel"]:checked')]
+        .map((input) => input.value));
+      const contexts = new Map([...form.querySelectorAll('[name="presetContextWindow"]')]
+        .map((input) => [input.dataset.modelId, contextKToTokens(input.value)]));
+      return {
+        ...state.extraPlatformDraft,
+        id: form.dataset.platformId ?? "",
+        preset: "deepseek",
+        name: "DeepSeek",
+        baseUrl: "https://api.deepseek.com/",
+        apiKey: form.querySelector('[name="apiKey"]')?.value ?? "",
+        enabled: Boolean(form.querySelector('[name="enabled"]')?.checked),
+        models: (state.extraPlatformDraft?.models ?? []).map((model) => ({
+          ...model,
+          selected: selected.has(model.id),
+          contextWindow: contexts.get(model.id) ?? model.contextWindow,
+        })),
+      };
+    }
     return {
       id: form.dataset.platformId ?? "",
       name: form.querySelector('[name="name"]')?.value ?? "",
       baseUrl: form.querySelector('[name="baseUrl"]')?.value ?? "",
       apiKey: form.querySelector('[name="apiKey"]')?.value ?? "",
       enabled: Boolean(form.querySelector('[name="enabled"]')?.checked),
-      models: [...form.querySelectorAll(".extra-model-row")].map((row) => ({
+      models: [...form.querySelectorAll(".extra-model-row")].map((row, index) => ({
         id: row.querySelector('[name="modelId"]')?.value ?? "",
         displayName: row.querySelector('[name="displayName"]')?.value ?? "",
-        contextWindow: Number(row.querySelector('[name="contextWindow"]')?.value),
-        supportsImage: Boolean(row.querySelector('[name="supportsImage"]')?.checked),
-        chatCompatibility: Boolean(row.querySelector('[name="chatCompatibility"]')?.checked),
-        reasoningEfforts: [...row.querySelectorAll('[name="reasoningEffort"]:checked')]
-          .map((input) => input.value),
+        contextWindow: contextKToTokens(row.querySelector('[name="contextWindow"]')?.value),
+        selected: true,
+        compatibility: state.extraPlatformDraft?.models?.[index]?.compatibility
+          ? { ...state.extraPlatformDraft.models[index].compatibility }
+          : { status: "pending" },
+        reasoningEfforts: [...(state.extraPlatformDraft?.models?.[index]?.reasoningEfforts ?? [])],
         defaultReasoningEffort: row.querySelector('[name="defaultReasoningEffort"]')?.value ?? "",
       })),
     };
@@ -2001,8 +2266,58 @@ export function installQuotaWidget(
     const popover = wrap.querySelector(".quota-popover");
     if (!chip || !popover) return;
     const chipRect = chip.getBoundingClientRect();
+    const availableHeight = calculateMaxHeight(chipRect.top);
     popover.style.bottom = `${Math.max(12, window.innerHeight - chipRect.top + 10)}px`;
-    popover.style.maxHeight = `${calculateMaxHeight(chipRect.top)}px`;
+    popover.style.maxHeight = `${availableHeight}px`;
+    if (popover.classList.contains("detail-popover")) {
+      applyDetailPanelSize(wrap, popover);
+    } else {
+      popover.style.removeProperty("width");
+      popover.style.removeProperty("height");
+    }
+  }
+
+  function captureDetailPanelBaseSize(wrap) {
+    const popover = wrap.querySelector(".quota-popover");
+    if (!popover) return;
+    const width = Math.max(1, Math.round(popover.offsetWidth));
+    const height = Math.max(1, Math.round(popover.offsetHeight));
+    state.detailPanelBaseSize = { width, height };
+    state.detailPanelSize = { width, height };
+    state.detailPanelResize = null;
+  }
+
+  function resetDetailPanelSize() {
+    cancelDetailPanelResize();
+    state.detailPanelBaseSize = null;
+    state.detailPanelSize = null;
+  }
+
+  function cancelDetailPanelResize() {
+    state.detailPanelResizeCleanup?.();
+    state.detailPanelResizeCleanup = null;
+    state.detailPanelResize = null;
+  }
+
+  function detailPanelBounds(wrap) {
+    const chip = wrap.querySelector(".quota-chip");
+    return {
+      maxWidth: Math.max(0, Math.floor(window.innerWidth - 24)),
+      maxHeight: chip ? calculateMaxHeight(chip.getBoundingClientRect().top) : 0,
+    };
+  }
+
+  function applyDetailPanelSize(wrap, popover, requested = state.detailPanelSize) {
+    const base = state.detailPanelBaseSize;
+    if (!base) return;
+    const bounds = detailPanelBounds(wrap);
+    const minimumWidth = Math.min(base.width, bounds.maxWidth);
+    const minimumHeight = Math.min(base.height, bounds.maxHeight);
+    const width = Math.min(bounds.maxWidth, Math.max(minimumWidth, requested?.width ?? base.width));
+    const height = Math.min(bounds.maxHeight, Math.max(minimumHeight, requested?.height ?? base.height));
+    popover.style.width = `${width}px`;
+    popover.style.height = `${height}px`;
+    return { width, height };
   }
 
   function isLightTheme() {
@@ -2224,9 +2539,70 @@ export function installQuotaWidget(
     }, ACCOUNT_TOOLTIP_DELAY_MS);
   }
 
+  function bindDetailPanelResize(wrap) {
+    const panel = wrap.querySelector(".detail-popover");
+    if (!panel || !state.detailPanelBaseSize) return;
+    const resizeEdge = (event) => {
+      const bounds = panel.getBoundingClientRect();
+      const top = event.clientY >= bounds.top && event.clientY <= bounds.top + 8;
+      const right = event.clientX >= bounds.right - 8 && event.clientX <= bounds.right;
+      return top && right ? "top-right" : top ? "top" : right ? "right" : null;
+    };
+    const resizeCursor = (edge) => edge === "top-right"
+      ? "nesw-resize"
+      : edge === "top" ? "ns-resize" : edge === "right" ? "ew-resize" : "";
+    const drag = (event) => {
+      const resize = state.detailPanelResize;
+      if (!resize) return;
+      const next = applyDetailPanelSize(wrap, panel, {
+        width: resize.edge.includes("right")
+          ? resize.startWidth + event.clientX - resize.startX
+          : resize.startWidth,
+        height: resize.edge.includes("top")
+          ? resize.startHeight + resize.startY - event.clientY
+          : resize.startHeight,
+      });
+      if (next) state.detailPanelSize = next;
+      event.preventDefault();
+    };
+    const finish = (event) => {
+      if (!state.detailPanelResize) return;
+      cancelDetailPanelResize();
+      panel.style.cursor = resizeCursor(resizeEdge(event));
+      event.preventDefault();
+    };
+    panel.addEventListener("mousemove", (event) => {
+      if (!state.detailPanelResize) panel.style.cursor = resizeCursor(resizeEdge(event));
+    });
+    panel.addEventListener("mouseleave", () => {
+      if (!state.detailPanelResize) panel.style.cursor = "";
+    });
+    panel.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      const edge = resizeEdge(event);
+      if (!edge) return;
+      cancelDetailPanelResize();
+      state.detailPanelResize = {
+        edge,
+        startX: event.clientX,
+        startY: event.clientY,
+        startWidth: panel.offsetWidth,
+        startHeight: panel.offsetHeight,
+      };
+      window.addEventListener("mousemove", drag, true);
+      window.addEventListener("mouseup", finish, true);
+      state.detailPanelResizeCleanup = () => {
+        window.removeEventListener("mousemove", drag, true);
+        window.removeEventListener("mouseup", finish, true);
+      };
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  }
+
   function bindEvents(wrap) {
-    wrap.querySelector(".host-health-recheck")?.addEventListener("click", (event) => {
-      event.currentTarget.disabled = true;
+    bindDetailPanelResize(wrap);
+    wrap.querySelector(".host-health-recheck")?.addEventListener("click", () => {
       enqueue({ type: "host-health-recheck" });
     });
     wrap.querySelector(".host-health-restart")?.addEventListener("click", (event) => {
@@ -2247,25 +2623,28 @@ export function installQuotaWidget(
         if (event.key === "Escape") hideAccountTooltip();
       });
     });
-    wrap.querySelector(".quota-popover")?.addEventListener("scroll", hideAccountTooltip, { passive: true });
+    wrap.querySelector(".panel-scroll")?.addEventListener("scroll", hideAccountTooltip, { passive: true });
     wrap.querySelectorAll(".wakeup-open").forEach((button) => button.addEventListener("click", () => {
+      captureDetailPanelBaseSize(wrap);
       state.wakeupDrafts.clear();
       state.page = "wakeup";
       state.pinned = true;
       state.dismissed = false;
       render();
-      const popover = wrap.querySelector(".quota-popover");
-      if (popover) popover.scrollTop = 0;
+      const scroller = wrap.querySelector(".panel-scroll");
+      if (scroller) scroller.scrollTop = 0;
       if (button.dataset.accountId) {
         state.shadow.getElementById(`wakeup-account-${button.dataset.accountId}`)?.scrollIntoView({ block: "nearest" });
       }
     }));
     wrap.querySelector(".wakeup-back")?.addEventListener("click", () => {
       state.page = "accounts";
+      resetDetailPanelSize();
       state.wakeupDrafts.clear();
       render();
     });
     wrap.querySelector(".migration-open")?.addEventListener("click", () => {
+      captureDetailPanelBaseSize(wrap);
       state.migrationMode = "temporary";
       state.migrationSelectedIds = new Set((state.data.accounts ?? [])
         .filter((account) => account.canTemporaryTransfer)
@@ -2277,6 +2656,7 @@ export function installQuotaWidget(
     });
     wrap.querySelector(".migration-back")?.addEventListener("click", () => {
       state.page = "accounts";
+      resetDetailPanelSize();
       state.migrationSelectedIds.clear();
       render();
     });
@@ -2357,65 +2737,36 @@ export function installQuotaWidget(
       dismissPanel();
     });
     wrap.querySelector(".context-open")?.addEventListener("click", () => {
+      captureDetailPanelBaseSize(wrap);
       state.page = "context";
       state.contextEditingSlug = null;
       state.pinned = true;
       state.dismissed = false;
       render();
     });
-    wrap.querySelector(".provider-open")?.addEventListener("click", () => {
-      state.page = "provider";
-      state.deepSeekKeyDraft = state.data.deepSeek?.apiKey ?? "";
-      state.deepSeekEnabledDraft = Boolean(state.data.deepSeek?.enabled);
-      state.pinned = true;
-      state.dismissed = false;
-      render();
-    });
     wrap.querySelector(".extra-models-open")?.addEventListener("click", () => {
+      captureDetailPanelBaseSize(wrap);
       state.page = "extra-models";
       state.extraPlatformDraft = null;
+      state.extraModelOperationDraft = null;
       state.pinned = true;
       state.dismissed = false;
       render();
     });
     wrap.querySelector(".context-back")?.addEventListener("click", () => {
       state.page = "accounts";
+      resetDetailPanelSize();
       state.contextEditingSlug = null;
-      render();
-    });
-    wrap.querySelector(".provider-back")?.addEventListener("click", () => {
-      state.page = "accounts";
       render();
     });
     wrap.querySelector(".extra-models-back")?.addEventListener("click", () => {
       state.page = "accounts";
+      resetDetailPanelSize();
       state.extraPlatformDraft = null;
+      state.extraModelOperationDraft = null;
       render();
     });
-    wrap.querySelector(".provider-key")?.addEventListener("input", (event) => {
-      state.deepSeekKeyDraft = event.currentTarget.value;
-    });
-    wrap.querySelector('.deepseek-form input[name="enabled"]')?.addEventListener("change", (event) => {
-      state.deepSeekEnabledDraft = event.currentTarget.checked;
-    });
-    wrap.querySelector(".deepseek-form")?.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const form = new FormData(event.currentTarget);
-      const apiKey = String(form.get("apiKey") ?? "");
-      const enabled = form.get("enabled") === "on";
-      state.deepSeekKeyDraft = apiKey;
-      state.deepSeekEnabledDraft = enabled;
-      state.deepSeekSubmittedKey = apiKey.trim();
-      enqueue({ type: "deepseek-save", apiKey, enabled });
-    });
-    wrap.querySelector(".deepseek-remove")?.addEventListener("click", () => {
-      if (!window.confirm("确定删除本地保存的完整 DeepSeek API Key 并重启 Codex？")) return;
-      state.deepSeekKeyDraft = "";
-      state.deepSeekEnabledDraft = false;
-      state.deepSeekSubmittedKey = "";
-      enqueue({ type: "deepseek-remove" });
-    });
-    wrap.querySelector(".deepseek-refresh-balance")?.addEventListener("click", () => enqueue({ type: "deepseek-refresh-balance" }));
+    bindManagedDeepSeekBalanceButtons(wrap);
     wrap.querySelector(".extra-platform-add")?.addEventListener("click", () => {
       state.extraPlatformDraft = {
         id: "",
@@ -2432,24 +2783,44 @@ export function installQuotaWidget(
       if (!platform) return;
       state.extraPlatformDraft = {
         ...platform,
-        models: platform.models.map((model) => ({ ...model })),
+        models: platform.models.map((model) => ({
+          ...model,
+          compatibility: model.compatibility ? { ...model.compatibility } : { status: "pending" },
+        })),
       };
       render();
     }));
+    wrap.querySelectorAll(".extra-platform-detect").forEach((button) => button.addEventListener("click", () => {
+      button.disabled = true;
+      enqueue({ type: "extra-platform-detect", platformId: button.dataset.platformId });
+      showExtraModelOperation({
+        message: "正在准备模型能力检测",
+        platformId: button.dataset.platformId,
+        phase: "detecting",
+      });
+    }));
     const extraPlatformForm = wrap.querySelector(".extra-platform-form");
+    wrap.querySelector(".preset-model-refresh")?.addEventListener("click", (event) => {
+      const platform = readExtraPlatformForm(extraPlatformForm);
+      state.extraPlatformDraft = platform;
+      event.currentTarget.disabled = true;
+      enqueue({ type: "extra-platform-models-refresh", platform });
+      showExtraModelOperation({
+        message: "正在读取 DeepSeek 可用模型",
+        platformId: platform.id,
+        phase: "models",
+      });
+    });
     extraPlatformForm?.addEventListener("input", () => {
       state.extraPlatformDraft = readExtraPlatformForm(extraPlatformForm);
     });
     extraPlatformForm?.addEventListener("change", (event) => {
       const draft = readExtraPlatformForm(extraPlatformForm);
-      if (event.target?.name === "reasoningEffort") {
-        const index = Number(event.target.closest(".extra-model-row")?.dataset.modelIndex);
-        const model = draft.models[index];
-        if (model && !model.reasoningEfforts.includes(model.defaultReasoningEffort)) {
-          model.defaultReasoningEffort = model.reasoningEfforts[0] ?? "";
-        }
+      if (event.target?.name === "presetModel") {
         state.extraPlatformDraft = draft;
-        render();
+        const selectedCount = draft.models.filter((model) => model.selected !== false).length;
+        const count = extraPlatformForm.querySelector(".preset-model-count");
+        if (count) count.textContent = `已选 ${selectedCount} / ${draft.models.length}`;
         return;
       }
       state.extraPlatformDraft = draft;
@@ -2468,6 +2839,7 @@ export function installQuotaWidget(
       render();
     }));
     wrap.querySelector(".extra-platform-cancel")?.addEventListener("click", () => {
+      state.extraModelOperationDraft = null;
       state.extraPlatformDraft = null;
       render();
     });
@@ -2476,10 +2848,16 @@ export function installQuotaWidget(
       const platform = readExtraPlatformForm(event.currentTarget);
       state.extraPlatformDraft = platform;
       enqueue({ type: "extra-platform-save", platform });
+      event.currentTarget.querySelector('button[type="submit"]')?.setAttribute("disabled", "");
+      showExtraModelOperation({
+        message: platform.enabled ? "正在准备模型能力检测" : "正在保存停用配置",
+        platformId: platform.id,
+        phase: platform.enabled ? "detecting" : "saving",
+      });
     });
     wrap.querySelector(".extra-platform-remove")?.addEventListener("click", () => {
       const platform = readExtraPlatformForm(extraPlatformForm);
-      if (!window.confirm(`确定删除 ${platform.name || "该平台"}、其全部模型和本地 API Key，并重启 Codex？`)) return;
+      if (!window.confirm(`确定删除 ${platform.name || "该平台"}、其全部模型和本地 API Key？删除结果将在重启 Codex 后生效。`)) return;
       enqueue({ type: "extra-platform-remove", platformId: platform.id });
     });
     wrap.querySelector(".context-refresh")?.addEventListener("click", () => enqueue({ type: "context-refresh" }));
@@ -2574,10 +2952,12 @@ export function installQuotaWidget(
     state.pinned = false;
     state.dismissed = true;
     state.page = "accounts";
+    resetDetailPanelSize();
     state.migrationSelectedIds.clear();
     state.wakeupDrafts.clear();
     state.contextEditingSlug = null;
     state.extraPlatformDraft = null;
+    state.extraModelOperationDraft = null;
     const wrap = state.shadow?.querySelector(".quota-wrap");
     wrap?.classList.remove("is-open");
     wrap?.classList.add("is-dismissed");
@@ -2646,6 +3026,18 @@ export function installQuotaWidget(
     }
     if (number >= 1_000) return `${Math.round(number / 1_000)}K`;
     return String(Math.round(number));
+  }
+
+  function contextTokensToK(value) {
+    const tokens = Number(value);
+    if (!Number.isFinite(tokens) || tokens <= 0) return "";
+    return String(Number((tokens / 1_000).toFixed(3)));
+  }
+
+  function contextKToTokens(value) {
+    const kiloTokens = Number(value);
+    if (!Number.isFinite(kiloTokens) || kiloTokens <= 0) return 0;
+    return Math.round(kiloTokens * 1_000);
   }
 
   function formatTokenCount(value) {
@@ -2838,18 +3230,26 @@ export function installQuotaWidget(
       const json = revision == null ? JSON.stringify(data ?? {}) : `revision:${revision}`;
       if (revision != null && revision === state.dataRevision) return;
       if (json === state.dataJson) return;
-      if (state.deepSeekSubmittedKey != null &&
-        String(data?.deepSeek?.apiKey ?? "") === state.deepSeekSubmittedKey) {
-        state.deepSeekKeyDraft = null;
-        state.deepSeekEnabledDraft = null;
-        state.deepSeekSubmittedKey = null;
-      }
+      const patchOpenExtraModelsPage = state.page === "extra-models" &&
+        Boolean(state.shadow?.querySelector(".extra-models-popover"));
       state.dataJson = json;
       state.dataRevision = revision;
       state.tokenUsageRevision = revision;
+      applyExtraModelDiscovery(data?.extraModels);
       state.data = data ?? state.data;
       ensureMounted();
+      if (patchOpenExtraModelsPage) {
+        patchExtraModelsDom(data?.extraModels, { clearDraftOperation: true });
+        scheduleConversationTokenUsageRender();
+        return;
+      }
       render();
+    },
+    updateExtraModels(extraModels, revision = null) {
+      if (revision != null && revision === state.dataRevision) return;
+      state.dataRevision = revision;
+      ensureMounted();
+      patchExtraModelsDom(extraModels, { clearDraftOperation: true });
     },
     updateTokenUsage(tokenUsage, revision = null) {
       if (revision != null && revision === state.tokenUsageRevision) return;
@@ -2951,6 +3351,11 @@ export function widgetUpdateExpressionJson(serializedData, revision = null) {
 export function widgetTokenUsageUpdateExpressionJson(serializedTokenUsage, revision = null) {
   const revisionArgument = revision == null ? "" : `,${JSON.stringify(revision)}`;
   return `window.__codexQuotaWidget?.updateTokenUsage(${String(serializedTokenUsage)}${revisionArgument})`;
+}
+
+export function widgetExtraModelsUpdateExpressionJson(serializedExtraModels, revision = null) {
+  const revisionArgument = revision == null ? "" : `,${JSON.stringify(revision)}`;
+  return `window.__codexQuotaWidget?.updateExtraModels(${String(serializedExtraModels)}${revisionArgument})`;
 }
 
 export function widgetTokenUsageDeltaUpdateExpressionJson(serializedDelta, revision = null) {

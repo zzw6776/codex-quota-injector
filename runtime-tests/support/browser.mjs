@@ -23,7 +23,6 @@ export function fixtureData(overrides = {}) {
     windows: [{ label: "5h", remainingPercent: 77 }], operation: null,
     context: { status: "applied", overriddenCount: 1, models: [{ slug: "fixture-model", displayName: "Fixture Model", overridden: true,
       defaultContextWindow: 128000, defaultMaxContextWindow: 128000, effectiveContextWindow: 256000, effectiveMaxContextWindow: 256000 }] },
-    deepSeek: { enabled: false, apiKey: "fixture-key", supported: true, balance: { available: true, items: [] } },
     extraModels: { supported: true, platforms: [] }, tokenUsage: { status: "ready", turns: [] },
     ...overrides,
   };

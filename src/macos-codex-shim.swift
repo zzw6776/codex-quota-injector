@@ -6,6 +6,7 @@ private let officialBundleIdentifier = "com.openai.codex"
 private let sidecarModeEnvironmentKey = "CODEX_QUOTA_APP_SERVER_SIDECAR"
 private let sidecarUpstreamStdinEnvironmentKey = "CODEX_QUOTA_UPSTREAM_STDIN_FD"
 private let sidecarUpstreamStdoutEnvironmentKey = "CODEX_QUOTA_UPSTREAM_STDOUT_FD"
+private let primaryAppServerEnvironmentKey = "CODEX_QUOTA_PRIMARY_APP_SERVER"
 private let standardOfficialExecutables = [
   "/Applications/ChatGPT.app/Contents/Resources/codex",
   "/Applications/Codex.app/Contents/Resources/codex",
@@ -81,6 +82,7 @@ private func clearBootstrapEnvironment() {
     "CODEX_QUOTA_RELAY_CONFIG",
     "CODEX_QUOTA_UPSTREAM_CODEX_CLI",
     "CODEX_QUOTA_ROLE",
+    primaryAppServerEnvironmentKey,
     "CODEX_APP_SERVER_FORCE_CLI",
     "CODEX_APP_SERVER_WS_URL",
     sidecarModeEnvironmentKey,
@@ -268,6 +270,13 @@ let configPath = environment["CODEX_QUOTA_RELAY_CONFIG"]?.trimmingCharacters(in:
 let fallbackExecutable = environment["CODEX_QUOTA_UPSTREAM_CODEX_CLI"]?.trimmingCharacters(in: .whitespacesAndNewlines)
 var arguments = Array(CommandLine.arguments.dropFirst())
 
+private let publishesHostState: Bool = {
+  // The managed desktop launch always marks its primary app-server explicitly.
+  // Nested task app-servers can lose their parent's --listen argument, so argv
+  // is not a safe ownership signal for the process-global Relay state.
+  environment[primaryAppServerEnvironmentKey] == "1"
+}()
+
 guard let configPath, !configPath.isEmpty else {
   guard let officialExecutable = resolveOfficialExecutable(fallback: fallbackExecutable) else {
     fail("无法定位官方 Codex CLI")
@@ -330,11 +339,13 @@ if let appServerIndex = arguments.firstIndex(of: "app-server") {
     }
   }
   arguments.insert(contentsOf: overrides, at: appServerIndex + 1)
-  writeRelayState(
-    configuration,
-    processId: relayProcessId ?? getpid(),
-    terminateOnFailure: relayProcessId
-  )
+  if publishesHostState {
+    writeRelayState(
+      configuration,
+      processId: relayProcessId ?? getpid(),
+      terminateOnFailure: relayProcessId
+    )
+  }
 }
 
 clearBootstrapEnvironment()

@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { decodeJwt, parseTokenInput } from "../src/account-manager.mjs";
-import { DeepSeekManager } from "../src/deepseek-manager.mjs";
+import { DEEPSEEK_CANONICAL_MODEL_ID } from "../src/deepseek-model-profile.mjs";
 import { ExtraModelManager } from "../src/extra-model-manager.mjs";
+import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
 import { ModelRouterManager } from "../src/model-router.mjs";
 import { getOpenAIShortContextRates } from "../src/token-pricing.mjs";
 import {
@@ -36,37 +37,69 @@ export function liveBudget() {
 
 export async function liveProfiles({
   extraModelManager = new ExtraModelManager(),
-  deepSeekManager = new DeepSeekManager(),
 } = {}) {
   const extra = extraModelManager;
-  const deep = deepSeekManager;
-  await extra.initialize(); await deep.initialize();
-  if (extra.messageState === "error" || deep.messageState === "error") throw new Error("供应商配置读取失败；不能把失败误报为未配置");
-  const deepView = deep.getViewModel();
-  const deepSeek = deepView.enabled ? {
-    enabled: deepView.enabled,
-    configured: deepView.configured,
-    apiKey: deepView.apiKey,
-    generation: deep.settings.generation,
-    model: deepView.model,
-  } : undefined;
-  const profiles = [{ id: "official", model: null, protocol: "responses", images: true,
-    extraModels: extra.settings, deepSeek }];
-  if (deepSeek) profiles.push({ id: "deepseek", model: deepSeek.model.slug, protocol: "responses", images: false, deepSeek });
-  for (const platform of extra.settings.platforms.filter(p => p.enabled)) {
-    // One model per configured platform/wire contract; enumerate every selection
-    // explicitly in the report instead of charging for every catalog entry.
-    for (const chat of [false, true]) {
-      const model = platform.models.find(m => Boolean(m.chatCompatibility) === chat);
-      if (model) profiles.push({ id: `${platform.name}/${chat ? "chat" : "responses"}`, model: model.id,
-        protocol: chat ? "chat" : "responses", images: Boolean(model.supportsImage), extraModels: { platforms: [platform] } });
-    }
+  await extra.initialize();
+  if (extra.messageState === "error") throw new Error("供应商配置读取失败；不能把失败误报为未配置");
+  const profiles = [{
+    id: "official",
+    model: null,
+    protocol: "responses",
+    images: true,
+    configurationSource: "official",
+    extraModels: { generation: extra.settings.generation, platforms: [] },
+  }];
+  const platform = extra.settings.platforms.find(value =>
+    value.enabled && value.preset === "deepseek");
+  const model = platform?.models.find(value =>
+    value.selected !== false && value.id === DEEPSEEK_CANONICAL_MODEL_ID &&
+    hasCurrentCompatibility(value));
+  if (platform && model) {
+    profiles.push({
+      id: "deepseek",
+      model: model.id,
+      protocol: detectedProtocol(model),
+      images: detectedImageSupport(model),
+      configurationSource: "model-platform",
+      platformId: platform.id,
+      platformName: platform.name,
+      extraModels: {
+        generation: extra.settings.generation,
+        platforms: [{ ...structuredClone(platform), models: [structuredClone(model)] }],
+      },
+    });
   }
   return profiles;
 }
 
+function hasCurrentCompatibility(model) {
+  return model?.compatibility?.status === "verified" &&
+    model.compatibility.probeVersion === MODEL_CAPABILITY_PROBE_VERSION &&
+    model.compatibility.codexConformance === "passed";
+}
+
+function detectedProtocol(model) {
+  const protocol = model?.compatibility?.protocol;
+  return ["responses", "chat"].includes(protocol)
+    ? protocol
+    : model?.chatCompatibility ? "chat" : "responses";
+}
+
+function detectedImageSupport(model) {
+  return hasCurrentCompatibility(model) &&
+    model.compatibility.imageStatus === "supported";
+}
+
 export function publicProfile(profile) {
-  return { id: profile.id, model: profile.model, protocol: profile.protocol, images: profile.images };
+  return {
+    id: profile.id,
+    model: profile.model,
+    protocol: profile.protocol,
+    images: profile.images,
+    configurationSource: profile.configurationSource,
+    ...(profile.platformId ? { platformId: profile.platformId } : {}),
+    ...(profile.platformName ? { platformName: profile.platformName } : {}),
+  };
 }
 
 export function selectLiveProfiles(profiles, requested = process.env.CODEX_TEST_LIVE_PROFILE) {
@@ -153,7 +186,8 @@ export async function startLiveRuntime(t, profile, budget) {
   const runtimeTarget = process.env.CODEX_TEST_RUNTIME_TARGET ||
     (process.platform === "darwin" ? MACOS_NATIVE : process.platform === "win32" ? WINDOWS_NATIVE : null);
   const credentials = await currentCredentials();
-  const secrets = [credentials.accessToken ?? credentials.apiKey, profile.deepSeek?.apiKey, ...(profile.extraModels?.platforms ?? []).map(p => p.apiKey)].filter(Boolean);
+  const secrets = [credentials.accessToken ?? credentials.apiKey,
+    ...(profile.extraModels?.platforms ?? []).map(p => p.apiKey)].filter(Boolean);
   const sanitize = text => secrets.reduce((value, secret) => value.replaceAll(secret, "[凭据已隐藏]"), String(text));
   const directory = await mkdtemp(join(tmpdir(), "quota-live-"));
   const cwd = join(directory, "project");
@@ -176,22 +210,9 @@ export async function startLiveRuntime(t, profile, budget) {
   const extraPath = await extra.writeRuntimeCatalog(catalog);
   if (extraPath?.path) catalog = JSON.parse(await readFile(extraPath.path, "utf8"));
   else if (typeof extraPath === "string") catalog = JSON.parse(await readFile(extraPath, "utf8"));
-  if (profile.deepSeek) {
-    const deep = new DeepSeekManager({ dataDir: directory }); deep.settings = profile.deepSeek;
-    const path = await deep.writeRuntimeCatalog(catalog);
-    if (path) catalog = JSON.parse(await readFile(typeof path === "string" ? path : path.path, "utf8"));
-  }
   const catalogPath = join(directory, "catalog.json");
   await writeFile(catalogPath, JSON.stringify(catalog));
-  const providerSettingsPath = join(directory, "provider-settings.json");
   const extraModelSettingsPath = join(directory, "runtime-extra-model-settings.json");
-  await writeFile(providerSettingsPath, JSON.stringify(profile.deepSeek
-    ? {
-        enabled: Boolean(profile.deepSeek.enabled),
-        apiKey: profile.deepSeek.apiKey,
-        generation: profile.deepSeek.generation ?? 0,
-      }
-    : { enabled: false, apiKey: "", generation: 0 }));
   await writeFile(extraModelSettingsPath, JSON.stringify({
     generation: profile.extraModels?.generation ?? 0,
     platforms: profile.extraModels?.platforms ?? [],
@@ -207,7 +228,6 @@ export async function startLiveRuntime(t, profile, budget) {
   const route = await router?.configure({
     officialAuthMode: credentials.type === "apiKey" ? "apiKey" : "oauth",
     extraModels: profile.extraModels,
-    deepSeek: profile.deepSeek,
     usageEventPath: join(directory, "usage.jsonl"),
   });
   if (profile.model) {
@@ -242,13 +262,13 @@ export async function startLiveRuntime(t, profile, budget) {
   }
   const config = join(directory, "relay.json");
   await writeFile(config, JSON.stringify({
-    version: process.platform === "darwin" ? 4 : 1,
+    version: process.platform === "darwin" ? 6 : 3,
     upstreamExecutable: cli,
     ...(process.platform === "darwin" ? {
       relayExecutable: process.execPath,
       relayArguments: [join(ROOT, "src", "launcher.mjs")],
     } : {}),
-    providerSettingsPath, extraModelSettingsPath, modelCatalogPath: catalogPath,
+    extraModelSettingsPath, modelCatalogPath: catalogPath,
     relayStatePath: join(directory, "relay-state.json"),
     tokenUsageEventsPath: join(directory, "relay-usage.jsonl"), generation: randomUUID(),
     router: liveRouterConfiguration(route) }));

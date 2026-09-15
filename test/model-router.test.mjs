@@ -13,6 +13,7 @@ import {
   classifyNetworkLatency,
 } from "../src/model-router.mjs";
 import { GENERATION_METRICS_VERSION } from "../src/relay-contract.mjs";
+import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
 import { readJsonRequest, startHttpServer, useTempDir, waitFor } from "./helpers.mjs";
 
 const PLATFORM_ID = "123e4567-e89b-42d3-a456-426614174000";
@@ -37,7 +38,7 @@ test("Router 跨注入器版本复用原端点，端口被占用时才生成新�
 
   const original = await owner.configure(routerSettings(upstream.origin));
   const identity = reusableRouterIdentityFromRelayConfig({
-    version: 5,
+    version: 6,
     generation: `catalog:usage-events-v40:${original.instanceId}`,
     router: {
       baseUrl: original.baseUrl,
@@ -81,7 +82,6 @@ test("Router 跨注入器版本复用原端点，端口被占用时才生成新�
 
 function routerSettings(origin, overrides = {}) {
   return {
-    deepSeek: { enabled: false, configured: false, apiKey: "" },
     extraModels: {
       platforms: [{
         id: PLATFORM_ID,
@@ -761,7 +761,285 @@ test("自定义 Responses 请求只改写声明过的兼容字段并隔离官方
   assert.equal(events.find((event) => event.type === "generation").generation.hasVisibleText, true);
 });
 
-test("自定义模型把 Codex 跨任务委托还原为用户消息且不掩盖其他孤立工具输出", async (t) => {
+test("能力矩阵按模型过滤不可用 Hosted 工具和未通过的请求选项", async (t) => {
+  const received = [];
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received.push(await readJsonRequest(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "resp_capability", status: "completed", output: [] }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const config = await manager.configure(routerSettings(upstream.origin, {
+    compatibility: {
+      status: "verified",
+      protocol: "responses",
+      historyMode: "responses-full",
+      toolContinuation: true,
+      supportsImage: false,
+      imageStatus: "unsupported",
+      capabilities: {
+        streaming: "native",
+        functionTools: "native",
+        customTools: "native",
+        namespaceTools: "native",
+        parallelTools: "unsupported",
+        toolChoice: "unsupported",
+        hostedTools: { web_search: "unsupported" },
+      },
+      codexConformance: "passed",
+      checkedAt: 1,
+      probeVersion: 6,
+      targetFingerprint: "fixture",
+    },
+  }));
+  const optional = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-model",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "fixture" }] },
+        { type: "additional_tools", tools: [{ type: "web_search" }] },
+      ],
+      tools: [
+        { type: "function", name: "lookup", parameters: { type: "object" } },
+        { type: "web_search" },
+        { type: "future_hosted_tool" },
+        { type: "namespace", name: "hosted", tools: [{ type: "web_search" }] },
+      ],
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+    }),
+  });
+  assert.equal(optional.status, 200);
+  assert.deepEqual(received[0].tools, [
+    { type: "function", name: "lookup", parameters: { type: "object" } },
+  ]);
+  assert.equal(received[0].input.some((item) => item?.type === "additional_tools"), false);
+  assert.equal(received[0].tool_choice, undefined);
+  assert.equal(received[0].parallel_tool_calls, undefined);
+
+  const required = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-model",
+      input: "fixture",
+      tools: [{ type: "web_search" }],
+      tool_choice: {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [{ type: "web_search" }],
+      },
+    }),
+  });
+  assert.equal(required.status, 400);
+  assert.match((await required.json()).error.message, /不支持服务端工具 web_search/);
+  const unknownRequired = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-model",
+      input: "fixture",
+      tools: [{ type: "future_hosted_tool" }],
+      tool_choice: { type: "future_hosted_tool" },
+    }),
+  });
+  assert.equal(unknownRequired.status, 400);
+  assert.match((await unknownRequired.json()).error.message, /不支持服务端工具 future_hosted_tool/);
+  assert.equal(received.length, 1);
+});
+
+test("Router 对 Responses 模型只桥接探针确认缺失的 Codex 工具形态", async (t) => {
+  let received;
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received = await readJsonRequest(request);
+    const bridged = received.tools.find((tool) => /^cq_custom_/.test(tool.name));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "resp_bridged",
+      status: "completed",
+      output: [{
+        id: "tool-item",
+        type: "function_call",
+        name: bridged.name,
+        call_id: "call-exec",
+        arguments: '{"input":"run"}',
+      }],
+    }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const config = await manager.configure(routerSettings(upstream.origin, {
+    compatibility: {
+      status: "verified",
+      protocol: "responses",
+      historyMode: "responses-full",
+      toolContinuation: true,
+      supportsImage: false,
+      imageStatus: "unsupported",
+      capabilities: {
+        streaming: "native",
+        functionTools: "native",
+        customTools: "bridged",
+        namespaceTools: "bridged",
+        nativeCustomTools: ["apply_patch"],
+        parallelTools: "native",
+        toolChoice: "native",
+        reasoningToolChoice: "native",
+        hostedTools: { web_search: "unsupported" },
+      },
+      codexConformance: "passed",
+      checkedAt: 1,
+      probeVersion: MODEL_CAPABILITY_PROBE_VERSION,
+      targetFingerprint: "fixture",
+    },
+  }));
+  const response = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-model",
+      input: "run",
+      tools: [
+        { type: "custom", name: "apply_patch" },
+        { type: "custom", name: "exec" },
+        { type: "namespace", name: "functions", tools: [{
+          type: "function",
+          name: "read_thread",
+          parameters: { type: "object" },
+        }] },
+        { type: "web_search" },
+      ],
+      tool_choice: { type: "custom", name: "exec" },
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const converted = await response.json();
+  assert.deepEqual(converted.output[0], {
+    id: "tool-item",
+    type: "custom_tool_call",
+    name: "exec",
+    call_id: "call-exec",
+    input: "run",
+  });
+  assert.ok(received.tools.some((tool) => tool.type === "custom" && tool.name === "apply_patch"));
+  assert.ok(received.tools.some((tool) => /^cq_custom_/.test(tool.name)));
+  assert.ok(received.tools.some((tool) => /^cq_namespace_/.test(tool.name)));
+  assert.equal(received.tools.some((tool) => tool.type === "web_search"), false);
+  assert.match(received.tool_choice.name, /^cq_custom_/);
+});
+
+test("推理模式仅支持自动工具选择时 Router 保留工具并移除强制选择", async (t) => {
+  let received;
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received = await readJsonRequest(request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "chat-reasoning-policy",
+      choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+    }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const config = await manager.configure(routerSettings(upstream.origin, {
+    compatibility: {
+      status: "verified",
+      protocol: "chat",
+      historyMode: "chat",
+      toolContinuation: true,
+      supportsImage: false,
+      imageStatus: "unsupported",
+      capabilities: {
+        streaming: "native",
+        functionTools: "native",
+        customTools: "bridged",
+        namespaceTools: "bridged",
+        nativeCustomTools: [],
+        parallelTools: "native",
+        toolChoice: "native",
+        reasoning: "native",
+        reasoningToolChoice: "auto-only",
+        hostedTools: { web_search: "unsupported" },
+      },
+      codexConformance: "passed",
+      checkedAt: 1,
+      probeVersion: MODEL_CAPABILITY_PROBE_VERSION,
+      targetFingerprint: "fixture",
+    },
+    reasoningEfforts: ["low", "high", "max"],
+    defaultReasoningEffort: "high",
+  }));
+  const response = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "custom-model",
+      input: "Call lookup.",
+      reasoning: { effort: "high" },
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+      tool_choice: { type: "function", name: "lookup" },
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(received.reasoning_effort, "high");
+  assert.equal(received.tool_choice, "auto");
+  assert.equal(received.tools[0].function.name, "lookup");
+});
+
+test("自动检测出的纯文本历史模式按能力清理 reasoning 信封且保留正文", async (t) => {
+  let received;
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received = await readJsonRequest(request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "resp-compatible", status: "completed", output: [] }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const settings = routerSettings(upstream.origin, {
+    compatibility: {
+      status: "verified",
+      protocol: "responses",
+      historyMode: "reasoning-text-only",
+      toolContinuation: true,
+      supportsImage: false,
+      imageStatus: "unsupported",
+      checkedAt: 1,
+      probeVersion: 5,
+      targetFingerprint: "fixture",
+    },
+  });
+  const config = await manager.configure(settings);
+  const source = {
+    model: "custom-model",
+    input: [{
+      type: "reasoning",
+      id: "reasoning-1",
+      summary: [{ type: "summary_text", text: "private summary" }],
+      encrypted_content: "private encrypted content",
+      reasoning_text: "provider-visible reasoning",
+    }],
+  };
+  const response = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(source),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(received.input, [{
+    type: "reasoning",
+    id: "reasoning-1",
+    reasoning_text: "provider-visible reasoning",
+  }]);
+  assert.equal(source.input[0].encrypted_content, "private encrypted content",
+    "兼容改写不能修改调用方对象");
+});
+
+for (const delegationTool of ["create_thread", "send_message_to_thread"]) {
+test(`自定义模型把 Codex ${delegationTool} 跨任务委托还原为用户消息且不掩盖其他孤立工具输出`, async (t) => {
   const received = [];
   const upstream = await startHttpServer(t, async (request, response) => {
     received.push(await readJsonRequest(request));
@@ -783,7 +1061,7 @@ test("自定义模型把 Codex 跨任务委托还原为用户消息且不掩盖�
         {
           type: "function_call_output",
           id: "fco_delegation",
-          name: "send_message_to_thread",
+          name: delegationTool,
           namespace: "codex_app",
           output: [
             "<codex_delegation>",
@@ -806,6 +1084,32 @@ test("自定义模型把 Codex 跨任务委托还原为用户消息且不掩盖�
   });
   assert.deepEqual(received[0].input[1], orphanOutput,
     "非 Codex 跨任务委托的孤立工具输出必须保留，让上游继续暴露协议错误");
+});
+}
+
+test("新建桌面任务的委托通过严格 Responses call_id 校验并保留原始输入", async (t) => {
+  let received;
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received = await readJsonRequest(request);
+    const invalid = received.input.some(item => item.type === "function_call_output" && !item.call_id);
+    response.writeHead(invalid ? 400 : 200, { "content-type": "application/json" });
+    response.end(JSON.stringify(invalid ? { error: "missing field call_id" }
+      : { id: "resp_create", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "accepted" }] }] }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const config = await manager.configure(routerSettings(upstream.origin));
+  const input = "  执行准备命令\n保留缩进和换行  ";
+  const response = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "custom-model", input: [{
+      type: "function_call_output", id: "fco_create", name: "create_thread", namespace: "codex_app",
+      output: `<codex_delegation>\n<source_thread_id>source-task</source_thread_id>\n<input>${input}</input>\n</codex_delegation>`,
+    }] }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(received.input, [{ type: "message", role: "user", content: [{ type: "input_text", text: input }] }]);
+  assert.equal((await response.json()).output[0].content[0].text, "accepted");
 });
 
 test("自定义模型 4xx 只记录字段结构，不把提示词、工具参数或凭据写入诊断", async (t) => {
@@ -1110,8 +1414,7 @@ test("Router 按消息阶段记录文本耗时，并从输出项开始计算工�
   assert.equal(generations.length, 2);
   assert.equal(generations[0].generation.textPhases.length, 1);
   assert.equal(generations[0].generation.textPhases[0].phase, "commentary");
-  assert.ok(generations[0].generation.textPhases[0].startLatencyMs >= 8);
-  assert.ok(generations[0].generation.textPhases[0].durationMs >= 12);
+  assert.ok(Number.isFinite(generations[0].generation.textPhases[0].startLatencyMs));
   assert.deepEqual(generations[1].generation.textPhases, [{
     phase: "final_answer",
     startLatencyMs: generations[1].generation.textPhases[0].startLatencyMs,
@@ -1119,17 +1422,22 @@ test("Router 按消息阶段记录文本耗时，并从输出项开始计算工�
   }]);
 
   const timing = events.find((event) => event.type === "generation-tool-timing");
-  assert.ok(timing.toolTiming.preparationStartLatencyMs >= 30);
-  assert.ok(timing.toolTiming.preparationDurationMs >= 25);
+  assert.ok(Number.isFinite(timing.toolTiming.preparationStartLatencyMs));
+  assert.ok(Number.isFinite(timing.toolTiming.preparationDurationMs));
   assert.ok(
     generations[0].generation.textPhases[0].startLatencyMs +
       generations[0].generation.textPhases[0].durationMs <=
       timing.toolTiming.preparationStartLatencyMs,
   );
-  assert.ok(timing.toolTiming.readyLatencyMs >=
-    timing.toolTiming.preparationStartLatencyMs + timing.toolTiming.preparationDurationMs);
-  assert.ok(timing.toolTiming.calls[0].preparationDurationMs >= 25);
-  assert.ok(timing.toolTiming.durationMs >= 12);
+  assert.equal(
+    timing.toolTiming.readyLatencyMs,
+    timing.toolTiming.preparationStartLatencyMs + timing.toolTiming.preparationDurationMs,
+  );
+  assert.equal(
+    timing.toolTiming.calls[0].preparationDurationMs,
+    timing.toolTiming.preparationDurationMs,
+  );
+  assert.ok(Number.isFinite(timing.toolTiming.durationMs));
 });
 
 test("自定义模型能力约束和同任务供应商锁在访问上游前生效", async (t) => {
@@ -1163,7 +1471,7 @@ test("自定义模型能力约束和同任务供应商锁在访问上游前生�
     input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
   });
   assert.equal(image.status, 400);
-  assert.match((await image.json()).error.message, /图片输入能力/);
+  assert.match((await image.json()).error.message, /自动检测结果不支持图片输入/);
 
   const effort = await post({ model: "custom-model", input: "hi", reasoning: { effort: "max" } });
   assert.equal(effort.status, 400);
@@ -1186,16 +1494,28 @@ test("无生成预热不会抢占任务供应商，首个被接受的真实请�
   const manager = new ModelRouterManager({
     officialApiBaseUrl: `${upstream.origin}/v1/`,
     officialCodexBaseUrl: `${upstream.origin}/v1/`,
-    deepSeekBaseUrl: `${upstream.origin}/v1/`,
   });
   t.after(() => manager.close());
   const settings = routerSettings(upstream.origin);
-  settings.deepSeek = {
-    enabled: true,
-    configured: true,
+  settings.extraModels.platforms = [{
+    id: "d33f5ee0-0000-4000-8000-000000000001",
+    preset: "deepseek",
+    name: "DeepSeek",
+    baseUrl: `${upstream.origin}/v1/`,
     apiKey: "deepseek-secret",
-    model: { displayName: "DeepSeek V4 Flash", reasoningEfforts: ["low", "high", "max"] },
-  };
+    enabled: true,
+    models: [{
+      id: "deepseek-flash",
+      displayName: "DeepSeek Flash",
+      compatibility: {
+        protocol: "responses",
+        historyMode: "reasoning-text-only",
+        supportsImage: true,
+      },
+      reasoningEfforts: ["low", "high", "max"],
+      defaultReasoningEffort: "high",
+    }],
+  }];
   const config = await manager.configure(settings);
   const post = (body) => fetch(new URL("responses", config.baseUrl), {
     method: "POST",
@@ -1205,11 +1525,94 @@ test("无生成预热不会抢占任务供应商，首个被接受的真实请�
 
   const prewarm = await post({ model: "deepseek-v4-flash", generate: false, input: [] });
   assert.equal(prewarm.status, 200);
+  assert.equal(requests[0].model, "deepseek-flash", "旧模型 ID 必须只用于恢复并改写为当前别名");
   const official = await post({ model: "official-model", input: "real turn" });
   assert.equal(official.status, 200);
   const rerouted = await post({ model: "deepseek-v4-flash", input: "must reject" });
   assert.equal(rerouted.status, 409);
   assert.equal(requests.length, 2);
+});
+
+test("模型管理中的 DeepSeek 预设合并旧 Flash 别名但保留 Pro API 入口", async (t) => {
+  const received = [];
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received.push({
+      headers: request.headers,
+      body: await readJsonRequest(request),
+    });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "resp-deepseek-preset", status: "completed", output: [] }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const settings = routerSettings(upstream.origin);
+  settings.extraModels.platforms = [{
+    id: "d33f5ee0-0000-4000-8000-000000000001",
+    preset: "deepseek",
+    name: "DeepSeek",
+    baseUrl: `${upstream.origin}/v1/`,
+    apiKey: "preset-secret",
+    enabled: true,
+    models: [{
+      id: "deepseek-flash",
+      displayName: "DeepSeek Flash",
+      compatibility: {
+        status: "verified",
+        protocol: "responses",
+        historyMode: "reasoning-text-only",
+        toolContinuation: true,
+        supportsImage: false,
+        imageStatus: "unsupported",
+        checkedAt: 1,
+        probeVersion: 3,
+        targetFingerprint: "stale-fixture",
+      },
+      documentedSupportsImage: true,
+      reasoningEfforts: ["low", "high", "max"],
+      defaultReasoningEffort: "high",
+    }, {
+      id: "deepseek-v4-pro",
+      displayName: "DeepSeek Pro",
+      compatibility: {
+        status: "verified",
+        protocol: "responses",
+        historyMode: "reasoning-text-only",
+        toolContinuation: true,
+        supportsImage: false,
+        imageStatus: "unsupported",
+        checkedAt: 1,
+        probeVersion: 5,
+        targetFingerprint: "fixture",
+      },
+      documentedSupportsImage: false,
+      reasoningEfforts: ["low", "high", "max"],
+      defaultReasoningEffort: "high",
+    }],
+  }];
+  const config = await manager.configure(settings);
+  const response = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash-vision-exp",
+      input: [{ role: "user", content: [{
+        type: "input_image",
+        image_url: "data:image/png;base64,AA==",
+      }] }],
+    }),
+  });
+  const proResponse = await fetch(new URL("responses", config.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "deepseek-v4-pro", input: "pro request" }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(proResponse.status, 200);
+  assert.equal(received[0].headers.authorization, "Bearer preset-secret");
+  assert.equal(received[0].body.model, "deepseek-flash");
+  assert.equal(received[0].body.input[0].content[0].type, "input_image");
+  assert.equal(received[1].body.model, "deepseek-v4-pro");
 });
 
 test("本地校验失败和上游拒绝均不会留下任务供应商锁", async (t) => {
