@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 
 import { waitFor } from "./helpers.mjs";
@@ -9,6 +10,24 @@ const catalogResponse = (id, cursor = null) => ({
   id, result: { data: [{ id: "official", model: "official", futureCapability: { enabled: true } }], nextCursor: cursor },
 });
 const modelIds = (message) => message.result.data.map((model) => model.id);
+
+test("测试 Relay 退出后完整回收临时程序，且不依赖测试主进程退出", async (t) => {
+  let directory;
+  await t.test("原生夹具完成协议往返并退出", async (fixture) => {
+    const relay = await startTestRelay(fixture);
+    directory = relay.directory;
+    if (process.platform === "win32") {
+      const runner = await stat(process.execPath, { bigint: true });
+      const upstream = await stat(join(directory, "fixture-node.exe"), { bigint: true });
+      assert.notDeepEqual([upstream.dev, upstream.ino], [runner.dev, runner.ino],
+        "临时程序不能与仍在运行的测试主进程共享文件身份和映像占用");
+    }
+    await relay.send({ id: "cleanup-check", method: "config/read", params: {} });
+    assert.equal((await relay.received("cleanup-check")).method, "config/read");
+  });
+  assert.ok(directory);
+  await assert.rejects(stat(directory), { code: "ENOENT" });
+});
 
 // RPC-02: Enumeration covers forwarding envelopes, not execution of every named feature.
 test("协议清单中未改写的方法和通知保留双向外壳、未知字段与工具数据", async (t) => {

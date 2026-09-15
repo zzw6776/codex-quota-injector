@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, copyFile, link, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { requestHostToolReload } from "../src/host-health.mjs";
 import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
-import { useTempDir, waitFor } from "./helpers.mjs";
+import { createTestNodeExecutable as createNodeAlias, useTempDir, waitFor } from "./helpers.mjs";
 
 const FAKE_CODEX = `#!/usr/bin/env node
 import readline from "node:readline";
@@ -222,20 +222,6 @@ function spawnRelay({ configPath, relayArguments = ["app-server"] }) {
     });
   });
   return { child, closed };
-}
-
-async function createNodeAlias(path) {
-  if (process.platform === "win32") {
-    try {
-      await link(process.execPath, path);
-    } catch {
-      await copyFile(process.execPath, path);
-    }
-  } else {
-    await symlink(process.execPath, path);
-  }
-  await chmod(path, 0o700);
-  return path;
 }
 
 test("app-server relay 观察 codex_app 启动失败且不改写官方通知", async (t) => {

@@ -1,12 +1,29 @@
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export async function useTempDir(t, prefix = "codex-quota-test-") {
   const directory = await mkdtemp(join(tmpdir(), prefix));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(() => removeTestDirectory(directory));
   return directory;
+}
+
+export function removeTestDirectory(directory) {
+  return rm(directory, {
+    recursive: true, force: true,
+    maxRetries: process.platform === "win32" ? 5 : 0,
+    retryDelay: 100,
+  });
+}
+
+export async function createTestNodeExecutable(path) {
+  // Windows must not share a file with the still-running test runner: its image
+  // mapping can prevent unlinking a hard link during fixture cleanup.
+  // Unix keeps a symlink so dynamically linked Node can locate its libraries.
+  if (process.platform === "win32") await copyFile(process.execPath, path);
+  else await symlink(process.execPath, path);
+  return path;
 }
 
 export async function startHttpServer(t, handler) {

@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { copyFile, link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-import { waitFor } from "./helpers.mjs";
+import { createTestNodeExecutable, removeTestDirectory, waitFor } from "./helpers.mjs";
 
 export async function startTestRelay(t, {
   usagePathIsDirectory = false,
@@ -23,15 +23,10 @@ export async function startTestRelay(t, {
       clearTimeout(timer);
       lines.close();
     }
-    await rm(directory, { recursive: true, force: true });
+    await removeTestDirectory(directory);
   });
   const executable = join(directory, process.platform === "win32" ? "fixture-node.exe" : "fixture-node");
-  // Keep dynamically linked Node beside its libraries; Windows can use a hard link.
-  if (process.platform === "win32") {
-    await link(process.execPath, executable).catch(() => copyFile(process.execPath, executable));
-  } else {
-    await symlink(process.execPath, executable);
-  }
+  await createTestNodeExecutable(executable);
   const configPath = join(directory, "relay.json");
   const catalogPath = join(directory, "catalog.json");
   const settingsPath = join(directory, "models.json");
