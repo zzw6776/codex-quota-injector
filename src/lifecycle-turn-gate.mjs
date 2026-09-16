@@ -1,11 +1,14 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { locateHistoryDatabases } from "./lifecycle-history-store.mjs";
 
 const TERMINAL_EVENTS = new Set(["task_complete", "turn_aborted"]);
 
 export async function findActiveCodexTurns({
   codexHome = process.env.CODEX_HOME || join(homedir(), ".codex"),
+  sqliteHome = process.env.CODEX_SQLITE_HOME || codexHome,
   recentWindowMs = 24 * 60 * 60 * 1_000,
   now = () => Date.now(),
 } = {}) {
@@ -15,7 +18,15 @@ export async function findActiveCodexTurns({
     throw error;
   });
   const recent = [];
+  const indexedPaths = await currentRolloutPaths(sqliteHome);
   for (const path of files) {
+    const current = indexedPaths.get(rolloutThreadId(path));
+    if (current && resolve(current) !== resolve(path)) {
+      // A recovered thread may retain an abandoned rollout beside its current
+      // one. Only the official index can establish that it was superseded.
+      await stat(current); // A missing replacement is not evidence of idleness.
+      continue;
+    }
     const info = await stat(path).catch(() => null);
     if (info && now() - info.mtimeMs <= recentWindowMs) recent.push(path);
   }
@@ -25,6 +36,23 @@ export async function findActiveCodexTurns({
     if (turn) active.push(turn);
   }
   return active;
+}
+
+export function rolloutThreadId(path) {
+  return String(path ?? "").split(/[\\/]/).pop()
+    .match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i)?.[0] ?? null;
+}
+
+async function currentRolloutPaths(sqliteHome) {
+  const { state } = await locateHistoryDatabases(sqliteHome);
+  if (!state) return new Map();
+  const database = new DatabaseSync(state, { readOnly: true });
+  try {
+    return new Map(database.prepare("SELECT id, rollout_path FROM threads").all()
+      .map(row => [row.id, row.rollout_path]));
+  } finally {
+    database.close();
+  }
 }
 
 export async function captureCodexSessionCheckpoint(options = {}) {

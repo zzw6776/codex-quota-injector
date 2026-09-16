@@ -273,6 +273,7 @@ class HostHealthTracker {
     this.timer = null;
     this.tail = Promise.resolve();
     this.closed = false;
+    this.startupStatus = null;
     const startedAt = this.now();
     this.state = {
       version: HOST_HEALTH_STATE_VERSION,
@@ -325,6 +326,7 @@ class HostHealthTracker {
     if (!isCodexAppServer(params?.name)) return;
     const serverStatus = String(params?.status ?? "").trim();
     const threadId = typeof params?.threadId === "string" ? params.threadId : null;
+    this.startupStatus = { status: serverStatus, threadId };
     if (serverStatus === "ready") {
       if (this.state.toolsVerified && this.state.missingTools.length === 0) {
         this.clearGraceTimer();
@@ -373,7 +375,7 @@ class HostHealthTracker {
     }
   }
 
-  observeStatusList(result, error = null) {
+  observeStatusList(result, error = null, { threadId = null } = {}) {
     if (error) {
       this.clearGraceTimer();
       void this.update({
@@ -386,16 +388,24 @@ class HostHealthTracker {
     }
     const entries = Array.isArray(result?.data) ? result.data : [];
     const entry = entries.find((candidate) => isCodexAppServer(candidate?.name));
-    const classified = classifyCodexAppStatus(entry, this.requiredTools);
+    // Unscoped inventory reports runtimeStatus:null even after startup is ready.
+    // Use the observed startup evidence, never the cached catalog alone, and
+    // never combine a different task's scoped response with that evidence.
+    const startupReady = this.startupStatus?.status === "ready" &&
+      (threadId == null || threadId === this.startupStatus.threadId);
+    const classified = classifyCodexAppStatus(entry && entry.runtimeStatus == null && startupReady
+      ? { ...entry, runtimeStatus: "connected" }
+      : entry, this.requiredTools);
+    void this.update(classified);
     if (classified.status === "ready" || classified.status === "degraded") {
       this.clearGraceTimer();
     } else {
       this.armGraceTimer();
     }
-    void this.update(classified);
   }
 
   observeReloadStarted() {
+    this.startupStatus = null;
     this.clearGraceTimer();
     void this.update({
       status: "starting",

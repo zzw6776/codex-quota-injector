@@ -27,6 +27,10 @@ import {
 } from "../src/lifecycle-host.mjs";
 import { stopCodex } from "../src/platform.mjs";
 import { sendWakeupRequest } from "../src/wakeup-client.mjs";
+import { readSingleInstanceStatus } from "../src/single-instance.mjs";
+import { RELAY_PROTOCOL_VERSION } from "../src/relay-contract.mjs";
+import { readLatestUnfinishedLifecycle } from "../src/lifecycle-runner.mjs";
+import { createMacLifecycleSessionGuard, protectMacLifecycleOperations } from "./lifecycle-macos-session.mjs";
 
 const execFileAsync = promisify(execFile);
 const WAIT_INTERVAL_MS = 500;
@@ -39,6 +43,9 @@ export async function createMacLifecyclePlan({
   installedApp = DEFAULT_INSTALLED_APP,
 } = {}) {
   const host = await inspectLifecycleHost({ installedApp, expectedProtocol });
+  const unfinishedLifecycle = await readLatestUnfinishedLifecycle(
+    join(root, ".runtime", "test-results", "lifecycle", "latest.json"),
+  );
   return {
     batch: "C-lifecycle",
     mode: "macos-external-supervisor",
@@ -49,6 +56,7 @@ export async function createMacLifecyclePlan({
     tokenRequests: host.accounts.roundTripAvailable ? 1 : 0,
     actions: [
       "构建、验签并安装当前架构正式包",
+      "绑定发起任务与回合，等待活动回合结束并核对历史持久化",
       "正式入口接管现有注入器并等待 Codex 重新启动",
       "核对中继 generation 已加载目标协议",
       "重复启动仍保持一个注入器和同一 Codex",
@@ -58,6 +66,7 @@ export async function createMacLifecyclePlan({
     ],
     host: publicLifecycleHost(host),
     accountRoundTrip: host.accounts.roundTripAvailable ? "ready" : "blocked-less-than-two-oauth-accounts",
+    unfinishedLifecycle,
     controller: "launchd one-shot job; no UI clicks",
     reportDirectory: join(root, ".runtime", "test-results", "lifecycle"),
   };
@@ -182,25 +191,46 @@ export async function verifyMacAppBundle(appPath, {
   };
 }
 
-export function createMacLifecycleOperations(controlPath, initialControl) {
+export function createMacLifecycleOperations(controlPath, initialControl, {
+  sessionGuard = createMacLifecycleSessionGuard(initialControl),
+} = {}) {
   let control = structuredClone(initialControl);
   const updateControl = async (runtimePatch) => {
     control.runtime = { ...(control.runtime ?? {}), ...runtimePatch };
     await writePrivateJson(controlPath, control);
   };
-  const currentHost = () => inspectLifecycleHost({
-    installedApp: control.installedApp,
-    expectedProtocol: control.expectedProtocol,
-  });
-  const verifyReady = async (options = {}) => waitForTargetHost(control, options);
-  const restartThroughInstalledEntry = async () => {
+  const currentHost = async () => {
+    const host = await inspectLifecycleHost({
+      installedApp: control.installedApp,
+      expectedProtocol: control.expectedProtocol,
+    });
+    host.launcher = await readSingleInstanceStatus().catch(() => null);
+    host.readiness.launcherReady = launcherMatchesHost(host, control.projectVersion);
+    host.readiness.ready &&= host.readiness.launcherReady;
+    return host;
+  };
+  const verifyReady = async (options = {}) => {
+    const host = await waitForTargetHost(control, { readLauncherStatus: readSingleInstanceStatus, ...options });
+    await sessionGuard.after();
+    return host;
+  };
+  const launchInstalledApp = async () => {
+    await sessionGuard.before();
     await launchApp(control.installedApp);
+  };
+  const stopDesktop = async () => {
+    await sessionGuard.before();
+    await stopCodex();
+  };
+  const restartThroughInstalledEntry = async () => {
+    await launchInstalledApp();
     return verifyReady();
   };
   const restoreOriginalAccount = async () => {
     if (!control.accounts?.available) return { skipped: true };
     // Stop the injector's credential watcher before another AccountStore
     // instance writes the shared index and encrypted account files.
+    await sessionGuard.before();
     await stopInjectorOwners();
     const manager = new AccountManager();
     try {
@@ -214,7 +244,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
     } finally {
       manager.close();
     }
-    await stopCodex();
+    await stopDesktop();
     const host = await restartThroughInstalledEntry();
     return {
       account: lifecycleFingerprint(control.accounts.originalId),
@@ -223,7 +253,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
     };
   };
 
-  return {
+  const operations = {
     "verify-package": {
       replaySafe: true,
       run: async () => verifyMacAppBundle(control.candidateApp, {
@@ -238,6 +268,11 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
         }),
       }),
     },
+    "wait-desktop-idle": {
+      replaySafe: true,
+      run: async () => ({ status: "idle" }),
+      reconcile: async () => ({ completed: true, evidence: { status: "idle" } }),
+    },
     "install-update": {
       replaySafe: true,
       run: async () => {
@@ -251,7 +286,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
           ? { completed: true, evidence: installed }
           : { completed: false, safeToRetry: true };
       },
-      rollback: async () => rollbackInstalledApp(control),
+      rollback: async () => rollbackInstalledApp(control, sessionGuard),
     },
     "launch-updated": {
       replaySafe: true,
@@ -261,7 +296,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
           before.injectorPids,
           control.installedApp,
         );
-        await launchApp(control.installedApp);
+        await launchInstalledApp();
         const requireCodexChange = control.initialHost?.relay?.protocol !== control.expectedProtocol;
         const host = await verifyReady({
           previousCodexPids: requireCodexChange ? control.initialHost.codexPids : null,
@@ -298,8 +333,9 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
             relayPid: before.relay.pid,
           },
         });
-        await launchApp(control.installedApp);
-        const after = await assertStableHost(control, before, 8_000);
+        await launchInstalledApp();
+        const settled = await verifyReady({ afterLauncherRevision: before.launcher.revision, stableBaseline: before });
+        const after = await assertStableHost(control, settled, 8_000);
         return publicHostEvidence(after, { retainedInjectorPid: after.injectorPids[0] });
       },
       reconcile: async () => {
@@ -320,6 +356,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
       run: async () => {
         const before = await verifyReady();
         await updateControl({ reconnectBaselineRelayPid: before.relay.pid });
+        await sessionGuard.before();
         try {
           process.kill(before.relay.pid, "SIGTERM");
         } catch (error) {
@@ -331,7 +368,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
           host = await verifyReady({ previousRelayPid: before.relay.pid, timeoutMs: 15_000 });
         } catch {
           recovery = "injector-entry";
-          await launchApp(control.installedApp);
+          await launchInstalledApp();
           host = await verifyReady({ previousRelayPid: before.relay.pid });
         }
         return publicHostEvidence(host, {
@@ -353,7 +390,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
       run: async () => {
         const before = await verifyReady();
         await updateControl({ closeBaselineCodexPids: before.codexPids });
-        await stopCodex();
+        await stopDesktop();
         const stopped = await currentHost();
         if (stopped.codexPids.length !== 0) throw new Error("Codex 关闭后仍有主进程存活");
         const host = await restartThroughInstalledEntry();
@@ -372,6 +409,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
     "switch-account": {
       run: async () => {
         if (!control.accounts?.available) throw new Error("没有两个可用于往返测试的 OAuth 账号");
+        await sessionGuard.before();
         await stopInjectorOwners();
         const manager = new AccountManager();
         try {
@@ -381,7 +419,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
             await manager.switchAccount(control.accounts.targetId);
           }
           await updateControl({ accountWritten: "target" });
-          await stopCodex();
+          await stopDesktop();
           const host = await restartThroughInstalledEntry();
           await updateControl({ targetAccountRestarted: true });
           const controller = new AbortController();
@@ -499,6 +537,7 @@ export function createMacLifecycleOperations(controlPath, initialControl) {
       },
     },
   };
+  return protectMacLifecycleOperations(operations, sessionGuard);
 }
 
 export async function installAppBundle(control) {
@@ -537,15 +576,26 @@ export async function installAppBundle(control) {
   };
 }
 
-export async function rollbackInstalledApp(control) {
+export async function rollbackInstalledApp(control, sessionGuard = createMacLifecycleSessionGuard(control)) {
   const backupExists = await pathExists(control.backupApp);
   const installedCandidate = backupExists ? null : await installedCandidateEvidence(control);
+  // A prior rollback may have restored the bundle and then failed to launch.
+  // Verify the restored package before retrying only the runtime recovery.
+  const restoredOriginal = !backupExists && control.initialHost.installedVersion
+    ? await verifyMacAppBundle(control.installedApp, {
+      projectVersion: control.initialHost.installedVersion, architecture: control.arch,
+    }).catch(() => null)
+    : null;
   const rollbackAction = selectInstallRollbackAction({
     backupExists,
     initialInstalledVersion: control.initialHost.installedVersion,
     projectVersion: control.projectVersion,
     installedCandidate: Boolean(installedCandidate),
+    restoredOriginal: Boolean(restoredOriginal),
   });
+  const recoveryVersion = (await readJson(join(control.root, "package.json")))?.version;
+  if (!recoveryVersion) throw new Error("无法确认恢复所用源码版本");
+  await sessionGuard.before();
   await stopInjectorOwners();
   await rm(control.stagingApp, { recursive: true, force: true });
   if (rollbackAction === "restore-backup") {
@@ -554,13 +604,16 @@ export async function rollbackInstalledApp(control) {
   } else if (rollbackAction === "remove-installed") {
     await rm(control.installedApp, { recursive: true, force: true });
   }
+  await sessionGuard.before();
   const child = spawn(process.execPath, [join(control.root, "src", "launcher.mjs"), "--explicit-start"], {
     cwd: control.root,
     detached: true,
     stdio: "ignore",
   });
   child.unref();
-  const host = await waitForTargetHost(control, {
+  const host = await waitForTargetHost({ ...control, projectVersion: recoveryVersion,
+    expectedProtocol: RELAY_PROTOCOL_VERSION }, {
+    readLauncherStatus: readSingleInstanceStatus,
     ownerCheck: (snapshot) => injectorOwnedByExecutable(snapshot.injectorPids, process.execPath),
     ownerFailure: "current-source-owner",
   });
@@ -569,6 +622,9 @@ export async function rollbackInstalledApp(control) {
     recoveryEntry: "current-source",
     rollbackAction,
     sourceOwner: true,
+    recoverySourceVersion: recoveryVersion,
+    recoveryRelayProtocol: RELAY_PROTOCOL_VERSION,
+    restoredOriginal,
   });
 }
 
@@ -577,9 +633,11 @@ export function selectInstallRollbackAction({
   initialInstalledVersion,
   projectVersion,
   installedCandidate,
+  restoredOriginal = false,
 }) {
   if (backupExists) return "restore-backup";
   if (!initialInstalledVersion) return "remove-installed";
+  if (restoredOriginal) return "leave-installed";
   if (initialInstalledVersion === projectVersion && installedCandidate) return "leave-installed";
   throw new Error("安装前应用备份不存在，拒绝把未知安装状态标为已回滚");
 }
@@ -593,21 +651,31 @@ export async function waitForTargetHost(control, {
   ownerFailure = "target-owner",
   inspectHost = inspectLifecycleHost,
   pollIntervalMs = WAIT_INTERVAL_MS,
+  readLauncherStatus = null,
+  afterLauncherRevision = null,
+  stableBaseline = null,
 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let latest = null;
   let ownerMatches = ownerCheck === null;
+  let launcherReady = readLauncherStatus === null;
   while (Date.now() < deadline) {
     latest = await inspectHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
     });
+    if (stableBaseline) assertHostIdentity(stableBaseline, latest);
+    if (readLauncherStatus) {
+      latest.launcher = await readLauncherStatus().catch(() => null);
+      launcherReady = launcherMatchesHost(latest, control.projectVersion) &&
+        (afterLauncherRevision == null || latest.launcher.revision > afterLauncherRevision);
+    }
     const relayChanged = previousRelayPid == null || latest.relay.pid !== previousRelayPid;
     const codexChanged = previousCodexPids == null || !samePids(latest.codexPids, previousCodexPids);
     const injectorChanged = previousInjectorPids == null ||
       !samePids(latest.injectorPids, previousInjectorPids);
     ownerMatches = ownerCheck === null || await ownerCheck(latest);
-    if (latest.readiness.ready && relayChanged && codexChanged && injectorChanged && ownerMatches) {
+    if (latest.readiness.ready && relayChanged && codexChanged && injectorChanged && ownerMatches && launcherReady) {
       return latest;
     }
     await delay(pollIntervalMs);
@@ -626,6 +694,7 @@ export async function waitForTargetHost(control, {
     reasons.push("injector-pids-unchanged");
   }
   if (!ownerMatches) reasons.push(ownerFailure);
+  if (!launcherReady) reasons.push(`launcher-not-ready:${JSON.stringify(latest?.launcher ?? null)}`);
   throw new Error(`等待 Codex 生命周期就绪超时：${reasons.join(", ")}`);
 }
 
@@ -637,13 +706,27 @@ async function assertStableHost(control, baseline, durationMs) {
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
     });
-    if (!latest.readiness.ready) throw new Error("重复启动后的 Codex 不再就绪");
-    assertSamePids(baseline.injectorPids, latest.injectorPids, "重复启动产生了新的注入器");
-    assertSamePids(baseline.codexPids, latest.codexPids, "重复启动意外重启了 Codex");
-    if (baseline.relay.pid !== latest.relay.pid) throw new Error("重复启动意外替换了中继进程");
+    latest.launcher = await readSingleInstanceStatus();
+    if (latest.launcher.phase !== "ready" || latest.launcher.pid !== baseline.launcher.pid ||
+      latest.launcher.revision !== baseline.launcher.revision) {
+      throw new Error(`稳定性检查期间启动流程发生变化：${JSON.stringify(latest.launcher)}`);
+    }
+    if (!latest.readiness.ready) throw new Error(`重复启动后的 Codex 不再就绪：${JSON.stringify(publicHostEvidence(latest))}`);
+    assertHostIdentity(baseline, latest);
     await delay(WAIT_INTERVAL_MS);
   }
   return latest;
+}
+
+function assertHostIdentity(baseline, latest) {
+  assertSamePids(baseline.injectorPids, latest.injectorPids, "重复启动产生了新的注入器");
+  assertSamePids(baseline.codexPids, latest.codexPids, "重复启动意外重启了 Codex");
+  if (baseline.relay.pid !== latest.relay.pid) throw new Error("重复启动意外替换了中继进程");
+}
+
+function launcherMatchesHost(host, version) {
+  return host.launcher?.phase === "ready" && host.injectorPids.length === 1 &&
+    host.launcher.pid === host.injectorPids[0] && host.launcher.version === version;
 }
 
 export async function launchApp(appPath) {
@@ -739,8 +822,8 @@ export async function writePrivateJson(path, value) {
 }
 
 export function launchdPlist({ label, nodeExecutable, supervisorScript, controlPath,
-  workingDirectory, stdoutPath, stderrPath }) {
-  const args = [nodeExecutable, supervisorScript, "--control", controlPath]
+  workingDirectory, stdoutPath, stderrPath, recovery = false }) {
+  const args = [nodeExecutable, supervisorScript, ...(recovery ? ["--recover"] : []), "--control", controlPath]
     .map((value) => `<string>${xmlEscape(value)}</string>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -765,6 +848,8 @@ function publicHostEvidence(host, extra = {}) {
     relayProtocol: host.relay.protocol,
     debugReady: host.readiness.debugReady,
     generationMatches: host.relay.generationMatches,
+    readiness: host.readiness,
+    launcher: host.launcher ?? null,
     ...extra,
   };
 }

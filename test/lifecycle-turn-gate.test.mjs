@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   captureCodexSessionCheckpoint,
   findActiveCodexTurns,
   parseActiveCodexTurns,
+  rolloutThreadId,
   waitForCodexTurnsIdle,
 } from "../src/lifecycle-turn-gate.mjs";
 import { useTempDir } from "./helpers.mjs";
@@ -99,4 +101,26 @@ test("[A HAR-04 LCH-03] 活动回合未落盘时超时并拒绝关闭", async ()
     pollIntervalMs: 1,
     timeoutMs: 3,
   }), /拒绝关闭桌面应用/);
+});
+
+test("[A HAR-04 LCH-03] 官方索引指向恢复后的 rollout 时，旧文件不再制造假活动回合", async t => {
+  const codexHome = await useTempDir(t, "codex-turn-index-");
+  const sessions = join(codexHome, "sessions");
+  await mkdir(sessions);
+  const id = "01a0a3f6-5bb6-77a2-9ab8-c93b249cc535";
+  const old = join(sessions, `rollout-old-${id}.jsonl`);
+  const current = join(sessions, `rollout-new-${id}_01a0a40d-4715-7732-befc-e7856cefe993.jsonl`);
+  await writeFile(old, record("task_started", "abandoned", "2026-09-15T07:50:00Z") + "\n");
+  await writeFile(current, record("task_complete", "recovered", "2026-09-15T07:55:00Z") + "\n");
+  const database = new DatabaseSync(join(codexHome, "state_5.sqlite"));
+  try {
+    database.exec("CREATE TABLE threads (id TEXT, rollout_path TEXT)");
+    database.prepare("INSERT INTO threads VALUES (?, ?)").run(id, current);
+    assert.equal(rolloutThreadId(current), id);
+    assert.deepEqual(await findActiveCodexTurns({ codexHome, sqliteHome: codexHome }), []);
+    await appendFile(current, record("task_started", "actually-running", "2026-09-16T00:00:00Z") + "\n");
+    assert.deepEqual((await findActiveCodexTurns({ codexHome, sqliteHome: codexHome })).map(x => x.turnId), ["actually-running"]);
+    database.prepare("UPDATE threads SET rollout_path = ?").run(join(sessions, "missing.jsonl"));
+    await assert.rejects(findActiveCodexTurns({ codexHome, sqliteHome: codexHome }), { code: "ENOENT" });
+  } finally { database.close(); }
 });

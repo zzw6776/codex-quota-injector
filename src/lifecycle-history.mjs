@@ -131,7 +131,7 @@ function analyzeRecord(state, record) {
   if (!Number.isInteger(record?.ordinal)) {
     state.invalidOrdinalRecords.push({ index, ordinal: record?.ordinal ?? null });
   } else {
-    const expected = state.previousOrdinal == null ? 0 : state.previousOrdinal + 1;
+    const expected = state.previousOrdinal == null ? declaredInitialOrdinal(record) : state.previousOrdinal + 1;
     if (record.ordinal !== expected) {
       state.sequenceIssues.push({
         index,
@@ -175,6 +175,7 @@ function finishAnalysis(state) {
 
 function createRepairState() {
   return {
+    initialOrdinal: 0,
     nextOrdinal: 0,
     activeTurn: null,
     sourceRecords: 0,
@@ -184,6 +185,10 @@ function createRepairState() {
 }
 
 function repairRecord(state, record, emit) {
+  if (state.sourceRecords === 0) {
+    state.initialOrdinal = declaredInitialOrdinal(record);
+    state.nextOrdinal = state.initialOrdinal;
+  }
   state.sourceRecords += 1;
   const payload = eventPayload(record);
   if (payload?.type === "task_started" && state.activeTurn) {
@@ -225,7 +230,7 @@ function emitAssigned(state, record, emit) {
 function finishRepair(state) {
   return {
     sourceRecords: state.sourceRecords,
-    outputRecords: state.nextOrdinal,
+    outputRecords: state.nextOrdinal - state.initialOrdinal,
     lastOrdinal: state.nextOrdinal - 1,
     rewrittenOrdinals: state.rewrittenOrdinals,
     insertedTerminalEvents: state.insertedTerminalEvents,
@@ -242,6 +247,18 @@ function updateTurnState(state, record, onMissingTerminal = null) {
   } else if (TERMINAL_EVENTS.has(payload?.type)) {
     state.activeTurn = null;
   }
+}
+
+function declaredInitialOrdinal(record) {
+  const meta = record?.type === "session_meta" ? record.payload : null;
+  const base = meta?.history_base;
+  // Paginated forks keep their parent's ordinal space. Do not treat an
+  // arbitrary nonzero first record as a valid base without matching metadata.
+  return typeof base?.thread_id === "string" && base.thread_id.length > 0 &&
+    base.thread_id === meta.forked_from_id &&
+    Number.isSafeInteger(base.end_ordinal_exclusive) && base.end_ordinal_exclusive >= 0 &&
+    base.end_ordinal_exclusive === meta.forked_from_ordinal_exclusive
+    ? base.end_ordinal_exclusive : 0;
 }
 
 function eventPayload(record) {

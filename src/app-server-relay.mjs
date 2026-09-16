@@ -238,15 +238,13 @@ export async function runAppServerRelay() {
   const usageEventWriter = createUsageEventWriter(
     publishHostState ? tokenUsageEventsPath : "",
   );
-  let ownsRuntimeState = Boolean(sidecar);
+  let ownsRuntimeState = false;
   try {
-    if (!sidecar) {
-      ownsRuntimeState = await claimRelayState(
-        statePath,
-        relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
-        processIdentity,
-      );
-    }
+    ownsRuntimeState = await claimRelayState(
+      statePath,
+      relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
+      processIdentity,
+    );
   } catch (error) {
     child?.kill();
     sidecar?.close();
@@ -431,7 +429,7 @@ function rewriteClientLine(line, state) {
     ? { ...message.params }
     : {};
   if (isMcpStatusListMethod(method)) {
-    if (message.id != null) rememberPendingRequest(state, message.id, { method });
+    if (message.id != null) rememberPendingRequest(state, message.id, { method, threadId: params.threadId ?? null });
     return line;
   }
   if (method === MODEL_LIST_METHOD) {
@@ -629,7 +627,7 @@ function rewriteServerLine(line, state) {
     return "";
   }
   if (isMcpStatusListMethod(pending.method)) {
-    state.hostHealth?.observeStatusList(message.result, message.error);
+    state.hostHealth?.observeStatusList(message.result, message.error, pending);
     return line;
   }
   if (message.error) {

@@ -121,3 +121,24 @@ test("[C LCH-04] ordinal 缺口可能代表记录丢失，不能用重新编号�
   assert.equal(result.sequenceIssues[0].kind, "unknown");
   assert.equal(result.repairable, false);
 });
+
+test("[C LCH-04] 官方分页分叉从继承边界接续，不将合法非零起点误报为缺口", () => {
+  const meta = { ordinal: 24658, type: "session_meta", payload: {
+    forked_from_id: "parent", forked_from_ordinal_exclusive: 24658,
+    history_base: { thread_id: "parent", end_ordinal_exclusive: 24658 },
+  } };
+  const records = [meta, event(24659, "task_started", "turn"), event(24660, "task_complete", "turn")];
+  assert.equal(analyzeRolloutRecords(records).repairRequired, false);
+  assert.equal(analyzeRolloutRecords(records).lastOrdinal, 24660);
+  for (const payload of [{}, { ...meta.payload, forked_from_id: "other" },
+    { ...meta.payload, forked_from_ordinal_exclusive: 12 }]) {
+    assert.equal(analyzeRolloutRecords([{ ...meta, payload }, ...records.slice(1)]).repairable, false);
+  }
+  assert.equal(analyzeRolloutRecords([meta, event(24660, "task_complete", "turn")]).repairable, false);
+  const repair = repairRolloutRecords([meta, event(24659, "task_started", "old"),
+    event(24660, "task_started", "next"), event(24661, "task_complete", "next")]);
+  assert.equal(repair.records[0].ordinal, 24658);
+  assert.deepEqual(repair.records[0].payload, meta.payload);
+  assert.equal(repair.manifest.outputRecords, 5);
+  assert.equal(analyzeRolloutRecords(repair.records).repairRequired, false);
+});

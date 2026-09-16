@@ -15,6 +15,7 @@ import {
 } from "../src/lifecycle-progress.mjs";
 import {
   createLifecycleReport,
+  lifecycleResumeDecision,
   readLifecycleReport,
   validateLifecycleControl,
   writeLifecycleReport,
@@ -26,6 +27,11 @@ import {
   writePrivateJson,
 } from "./lifecycle-macos.mjs";
 import { requireFreeResult, RESULTS, ROOT, sourceSnapshot } from "./test-support.mjs";
+import {
+  captureMacLifecycleSession,
+  inspectMacLifecycleHistory,
+  validateMacLifecycleSession,
+} from "./lifecycle-macos-session.mjs";
 
 const execFileAsync = promisify(execFile);
 const lifecycleRoot = join(RESULTS, "lifecycle");
@@ -69,10 +75,18 @@ if (resumeArgument) {
   const controlPath = join(runDirectory, "control.json");
   const control = JSON.parse(await readFile(controlPath, "utf8"));
   validateLifecycleControl(control, { root: ROOT, runDirectory });
+  validateMacLifecycleSession(control);
+  const previousReport = await readLifecycleReport(control.reportPath);
+  const decision = lifecycleResumeDecision(previousReport);
+  if (decision === "already-running") throw new Error("C 监督器仍在运行，拒绝中断并重复启动");
+  if (decision === "terminal") {
+    console.log(JSON.stringify({ status: previousReport.status, runId, reportPath: control.reportPath }));
+    process.exit(0);
+  }
   control.progressPath ??= join(runDirectory, "progress.html");
   await writeLifecycleProgressPage(control.reportPath, control.progressPath);
   await openProgressPage(control.progressPath);
-  await launchExistingJob(control);
+  await launchExistingJob(control, { recovery: decision === "manual-recovery" });
   console.log(JSON.stringify({
     status: "resumed",
     runId,
@@ -96,9 +110,17 @@ if (!argv.includes("--confirm-restart")) {
   throw new Error("生命周期测试会关闭并重新启动 Codex；请使用 --plan 查看范围");
 }
 assertMacOS();
+if (plan.unfinishedLifecycle) {
+  throw new Error(`上一次 C ${plan.unfinishedLifecycle.runId} 尚未完成；` +
+    `请先执行 npm run test:lifecycle -- --resume=${plan.unfinishedLifecycle.runId}`);
+}
 if (plan.accountRoundTrip !== "ready") {
   throw new Error("真实账号往返需要当前账号和另一个已保存的 OAuth 账号；前置条件不满足");
 }
+const session = await captureMacLifecycleSession();
+// Detect structural damage before building or installing anything. The current
+// initiating turn may still run; the external supervisor waits for its terminal.
+await inspectMacLifecycleHistory(session, { allowActive: true });
 const free = await requireFreeResult();
 const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
 const runDirectory = join(lifecycleRoot, runId);
@@ -133,6 +155,7 @@ const report = createLifecycleReport({
   targetRelayProtocol: RELAY_PROTOCOL_VERSION,
   steps: [
     "verify-package",
+    "wait-desktop-idle",
     "install-update",
     "launch-updated",
     "repeat-launch",
@@ -147,6 +170,7 @@ const report = createLifecycleReport({
     mode: "launchd-one-shot",
     sourceSnapshot: free.snapshot,
     initialHost: plan.host,
+    initiatingTurn: { threadId: session.initiatingTurn.threadId, turnId: session.initiatingTurn.turnId },
     candidate: {
       version: candidate.version,
       architecture: candidate.architecture,
@@ -166,6 +190,7 @@ const report = createLifecycleReport({
 await writeLifecycleReport(reportPath, report);
 const control = {
   version: 1,
+  ...session,
   runId,
   root: ROOT,
   reportPath,
@@ -194,7 +219,7 @@ const control = {
   },
   launchd: { label },
   progressPath,
-  startDelayMs: 10_000,
+  startDelayMs: 0,
   runtime: {},
 };
 await writePrivateJson(controlPath, control);
@@ -218,21 +243,29 @@ await scheduleLifecycleWithVisibleProgress({
 console.log(JSON.stringify({
   status: "scheduled",
   runId,
-  startsAfterMs: control.startDelayMs,
+  startsAfter: "活动回合完成且会话历史持久化后",
   reportPath,
   progressPath,
   statusCommand: `npm run test:lifecycle -- --status=${runId}`,
   note: "监督器由 launchd 托管；Codex 关闭不会终止它。",
 }, null, 2));
 
-async function launchExistingJob(control) {
+async function launchExistingJob(control, { recovery = false } = {}) {
   const service = `gui/${process.getuid()}/${control.launchd.label}`;
-  const result = await execFileAsync("/bin/launchctl", ["kickstart", "-k", service])
-    .catch(async () => {
-      const plistPath = join(lifecycleRoot, control.runId, "supervisor.plist");
-      return execFileAsync("/bin/launchctl", ["bootstrap", `gui/${process.getuid()}`, plistPath]);
-    });
-  return result;
+  const runDirectory = join(lifecycleRoot, control.runId);
+  const plistPath = join(runDirectory, "supervisor.plist");
+  await writeFile(plistPath, launchdPlist({
+    label: control.launchd.label,
+    nodeExecutable: process.execPath,
+    supervisorScript: join(ROOT, "scripts", "lifecycle-supervisor.mjs"),
+    controlPath: join(runDirectory, "control.json"),
+    workingDirectory: ROOT,
+    stdoutPath: join(runDirectory, "supervisor.stdout.log"),
+    stderrPath: join(runDirectory, "supervisor.stderr.log"),
+    recovery,
+  }), { mode: 0o600 });
+  await execFileAsync("/bin/launchctl", ["bootout", service]).catch(() => undefined);
+  return execFileAsync("/bin/launchctl", ["bootstrap", `gui/${process.getuid()}`, plistPath]);
 }
 
 async function openProgressPage(progressPath) {

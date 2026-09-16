@@ -10,7 +10,7 @@ import {
 import { defaultAccountDataDir } from "../src/platform.mjs";
 import { readCodexDelegationInput } from "../src/codex-delegation.mjs";
 
-export const DESKTOP_HOST_REPORT_VERSION = 10;
+export const DESKTOP_HOST_REPORT_VERSION = 11;
 
 export function desktopBatch(profile) {
   if (profile === "official") return "B1-official";
@@ -122,7 +122,11 @@ export function parseDesktopRollout(content, {
 
   const execMarker = `EXEC_${marker}`;
   const failureMarker = `FAIL_${marker}`;
-  const execCall = calls.find((call) => isExecCall(call) && call.input.includes(execMarker));
+  const execAttempts = calls.filter((call) => isExecCall(call) && call.input.includes(execMarker));
+  const execCall = execAttempts.find((call) => {
+    const output = outputs.get(call.id)?.text ?? "";
+    return output.includes(execMarker) && hasExitCode(output, 0);
+  }) ?? execAttempts[0];
   const failureAttempts = calls.filter((call) =>
     isExecCall(call) && call.input.includes(failureMarker));
   const failureCall = failureAttempts.find((call) => {
@@ -204,19 +208,23 @@ export function parseDesktopRollout(content, {
       codexAppListProjects: codexAppListProjectsCall?.id ?? null,
       codexAppGetUsageLimits: codexAppGetUsageLimitsCall?.id ?? null,
       webRun: webCalls.map((call) => call.id).filter(Boolean),
+      webSearch: webCalls.filter((call) => hasWebOperation(call.input, "search_query")).map((call) => call.id),
+      webOpen: webCalls.filter((call) => hasWebOperation(call.input, "open")).map((call) => call.id),
+      webFind: webCalls.filter((call) => hasWebOperation(call.input, "find")).map((call) => call.id),
       computerUse: computerCalls.map((call) => call.id).filter(Boolean),
       computerInput: computerInputCalls.map((call) => call.id).filter(Boolean),
       computerSubmit: computerSubmitCalls.map((call) => call.id).filter(Boolean),
       computerScreenshot: computerScreenshotCalls.map((call) => call.id).filter(Boolean),
     },
     checks: {
-      functionsExec: Boolean(execCall && execOutput.includes(execMarker)),
+      functionsExec: Boolean(execCall && execOutput.includes(execMarker) && hasExitCode(execOutput, 0)),
       functionsExecFailure: Boolean(failureCall && failureOutput.includes(failureMarker) &&
         hasExitCode(failureOutput, 23) && continuedAfterFailure),
       codexAppListThreads: codexAppListSucceeded,
       codexAppReadThread: codexAppListSucceeded && codexAppReadSucceeded,
       codexAppReadContent: codexAppReadEvidence.hasMessageItems,
       codexAppReadEmptyCompletedTurns: codexAppReadEvidence.emptyCompletedTurns,
+      codexAppReadOutputTruncated: codexAppReadEvidence.outputTruncated,
       codexAppReadMarker: codexAppReadEvidence.markerInMessageItems,
       codexAppListProjects: Boolean(codexAppListProjectsCall &&
         isSuccessfulCodexAppOutput(codexAppListProjectsOutput)),
@@ -326,6 +334,10 @@ export function evaluateDesktopHostEvidence({
         Number(normalizedHttpEvidence.artifactRequests ?? 0) >= 1),
     ]),
   ];
+  if (rollout?.checks?.codexAppReadOutputTruncated === true) {
+    checks.find((item) => item.id === "codex-app-read-thread").reason =
+      "read_thread 的 JSON 返回被工具输出预算截断，无法核验内容；不等同于空回合或模型不支持";
+  }
   let status = checks.every((item) => item.status === "passed") ? "passed" : "incomplete";
   const invalidComputerUse = computerUseKind === "windows-native"
     ? Number(nativeComputerUseEvidence?.launchCount ?? 0) > 1 || nativeSubmissions.length > 1 ||
@@ -484,12 +496,12 @@ export function desktopHostPrompt({
   const failureMarker = `FAIL_${marker}`;
   return [
     `这是 ${label} 的真实桌面入口验收，验收编号 ${runId}，标记 ${marker}。`,
-    `必须在当前这个桌面任务中完成，不创建另一个模型任务。`,
+    `必须在当前这个桌面任务的同一回合中完成，不创建另一个模型任务，不复用历史回合的工具结果。每项调用分别留出真实返回；单项失败也继续其余独立步骤。结束前核对本回合实际调用，遗漏项先补做，不以文字声明代替。`,
     `1. 用 functions.exec 在项目 ${root} 执行 node -e "process.stdout.write('${execMarker}')"，并读取真实输出和退出码 0。`,
     nativeExecutablePath
       ? `2. 再用 functions.exec 在同一段 PowerShell 脚本中执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"，下一行紧接 exit $LASTEXITCODE；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`
       : `2. 再用 functions.exec 执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`,
-    `3. 调用四个常用只读 codex_app 入口：先调用 list_threads 并确认正常返回；若发起者在本提示后附带当前任务 ID，必须用该 ID，否则从返回结果识别当前任务。再调用 read_thread，设置 includeOutputs: true、maxOutputCharsPerItem: 20000，并确认返回的是当前任务；返回页中每个 completed 回合都必须含真实输入和 agentMessage。输入可以是 userMessage，或 codex_app.create_thread / send_message_to_thread 的 functionCallOutput，其中必须包含完整 codex_delegation、非空 source_thread_id 和 input 正文；只有工具名称或截断输出不能通过。当前 inProgress 回合可以为空。本轮标记由 rollout 独立绑定，不要求 read_thread 重复返回尚未完成的当前输入。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
+    `3. 分别调用四个常用只读 codex_app 入口：先调用 list_threads 并确认正常返回；若发起者在本提示后附带当前任务 ID，必须用该 ID，否则从返回结果识别当前任务。再单独调用 read_thread，设置 turnLimit: 2、includeOutputs: true、maxOutputCharsPerItem: 20000，并确认返回的是当前任务；返回页中每个 completed 回合都必须含真实输入和 agentMessage。输入可以是 userMessage，或 codex_app.create_thread / send_message_to_thread 的 functionCallOutput，其中必须包含完整 codex_delegation、非空 source_thread_id 和 input 正文；只有工具名称或截断输出不能通过。当前 inProgress 回合可以为空。本轮标记由 rollout 独立绑定，不要求 read_thread 重复返回尚未完成的当前输入。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
     "4. 用实际 web.run 搜索 OpenAI 官方 Codex app-server 文档，open 命中页面，再 find `thread/fork`；不能用 shell 或普通 fetch 代替。",
     nativeExecutablePath
       ? `5. 用实际 computer use 启动 Windows 原生应用 ${nativeExecutablePath}。用本轮可执行文件路径和标题中可见的 ${marker} 前缀唯一定位窗口；Windows 可能截断标题，必须从辅助功能树读取并核对完整标记后才能输入。聚焦 Marker input，原样输入并只提交一次，同时对该窗口调用一次真实截图。正确提交后应用会自动关闭。不能使用浏览器、HTTP 页面、shell 输入或辅助驱动代替。`
@@ -504,7 +516,7 @@ export function desktopHostProgressHtml(report) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[char]);
   const checks = (report.evaluation?.checks ?? []).map((item) =>
-    `<tr><td>${escape(item.label)}</td><td class="${escape(item.status)}">${escape(item.status)}</td></tr>`).join("");
+    `<tr><td>${escape(item.label)}${item.reason ? `<br><small>${escape(item.reason)}</small>` : ""}</td><td class="${escape(item.status)}">${escape(item.status)}</td></tr>`).join("");
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta http-equiv="refresh" content="2">
   <title>${escape(report.batch)} 桌面入口验收</title><style>
   body{font:15px system-ui;max-width:980px;margin:34px auto;padding:0 22px;color:#202124;background:#f6f7fb}
@@ -538,7 +550,9 @@ function checkWasAttempted(id, rollout) {
   if (id === "codex-app-read-thread") return Boolean(callIds.codexAppReadThread);
   if (id === "codex-app-list-projects") return Boolean(callIds.codexAppListProjects);
   if (id === "codex-app-get-usage-limits") return Boolean(callIds.codexAppGetUsageLimits);
-  if (["web-search", "web-open", "web-find"].includes(id)) return (callIds.webRun?.length ?? 0) > 0;
+  if (id === "web-search") return (callIds.webSearch?.length ?? 0) > 0;
+  if (id === "web-open") return (callIds.webOpen?.length ?? 0) > 0;
+  if (id === "web-find") return (callIds.webFind?.length ?? 0) > 0;
   if (["computer-use", "computer-screenshot", "download"].includes(id)) {
     if (id === "computer-screenshot") return (callIds.computerScreenshot?.length ?? 0) > 0;
     return (callIds.computerUse?.length ?? 0) > 0;
@@ -613,7 +627,7 @@ function isSuccessfulCodexAppOutput(value) {
 }
 
 function inspectCodexAppReadOutput(value, { marker, threadId } = {}) {
-  const documents = collectJsonDocuments(value);
+  const { documents, truncatedJson } = collectJsonDocuments(value);
   let threadMatched = false;
   let completedTurnCount = 0;
   let completedTurnsWithMessages = 0;
@@ -643,6 +657,7 @@ function inspectCodexAppReadOutput(value, { marker, threadId } = {}) {
   }
   return {
     threadMatched,
+    outputTruncated: !threadMatched && truncatedJson,
     hasMessageItems: completedTurnCount > 0 &&
       completedTurnsWithMessages === completedTurnCount,
     emptyCompletedTurns: completedTurnCount > 0 && emptyCompletedTurnCount === completedTurnCount,
@@ -656,6 +671,7 @@ function isDelegatedReadInput(item) {
 
 function collectJsonDocuments(value) {
   const documents = [];
+  let truncatedJson = false;
   const queue = [value];
   const seen = new Set();
   while (queue.length > 0 && documents.length < 32) {
@@ -664,7 +680,10 @@ function collectJsonDocuments(value) {
     if (typeof candidate === "string") {
       const trimmed = candidate.trim();
       if (!/^[{\[]/.test(trimmed)) continue;
-      try { queue.push(JSON.parse(trimmed)); } catch {}
+      try { queue.push(JSON.parse(trimmed)); } catch {
+        if (/…\d+ tokens truncated…/.test(trimmed) &&
+          /"thread"\s*:/.test(trimmed) && /"turns"\s*:/.test(trimmed)) truncatedJson = true;
+      }
       continue;
     }
     if (typeof candidate !== "object" || seen.has(candidate)) continue;
@@ -672,7 +691,7 @@ function collectJsonDocuments(value) {
     documents.push(candidate);
     for (const nested of Object.values(candidate)) queue.push(nested);
   }
-  return documents;
+  return { documents, truncatedJson };
 }
 
 function walkJson(value, visit, seen = new Set()) {
@@ -734,8 +753,7 @@ function hasOfficialCodexSource(output) {
 
 function hasExitCode(output, expected) {
   const value = String(output ?? "");
-  return new RegExp(`(?:exit(?:_|\\s)?code|process exited with code|code)[^0-9-]{0,20}${expected}(?:\\D|$)`, "i").test(value) ||
-    new RegExp(`(?:^|\\D)${expected}(?:\\D|$)`).test(value);
+  return new RegExp(`(?:exit(?:_|\\s)?code|process exited with code)[^0-9-]{0,20}${expected}(?:\\D|$)`, "i").test(value);
 }
 
 function stringifyPayload(value) {

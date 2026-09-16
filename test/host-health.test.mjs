@@ -365,3 +365,34 @@ test("[platform:windows-native] [A LCH-01 UI-02] Windows 原生提示脚本只�
   assert.match(alertScript, /启动失败/);
   assert.doesNotMatch(alertScript, /Bearer|api[_-]?key/i);
 });
+
+test("[A LCH-04] 无任务目录的空运行状态不得覆盖启动证据，也不能单凭缓存目录判就绪", async t => {
+  const directory = await useTempDir(t, "host-health-unscoped-");
+  const tracker = await createHostHealthTracker({path: join(directory, "health.json")});
+  try {
+  const catalog = { data: [{ name: "codex_app", runtimeStatus: null,
+    tools: Object.fromEntries(["list_threads", "read_thread", "list_projects", "get_usage_limits"].map(name => [name, {name}])) }] };
+  tracker.observeStatusList(catalog);
+  assert.equal(tracker.snapshot().status, "starting", "目录可能来自缓存，不能单独证明运行时就绪");
+  tracker.observeStartupStatus({name: "codex_app", status: "ready", threadId: "current"});
+  tracker.observeStatusList(catalog);
+  assert.equal(tracker.snapshot().status, "ready", "全局目录不可覆盖已收到的 ready");
+  tracker.observeStatusList(catalog, null, {threadId: "other"});
+  assert.equal(tracker.snapshot().status, "starting", "另一任务的目录不可借用当前任务状态");
+  tracker.observeStatusList(catalog, null, {threadId: "current"});
+  assert.equal(tracker.snapshot().status, "ready");
+  tracker.observeStatusList({data: [{...catalog.data[0], runtimeStatus: "starting"}]});
+  assert.equal(tracker.snapshot().status, "starting", "明确的运行状态仍需采纳");
+  tracker.observeStartupStatus({name: "codex_app", status: "failed", threadId: "current"});
+  tracker.observeStatusList(catalog);
+  assert.notEqual(tracker.snapshot().status, "ready");
+  tracker.observeStartupStatus({name: "codex_app", status: "ready", threadId: "current"});
+  const missing = structuredClone(catalog);
+  delete missing.data[0].tools.read_thread;
+  tracker.observeStatusList(missing);
+  assert.equal(tracker.snapshot().code, "required-tool-missing");
+  tracker.observeReloadStarted();
+  tracker.observeStatusList(catalog);
+  assert.equal(tracker.snapshot().status, "starting", "重载后不得借用旧启动通知");
+  } finally { await tracker.close({disconnected: false}); }
+});

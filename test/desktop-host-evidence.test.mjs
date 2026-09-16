@@ -87,6 +87,7 @@ test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独
     codexAppReadThread: true,
     codexAppReadContent: true,
     codexAppReadEmptyCompletedTurns: false,
+    codexAppReadOutputTruncated: false,
     codexAppReadMarker: true,
     codexAppListProjects: true,
     codexAppGetUsageLimits: true,
@@ -182,6 +183,69 @@ test("[A HAR-04 TOOL-04] 失败命令之后没有真实工具调用时不得声�
   const rollout = parseDesktopRollout(content, { marker, profile: "official" });
   assert.equal(rollout.checks.functionsExec, true);
   assert.equal(rollout.checks.functionsExecFailure, false);
+});
+
+test("[A HAR-04 TOOL-04] 成功命令采信同回合真实重试，不把标记或其他数字当退出码", () => {
+  const records = fixtureRollout("gpt-6-astra").trim().split("\n").map(JSON.parse);
+  const index = records.findIndex((record) => record.payload?.call_id === "exec-1");
+  records.splice(index, 0,
+    tool("exec-syntax-error", "exec", `node -e process.stdout.write('EXEC_${marker}')`),
+    output("exec-syntax-error", "SyntaxError: Invalid or unexpected token"),
+  );
+  const parse = () => parseDesktopRollout(records.map(JSON.stringify).join("\n"), { marker, profile: "official" });
+  assert.equal(parse().checks.functionsExec, true);
+  assert.equal(parse().callIds.functionsExecSuccess, "exec-1");
+
+  const result = records.find((record) => record.payload?.call_id === "exec-1" &&
+    record.payload?.type === "custom_tool_call_output");
+  for (const value of [`EXEC_${marker} elapsed 0 seconds`, `exit_code: 1\nEXEC_${marker}`]) {
+    result.payload.output = value;
+    assert.equal(parse().checks.functionsExec, false);
+  }
+  const failure = records.find((record) => record.payload?.call_id === "exec-2" &&
+    record.payload?.type === "custom_tool_call_output");
+  failure.payload.output = `exit_code: 1\nFAIL_${marker} expected 23`;
+  assert.equal(parse().checks.functionsExecFailure, false);
+});
+
+test("[A HAR-04 TOOL-04] read_thread 预算截断单独解释，不伪装修复 JSON 或套用空回合", () => {
+  const truncated = readThreadOutput(marker).replace('"reply"', '"rep…9817 tokens truncated…ly');
+  const content = fixtureRollout("deepseek-flash").replace(
+    JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
+    JSON.stringify(functionOutput("codex-read", [{ type: "input_text", text: truncated }])),
+  );
+  const rollout = parseDesktopRollout(content, { marker, profile: "deepseek" });
+  assert.equal(rollout.checks.codexAppReadOutputTruncated, true);
+  assert.equal(rollout.checks.codexAppReadEmptyCompletedTurns, false);
+  assert.equal(rollout.checks.codexAppReadContent, false);
+  const result = evaluateDesktopHostEvidence({
+    profile: "deepseek", marker, rollout,
+    runtimeBinding: { status: "passed" },
+    httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
+  });
+  const read = result.checks.find((item) => item.id === "codex-app-read-thread");
+  assert.equal(read.status, "failed");
+  assert.match(read.reason, /工具输出预算截断/);
+  assert.equal(result.upstreamReason, null);
+  assert.match(desktopHostProgressHtml({ evaluation: result }), /工具输出预算截断/);
+  assert.equal(rolloutWithReadTurns([{ status: "completed", items: [
+    { type: "userMessage", content: [{ type: "text", text: "…9817 tokens truncated…" }] },
+    { type: "agentMessage", text: "reply" },
+  ] }]).checks.codexAppReadOutputTruncated, false, "历史正文中有截断标记不表示本次 JSON 被截断");
+});
+
+test("[A HAR-04 TOOL-05] 只调用 find 时 search/open 保持未执行，不误报为调用失败", () => {
+  const content = fixtureRollout("gpt-6-astra").split("\n")
+    .filter((line) => !line.includes('"call_id":"web-1"') && !line.includes('"call_id":"web-2"'))
+    .join("\n");
+  const rollout = parseDesktopRollout(content, { marker, profile: "official" });
+  const result = evaluateDesktopHostEvidence({
+    profile: "official", marker, rollout, runtimeBinding: { status: "passed" },
+    httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
+  });
+  assert.equal(result.checks.find((item) => item.id === "web-search").status, "not-executed");
+  assert.equal(result.checks.find((item) => item.id === "web-open").status, "not-executed");
+  assert.equal(result.checks.find((item) => item.id === "web-find").status, "failed");
 });
 
 test("[platform:windows-native] [A HAR-04 TOOL-04] Windows 失败命令重试后采信真实保留的退出码", () => {
@@ -783,7 +847,7 @@ function fixtureRollout(model, testMarker = marker) {
       type: "message", role: "user", content: [{ type: "input_text", text: `运行 ${testMarker}` }],
     } },
     tool("exec-1", "exec", `node -e process.stdout.write('EXEC_${testMarker}')`),
-    output("exec-1", `EXEC_${testMarker}`),
+    output("exec-1", `Process exited with code 0\nEXEC_${testMarker}`),
     tool("exec-2", "exec", `node -e \"process.stderr.write('FAIL_${testMarker}');process.exit(23)\"`),
     output("exec-2", `Process exited with code 23\nFAIL_${testMarker}`),
     functionTool("codex-list", "list_threads", '{"limit":10}', "mcp__codex_app"),

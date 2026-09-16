@@ -769,6 +769,27 @@ test("[platform:macos-native] [A LCH-03 LCH-04] macOS 接管超时必须明确�
   }), /installed-package-owner/);
 });
 
+test("[platform:macos-native] [C LCH-03] 新监听者仍在启动或复用请求未完成时不得用旧就绪状态通过", async () => {
+  const host = readyHost({injectorPid:202});
+  const control = {projectVersion:"1.2.3"};
+  const states = [
+    {pid:202,version:"1.2.3",phase:"starting",revision:0},
+    {pid:202,version:"1.2.3",phase:"ready",revision:0},
+    {pid:202,version:"1.2.3",phase:"starting",revision:1},
+    {pid:202,version:"1.2.3",phase:"ready",revision:1},
+  ];
+  let reads=0;
+  const result=await waitForTargetHost(control,{timeoutMs:1000,pollIntervalMs:0,
+    inspectHost:async()=>structuredClone(host),readLauncherStatus:async()=>states[reads++],
+    afterLauncherRevision:0,stableBaseline:host});
+  assert.equal(reads,4);
+  assert.equal(result.launcher.revision,1);
+  await assert.rejects(waitForTargetHost(control,{timeoutMs:1000,pollIntervalMs:0,
+    inspectHost:async()=>readyHost({injectorPid:202,codexPids:[11]}),stableBaseline:host}),/意外重启/);
+  await assert.rejects(waitForTargetHost(control,{timeoutMs:10,pollIntervalMs:1,
+    inspectHost:async()=>structuredClone(host),readLauncherStatus:async()=>states[0]}),/launcher-not-ready/);
+});
+
 test("[platform:macos-native] [A LCH-03 LCH-06] macOS 安装路径被替换后必须按文件实体识别 Worker", () => {
   const reusedPath = [
     "p123",
@@ -788,6 +809,13 @@ test("[platform:macos-native] [A LCH-03 LCH-06] macOS 安装路径被替换后�
 });
 
 test("[platform:macos-native] [A LCH-06 HAR-04] macOS 安装未改写目标包时回滚保留原包，未知状态先报错再停止进程", () => {
+  assert.equal(selectInstallRollbackAction({
+    backupExists: false,
+    initialInstalledVersion: "0.1.202",
+    projectVersion: "0.1.203",
+    installedCandidate: false,
+    restoredOriginal: true,
+  }), "leave-installed", "原包已恢复并重新验签后，只重试运行时恢复");
   assert.equal(selectInstallRollbackAction({
     backupExists: false,
     initialInstalledVersion: "0.1.203",

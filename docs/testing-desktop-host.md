@@ -47,6 +47,10 @@ npm run test:desktop -- --profile=deepseek --confirm-token-use
 npm run test:desktop -- --status=<run-id>
 ```
 
+验收任务应使用短历史：先让已获授权的专用任务完成一轮简短输入与回复，再发送完整验收提示。`read_thread` 固定读取两轮，保留 `includeOutputs: true` 和 `maxOutputCharsPerItem: 20000`，以覆盖前一完成回合与当前活动回合。不要反复复用已积累大量浏览器、命令和嵌套读取输出的失败任务；过大的工具返回仍可能受宿主总输出预算截断。若尚未获得新建任务授权，先取得授权。
+
+所有必需工具必须在随机标记绑定的同一回合内实际执行。失败后允许在该回合重试，成功命令必须同时返回标记和退出码 0；后续回合的补做不能拼入原报告。模型文字称“完成”不改变缺项判定。连续出现执行遗漏时停止重复付费尝试，记录缺项，不靠增加提示次数保证通过。
+
 ## 固定判据
 
 桌面组件逐项核对：
@@ -90,7 +94,9 @@ npm run test:desktop -- --profile=official --runtime=wsl-native --plan
 
 `read_thread` 或其他官方宿主工具异常不能根据单次桌面结果直接归因。先检查已知问题并核对 rollout/SQLite。`read_thread` 的正确任务中出现 completed 回合空 items 时，第一排查方向是 `codex-desktop-read-thread-pagination-cursor`，按[证据复用说明](read-thread-pagination-investigation.md#再次出现时先做什么)核对适用条件；匹配时引用既有对照并注明本任务未重复对照，不因供应商或任务变化重复完整定位。首次出现或证据不匹配时，再以实际运行的同版本官方 app-server、同一数据分别运行无 Relay 直连和正式 Relay 对照。两个底层结果一致且桌面封装异常的证据齐全时才标记 `blocked-upstream`；对照不一致仍保持 `failed` 并继续定位。当前 read_thread 归因只匹配“正确任务已成功返回，完成回合全部为显式空 items”的现场形态；缺失 items 字段、委托正文不完整或其他读取错误不能套用这个阻断标签。
 
-已确认的 macOS 桌面分页游标问题见 [read_thread 分页问题复现材料](read-thread-pagination-investigation.md)。委托输入判据修复不改变该问题的 `blocked-upstream` 状态，也不重写既有验收报告；后续执行生成报告版本 9 的新证据。
+已确认的 macOS 桌面分页游标问题见 [read_thread 分页问题复现材料](read-thread-pagination-investigation.md)。委托输入判据修复不改变该问题的 `blocked-upstream` 状态，也不重写既有验收报告；后续执行生成报告版本 11 的新证据。
+
+若 `read_thread` 返回的 JSON 中间出现 `…数字 tokens truncated…` 且已无法解析，报告单独说明工具输出被预算截断，仍保留失败；这不是空回合，不能套用分页游标归因，也不能靠补括号恢复成通过证据。2026-09-16 的只读复核确认，同一旧回合重新返回合法 JSON 时，先前截断处前后的内容逐字一致，中间 37,673 字符曾被 23 字符的截断标记替换。同一 macOS 环境、CLI `0.154.0-alpha.6.2` 对同一回合执行 `thread/items/list`，官方无 Relay 与生产 Relay 都返回 67 条内容，完整响应 SHA-256 一致。本地对照保存在 `.runtime/read-thread-investigation/output-budget-control-summary-20260916.json`。这些证据确认截断机制且未发现 Relay 改写读取结果；仍不能把工具总输出预算的具体施加位置归到某一层，报告不自动升级为已知上游阻断。
 
 Windows Computer Use 截图失败也遵循同一规则。桌面执行器只读取 `.runtime/test-results/desktop-host/upstream-attributions-<runtime>.json` 中经过结构核验的归因；当前 rollout 必须出现对应失败，并且文件必须同时记录同运行环境的生产 Relay 失败与已移除 Relay 的官方对照失败，才允许将截图标记为 `blocked-upstream`。
 

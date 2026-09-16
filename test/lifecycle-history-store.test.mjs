@@ -101,12 +101,34 @@ function createState(path, rolloutPath) {
   db.close();
 }
 
+test("[C LCH-04] 专用任务的完整官方委托输入可持久化验收，截断或其他回合输出不能替代", async t => {
+  const root = await useTempDir(t, "codex-history-delegated-");
+  const rolloutPath = join(root, "rollout.jsonl");
+  await writeFile(rolloutPath, "one\ntwo\n");
+  createState(join(root, "state_5.sqlite"), rolloutPath);
+  createHistory(join(root, "thread_history_1.sqlite"), 8, 2, "completed", 1);
+  const db = new DatabaseSync(join(root, "thread_history_1.sqlite"));
+  try {
+    db.exec("DELETE FROM thread_items WHERE thread_id='thread' AND item_type='userMessage'; UPDATE thread_turns SET first_user_item_id=NULL");
+    const input = { type: "functionCallOutput", namespace: "codex_app", name: "create_thread",
+      output: "<codex_delegation><source_thread_id>parent</source_thread_id><input>执行C</input></codex_delegation>" };
+    const check = () => inspectThreadHistoryStore({ sqliteHome: root, threadId: "thread", rolloutPath,
+      lastOrdinal: 1, turnIds: ["turn"] });
+    db.prepare("INSERT INTO thread_items VALUES (?, ?, ?, ?, ?)").run("thread", "turn", "delegation", "functionCallOutput", JSON.stringify(input));
+    assert.equal((await check()).healthy, true);
+    db.prepare("UPDATE thread_items SET item_json=? WHERE item_id='delegation'").run(JSON.stringify({ ...input, output: input.output.slice(0, -5) }));
+    assert.equal((await check()).healthy, false);
+    db.prepare("UPDATE thread_items SET item_json=?, turn_id='another' WHERE item_id='delegation'").run(JSON.stringify(input));
+    assert.equal((await check()).healthy, false);
+  } finally { db.close(); }
+});
+
 function createHistory(path, offset, ordinal, status, endOrdinal) {
   const db = new DatabaseSync(path);
   db.exec(`
     CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER, next_rollout_ordinal INTEGER);
     CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, status TEXT, rollout_ordinal INTEGER, rollout_end_ordinal INTEGER, first_user_item_id TEXT, final_agent_item_id TEXT);
-    CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT, item_id TEXT, item_type TEXT, value TEXT);
+    CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT, item_id TEXT, item_type TEXT, item_json TEXT);
     CREATE TABLE thread_realtime_items (thread_id TEXT, value TEXT);
   `);
   db.prepare("INSERT INTO thread_history_projection_state VALUES (?, ?, ?)").run("thread", offset, ordinal);

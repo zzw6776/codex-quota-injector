@@ -80,6 +80,7 @@ async function runLauncher() {
   let pendingLaunchRecovery = false;
   let requestLaunchRecovery = null;
   let reloadWidget = null;
+  const launchStatus = { phase: "starting", revision: 0 };
   const devRuntime = instanceMode === "dev" ? await import("./dev-runtime.mjs") : null;
   if (devRuntime?.isCodexHostedDevLaunch()) {
     console.warn(
@@ -103,6 +104,8 @@ async function runLauncher() {
   };
 
   const reuseExistingInstance = (request) => {
+    launchStatus.phase = "starting";
+    launchStatus.revision += 1;
     console.log(
       `[launcher] ${request?.mode ?? "unknown"} v${request?.version ?? "unknown"} ` +
       "请求复用当前实例，正在重新检查 Codex 启动状态",
@@ -131,6 +134,7 @@ async function runLauncher() {
         version: instanceVersion,
         explicitStart,
         runtimeIdentity,
+        getStatus: () => launchStatus,
         onTakeover: restartFromTakeover,
         onReuse: reuseExistingInstance,
         onReload: devRuntime ? async (request) => {
@@ -160,6 +164,7 @@ async function runLauncher() {
     await extraModelManager.initialize();
     launchOptions = await prepareCurrentLaunch();
     await ensureCodexDebugMode(port, launchOptions);
+    launchStatus.phase = "ready";
     pendingLaunchRecovery = false;
 
     console.log(`[launcher] 已启动，日志=${logPath}`);
@@ -174,8 +179,16 @@ async function runLauncher() {
       accountManagerInitialized: true,
       prepareLaunch: prepareCurrentLaunch,
       recoverLaunch: async () => {
-        const options = await prepareCurrentLaunch();
-        return ensureCodexDebugMode(port, options);
+        launchStatus.phase = "starting";
+        try {
+          const options = await prepareCurrentLaunch();
+          const restarted = await ensureCodexDebugMode(port, options);
+          launchStatus.phase = "ready";
+          return restarted;
+        } catch (error) {
+          launchStatus.phase = "failed";
+          throw error;
+        }
       },
       registerLaunchRecovery: (handler) => {
         requestLaunchRecovery = handler;

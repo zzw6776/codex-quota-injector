@@ -28,6 +28,7 @@ export async function acquireSingleInstance({
   onTakeover,
   onReuse,
   onReload,
+  getStatus,
 } = {}) {
   const owner = {
     mode: normalizeMode(mode),
@@ -39,9 +40,18 @@ export async function acquireSingleInstance({
   let takeoverStarted = false;
   let reloadPromise = Promise.resolve();
   const server = createServer((socket) => {
+    // A disconnected status/takeover client must not terminate the owner.
+    socket.on("error", () => socket.destroy());
     socket.setEncoding("utf8");
     socket.setTimeout(TAKEOVER_TIMEOUT_MS, () => socket.destroy());
     socket.once("data", (data) => {
+      try {
+        if (JSON.parse(String(data).trim())?.type === "status") {
+          socket.end(JSON.stringify({ pid: process.pid, mode: owner.mode, version: owner.version,
+            ...(getStatus?.() ?? { phase: "unknown" }) }) + "\n");
+          return;
+        }
+      } catch { /* Continue with the existing request validation. */ }
       const request = parseTakeoverRequest(data);
       if (!request) {
         socket.end("invalid\n");
@@ -115,6 +125,23 @@ export async function acquireSingleInstance({
   throw new SingleInstanceTakeoverError(
     new Error(`等待旧注入器释放单实例锁超时（${TAKEOVER_TIMEOUT_MS}ms）`),
   );
+}
+
+export function readSingleInstanceStatus({ port = SINGLE_INSTANCE_PORT, timeoutMs = 1500 } = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let response = "";
+    const timer = setTimeout(() => socket.destroy(new Error("读取注入器启动状态超时")), timeoutMs);
+    socket.setEncoding("utf8");
+    socket.once("connect", () => socket.write('{"type":"status"}\n'));
+    socket.on("data", data => { response += data; });
+    socket.once("end", () => {
+      clearTimeout(timer);
+      try { resolve(JSON.parse(response)); } catch { reject(new Error("注入器未提供启动状态")); }
+      socket.destroy();
+    });
+    socket.once("error", error => { clearTimeout(timer); reject(error); });
+  });
 }
 
 export function closeSingleInstance(server) {

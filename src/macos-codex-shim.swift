@@ -128,15 +128,11 @@ private func providerOverride(_ providerId: String, router: RouterConfiguration)
     "env_http_headers={\(jsonQuote(router.tokenHeader))=\(jsonQuote(router.tokenEnv))}}"
 }
 
-private func writeRelayState(
-  _ configuration: LaunchConfiguration,
-  processId: pid_t = getpid(),
-  terminateOnFailure processToTerminate: pid_t? = nil
-) {
+private func writeRelayState(_ configuration: LaunchConfiguration) {
   guard let path = configuration.relayStatePath, !path.isEmpty else { return }
   let state: [String: Any] = [
     "version": 2,
-    "pid": Int(processId),
+    "pid": Int(getpid()),
     "processStartedAt": Date().timeIntervalSince1970 * 1000,
     "generation": configuration.generation as Any? ?? NSNull(),
   ]
@@ -151,9 +147,6 @@ private func writeRelayState(
     try data.write(to: url, options: .atomic)
     chmod(path, 0o600)
   } catch {
-    if let processToTerminate {
-      _ = kill(processToTerminate, SIGTERM)
-    }
     fail("无法写入桥接状态：\(error.localizedDescription)")
   }
 }
@@ -339,12 +332,11 @@ if let appServerIndex = arguments.firstIndex(of: "app-server") {
     }
   }
   arguments.insert(contentsOf: overrides, at: appServerIndex + 1)
-  if publishesHostState {
-    writeRelayState(
-      configuration,
-      processId: relayProcessId ?? getpid(),
-      terminateOnFailure: relayProcessId
-    )
+  // A sidecar claims its own state under the Relay ownership lock. The desktop
+  // bootstrap environment may also reach auxiliary app-servers through plugins;
+  // writing here would overwrite the live owner's PID before that check runs.
+  if publishesHostState && relayProcessId == nil {
+    writeRelayState(configuration)
   }
 }
 

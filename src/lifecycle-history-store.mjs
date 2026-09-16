@@ -1,6 +1,7 @@
 import { backup, DatabaseSync } from "node:sqlite";
 import { mkdir, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { readCodexDelegationInput } from "./codex-delegation.mjs";
 
 export async function inspectThreadHistoryStore({
   sqliteHome,
@@ -25,6 +26,9 @@ export async function inspectThreadHistoryStore({
     const item = history.prepare(
       "SELECT item_type FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ?",
     );
+    const delegatedItems = history.prepare(
+      "SELECT item_json FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_type = 'functionCallOutput'",
+    );
     const turns = turnIds.map((turnId) => {
       const turn = history.prepare(
         `SELECT turn_id, status, rollout_ordinal, rollout_end_ordinal,
@@ -37,9 +41,14 @@ export async function inspectThreadHistoryStore({
       const finalAgentItem = turn.final_agent_item_id
         ? item.get(threadId, turnId, turn.final_agent_item_id)
         : null;
+      const delegatedInputPresent = firstUserItem?.item_type !== "userMessage" &&
+        delegatedItems.all(threadId, turnId).some(row => {
+          try { return Boolean(readCodexDelegationInput(JSON.parse(row.item_json))); }
+          catch { return false; }
+        });
       return {
         ...turn,
-        first_user_item_present: firstUserItem?.item_type === "userMessage",
+        first_user_item_present: firstUserItem?.item_type === "userMessage" || delegatedInputPresent,
         final_agent_item_present: finalAgentItem?.item_type === "agentMessage",
       };
     });

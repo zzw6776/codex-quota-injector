@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -10,7 +10,7 @@ import { selectBridgeMode } from "../src/codex-bridge.mjs";
 import { ExtraModelManager } from "../src/extra-model-manager.mjs";
 import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
 import { fetchOfficialModelCatalog } from "../src/official-model-catalog.mjs";
-import { useTempDir } from "./helpers.mjs";
+import { useTempDir, waitFor } from "./helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 const PLATFORM_ID = "123e4567-e89b-42d3-a456-426614174010";
@@ -810,7 +810,8 @@ upstream.pipe(process.stdout);
   });
   const relay = JSON.parse(await readFile(relayCapturePath, "utf8"));
   const official = JSON.parse(await readFile(officialCapturePath, "utf8"));
-  const state = JSON.parse(await readFile(statePath, "utf8"));
+  await assert.rejects(readFile(statePath, "utf8"), { code: "ENOENT" },
+    "shim 不再替 sidecar 直接写全局状态；应由真实 Relay 加锁认领");
   assert.match(stdout, /OFFICIAL_THROUGH_SIDECAR/);
   assert.deepEqual(relay.args, ["relay-entry", "app-server", "--listen", "stdio"]);
   assert.equal(relay.env.cliPath, fakeCodex);
@@ -838,8 +839,6 @@ upstream.pipe(process.stdout);
   assert.ok(official.args.includes(`model_catalog_json=${JSON.stringify(catalogPath)}`));
   assert.ok(official.args.includes('model_provider="openai"'));
   assert.ok(official.args.includes('openai_base_url="http://127.0.0.1:1234/token/v1/"'));
-  assert.equal(state.pid, relay.pid, "中继存活状态必须跟踪 sidecar，而不是官方 app-server");
-  assert.equal(state.generation, "test-generation");
 
   const auxiliaryRelayCapture = join(directory, "relay-capture-auxiliary.json");
   const auxiliaryOfficialCapture = join(directory, "official-capture-auxiliary.json");
@@ -891,4 +890,67 @@ upstream.pipe(process.stdout);
   assert.ok(noRouterOfficial.args.includes(`model_catalog_json=${JSON.stringify(catalogPath)}`));
   assert.equal(noRouterOfficial.args.some((argument) => argument.startsWith("model_provider=")), false);
   assert.equal(noRouterOfficial.env.routerToken, null);
+
+  // Reproduce a plugin launching another shim with the desktop's inherited
+  // primary flag. Both use the real Relay and exchange real stdio messages.
+  const ownedStatePath = join(directory, "owned-state.json");
+  const ownedHealthPath = join(directory, "owned-health.json");
+  const emptyModelsPath = join(directory, "empty-models.json");
+  await writeFile(emptyModelsPath, JSON.stringify({ platforms: [] }));
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { createInterface } from "node:readline";
+for await (const line of createInterface({ input: process.stdin })) {
+  const message = JSON.parse(line);
+  process.stdout.write(JSON.stringify({ id: message.id, result: { echo: message.params } }) + "\\n");
+}
+`);
+  await writeFile(configPath, JSON.stringify({
+    upstreamExecutable: fakeCodex,
+    relayExecutable: process.execPath,
+    relayArguments: [resolve("src/launcher.mjs")],
+    extraModelSettingsPath: emptyModelsPath,
+    relayStatePath: ownedStatePath,
+    hostHealthPath: ownedHealthPath,
+    hostToolsRequired: true,
+    generation: "concurrent-sidecars",
+  }));
+  const launch = () => {
+    const child = spawn(shim, ["app-server", "--listen", "stdio://"], {
+      env: { PATH: process.env.PATH, HOME: directory, CODEX_HOME: directory,
+        CODEX_QUOTA_RELAY_CONFIG: configPath, CODEX_QUOTA_PRIMARY_APP_SERVER: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    const closed = new Promise(resolveClose => child.once("close", code => resolveClose(code)));
+    t.after(async () => {
+      child.stdin.end();
+      const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+      try { await closed; } finally { clearTimeout(timer); }
+    });
+    return { child, closed, stdout: () => stdout, stderr: () => stderr };
+  };
+  const primary = launch();
+  const owner = await waitFor(async () => {
+    const value = JSON.parse(await readFile(ownedStatePath, "utf8").catch(() => "null"));
+    return value?.pid ? value : null;
+  });
+  assert.notEqual(owner.pid, primary.child.pid, "状态必须跟踪真实 sidecar");
+  await waitFor(async () => JSON.parse(await readFile(ownedHealthPath, "utf8").catch(() => "null"))?.pid === owner.pid);
+  const auxiliary = launch();
+  auxiliary.child.stdin.write(JSON.stringify({ id: 1, method: "fixture/echo", params: "auxiliary" }) + "\n");
+  await waitFor(() => auxiliary.stdout().includes('"echo":"auxiliary"'));
+  assert.equal(JSON.parse(await readFile(ownedStatePath, "utf8")).pid, owner.pid,
+    "继承 primary 标志的辅助 shim 不能覆盖仍存活的主中继");
+  assert.equal(JSON.parse(await readFile(ownedHealthPath, "utf8")).pid, owner.pid);
+  auxiliary.child.stdin.end();
+  assert.equal(await auxiliary.closed, 0, auxiliary.stderr());
+  assert.equal(JSON.parse(await readFile(ownedStatePath, "utf8")).pid, owner.pid,
+    "辅助中继退出不能删除主中继状态");
+  primary.child.stdin.write(JSON.stringify({ id: 2, method: "fixture/echo", params: "primary-still-works" }) + "\n");
+  await waitFor(() => primary.stdout().includes('"echo":"primary-still-works"'));
+  primary.child.stdin.end();
+  assert.equal(await primary.closed, 0, primary.stderr());
+  await assert.rejects(readFile(ownedStatePath, "utf8"), { code: "ENOENT" });
 });
