@@ -3,9 +3,7 @@ import process from "node:process";
 import { DEFAULT_WINDOWS_INSTALL_DIR, inspectLifecycleHost, publicLifecycleHost } from "../../src/lifecycle-host.mjs";
 import { codexRunsInWindowsSubsystemForLinux } from "../../src/platform.mjs";
 import { WINDOWS_NATIVE, WSL_NATIVE } from "../test-runtime-targets.mjs";
-import { assertValidWslRelayExecutable } from "../../src/relay-artifact.mjs";
-import { assertValidWindowsRelayExecutable } from "../../src/windows-artifact.mjs";
-import { pathExists, execFileAsync } from "./io.mjs";
+import { execFileAsync } from "./io.mjs";
 
 async function createWindowsLifecyclePlan({
   root,
@@ -15,25 +13,9 @@ async function createWindowsLifecyclePlan({
   installerPath = null,
 } = {}) {
   const host = await inspectLifecycleHost({ installedApp, expectedProtocol });
-  const installedPresent = await pathExists(installedApp);
-  const installationState = installedPresent === Boolean(host.installedVersion)
-    ? installedPresent ? "versioned" : "empty"
-    : "blocked-inconsistent-install";
   const wslMode = await codexRunsInWindowsSubsystemForLinux();
   const currentRuntime = wslMode ? WSL_NATIVE : WINDOWS_NATIVE;
   const wslRuntime = await inspectWslLifecyclePrerequisites();
-  const sourceRecoveryRelay = join(
-    root,
-    "build",
-    wslMode
-      ? `codex-quota-relay-wsl-${projectVersion}`
-      : `codex-quota-relay-windows-${projectVersion}.exe`,
-  );
-  const sourceRecoveryCheck = await inspectWindowsSourceRecovery({
-    installationState,
-    currentRuntime,
-    sourceRecoveryRelay,
-  });
   return {
     batch: "lifecycle-official",
     name: "启停恢复测试 - Codex 官方模型",
@@ -43,11 +25,6 @@ async function createWindowsLifecyclePlan({
     projectVersion,
     expectedRelayProtocol: expectedProtocol,
     installerPath,
-    installationState,
-    sourceRecovery: sourceRecoveryCheck.status,
-    sourceRecoveryReason: sourceRecoveryCheck.reason,
-    sourceRecoveryRelay,
-    sourceRecoveryMode: currentRuntime,
     currentRuntime,
     runtimeTargets: [WINDOWS_NATIVE, WSL_NATIVE],
     automaticRuntimeSwitch: true,
@@ -57,7 +34,7 @@ async function createWindowsLifecyclePlan({
     actions: [
       "验证 Windows Setup 与版本化原生/WSL 中继",
       "等待所有 Codex 活动回合完成落盘后再执行可能中断桌面的操作",
-      "备份旧安装并由 Setup 完成安全接管更新",
+      "由当前版本 Setup 直接安装并验证候选包",
       "自动切换并验证 Windows 原生 Relay 的接管、单实例、重连和关闭重开",
       "自动切换并验证 WSL 原生 Relay 的接管、单实例、重连和关闭重开",
       "恢复测试前的 Codex 运行方式并核对正式入口",
@@ -71,27 +48,6 @@ async function createWindowsLifecyclePlan({
     progress: "default browser local progress page",
     reportDirectory: join(root, ".runtime", "test-results", "lifecycle"),
   };
-}
-
-async function inspectWindowsSourceRecovery({
-  installationState,
-  currentRuntime,
-  sourceRecoveryRelay,
-  assertWindowsExecutable = assertValidWindowsRelayExecutable,
-  assertWslExecutable = assertValidWslRelayExecutable,
-} = {}) {
-  if (installationState !== "empty") return { status: "ready", reason: null };
-  try {
-    if (currentRuntime === WINDOWS_NATIVE) await assertWindowsExecutable(sourceRecoveryRelay);
-    else if (currentRuntime === WSL_NATIVE) await assertWslExecutable(sourceRecoveryRelay);
-    else throw new Error(`未知 Windows 运行环境 ${currentRuntime}`);
-    return { status: "ready", reason: null };
-  } catch (error) {
-    return {
-      status: "blocked-invalid-or-missing-native-relay",
-      reason: String(error?.message ?? error),
-    };
-  }
 }
 
 async function inspectWslLifecyclePrerequisites({
@@ -115,4 +71,4 @@ async function inspectWslLifecyclePrerequisites({
   }
 }
 
-export { createWindowsLifecyclePlan, inspectWindowsSourceRecovery, inspectWslLifecyclePrerequisites };
+export { createWindowsLifecyclePlan, inspectWslLifecyclePrerequisites };

@@ -34,6 +34,7 @@ import {
   writeReport,
 } from "./test-support.mjs";
 import { resolveMacOSCodexShim } from "../src/macos-shim.mjs";
+import { compareTestEvidence } from "./test-impact.mjs";
 
 const COMMON_RUNTIME_FILES = new Set([
   "runtime-tests/browser-host.test.mjs",
@@ -179,8 +180,11 @@ try {
           ? "WSL 临时 HOME、Linux 依赖及本地模型材料"
           : networkIsolation.mode])),
   };
-  if ((await sourceSnapshot()).sha256 !== report.snapshot.sha256) {
-    markStale("测试期间代码发生变化，不能作为当前代码的通过报告");
+  const finishedSnapshot = await sourceSnapshot();
+  report.validity = selectedTargets.map(runtimeTarget => compareTestEvidence(report.snapshot, finishedSnapshot, { scope: "free", runtimeTarget }));
+  if (report.validity.some(result => result.status !== "reusable")) {
+    markStale("测试期间免费回归的执行输入发生变化，需重测受影响范围", report.validity
+      .filter(result => result.status !== "reusable").map(result => result.runtimeTarget));
   } else if (JSON.stringify(await runtimeSnapshot()) !== JSON.stringify(report.runtimeSnapshot)) {
     markStale("测试期间官方 CLI 或浏览器发生变化");
   }
@@ -450,10 +454,10 @@ function runtimeFilesForTarget(files, runtimeTarget) {
   });
 }
 
-function markStale(message) {
+function markStale(message, affectedTargets = null) {
   report.status = "stale";
   report.selectedStatus = "stale";
-  report.currentRuntimeStatus = "stale";
+  if (!affectedTargets || affectedTargets.includes(currentTarget)) report.currentRuntimeStatus = "stale";
   report.allSupportedStatus = "stale";
   report.error = message;
 }

@@ -1,7 +1,11 @@
 // Browser-serializable factory: all external values arrive through this explicit boundary.
 function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
   function renderHostHealthBanner(health) {
-    if (!health?.required || !["starting", "degraded"].includes(health.status)) return "";
+    if (!health?.required) return "";
+    if (health.status === "idle") {
+      return '<aside class="host-health-banner idle" role="status">任务工具按需加载，进入任务后自动核验</aside>';
+    }
+    if (!["starting", "degraded"].includes(health.status)) return "";
     const degraded = health.status === "degraded";
     const title = degraded ? "Codex 任务工具不可用" : "正在确认 Codex 任务工具";
     const detail = health.actionError || health.detail;
@@ -30,6 +34,7 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
   function renderHostHealthStatus(health) {
     const status = String(health?.status ?? "unknown");
     const view = {
+      idle: { className: "idle" },
       ready: { className: "ready" },
       starting: { className: "starting" },
       degraded: { className: "degraded" },
@@ -42,6 +47,9 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
       details.push("任务功能正常");
       details.push(`${requiredTools.length} 项常用功能已加载`);
       details.push(...requiredTools.map((name) => `✓ ${hostToolLabel(name)}`));
+    } else if (status === "idle") {
+      details.push("任务工具按需加载");
+      details.push("进入任务后自动核验");
     } else if (status === "starting") {
       details.push("正在检查任务功能");
       details.push("正在读取可用功能列表…");

@@ -21,11 +21,11 @@ async function isRelayConfigCurrent(path, generation) {
   }
 }
 
-async function isRelayStateCurrent(path, generation, { wslNative = false } = {}) {
-  return (await readRelayStateReadiness(path, generation, { wslNative })).ready;
+async function isRelayStateCurrent(path, generation, options = {}) {
+  return (await readRelayStateReadiness(path, generation, options)).ready;
 }
 
-async function readRelayStateReadiness(path, generation, { wslNative = false } = {}) {
+async function readRelayStateReadiness(path, generation, { wslNative = false, execFileImpl = execFileAsync } = {}) {
   let state;
   try {
     state = JSON.parse(await readFile(path, "utf8"));
@@ -38,7 +38,7 @@ async function readRelayStateReadiness(path, generation, { wslNative = false } =
   if (!Number.isInteger(state?.pid) || state.pid <= 0) {
     return { ready: false, reason: "PID 无效" };
   }
-  if (wslNative) return readWslProcessReadiness(state);
+  if (wslNative) return readWslProcessReadiness(state, execFileImpl);
   if (!Number.isFinite(Number(state?.processStartedAt))) {
     return { ready: false, reason: "进程启动时间无效" };
   }
@@ -56,7 +56,7 @@ async function readRelayStateReadiness(path, generation, { wslNative = false } =
   }
 }
 
-async function readWslProcessReadiness(state) {
+async function readWslProcessReadiness(state, execFileImpl) {
   const processId = Number(state.pid);
   const script = [
     "set -eu",
@@ -72,7 +72,7 @@ async function readWslProcessReadiness(state) {
   ].join("; ");
   let stdout;
   try {
-    ({ stdout } = await execFileAsync("wsl.exe", ["-e", "sh", "-c", script]));
+    ({ stdout } = await execFileImpl("wsl.exe", ["-e", "sh", "-c", script], { windowsHide: true }));
   } catch (error) {
     return { ready: false, reason: `WSL 进程查询失败：${error.code ?? error.message}` };
   }
@@ -104,9 +104,10 @@ async function readWslProcessReadiness(state) {
   ].join("; ");
   let legacyStdout;
   try {
-    ({ stdout: legacyStdout } = await execFileAsync(
+    ({ stdout: legacyStdout } = await execFileImpl(
       "wsl.exe",
       ["-e", "sh", "-c", legacyScript],
+      { windowsHide: true },
     ));
   } catch (error) {
     return { ready: false, reason: `旧版 WSL 时间查询失败：${error.code ?? error.message}` };

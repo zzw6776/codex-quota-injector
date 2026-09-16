@@ -18,7 +18,8 @@ import {
   runtimeTargetsForPlatform,
   waitForTestProcess,
 } from "./test-runtime-targets.mjs";
-import { requireFreeResult, RESULTS, ROOT, sourceSnapshot, writeReport } from "./test-support.mjs";
+import { modelTestRuntimeSnapshot, prepareModelTestRuntime, RESULTS, ROOT, sourceSnapshot, writeReport } from "./test-support.mjs";
+import { compareModelRuntime, compareTestEvidence } from "./test-impact.mjs";
 import {
   backendComponentId,
   combineModelStatuses,
@@ -135,7 +136,7 @@ const plan = {
 console.log(JSON.stringify(plan, null, 2));
 if (args.has("--plan")) process.exit(0);
 
-const free = await requireFreeResult({ runtimeTarget });
+const prepared = await prepareModelTestRuntime({ runtimeTarget });
 await mkdir(RESULTS, { recursive: true });
 const report = {
   ...plan,
@@ -148,12 +149,11 @@ const report = {
     status: component.kind === "backend" ? "running" : "not-run",
   })),
   startedAt: new Date().toISOString(),
-  snapshot: free.snapshot,
-  freeComponent: {
-    id: free.selectedRuntimeComponent.id,
-    status: free.selectedRuntimeComponent.status,
-    runtimeSnapshot: free.selectedRuntimeComponent.runtimeSnapshot,
-  },
+  snapshot: prepared.snapshot,
+  freeRegressionGate: prepared.freeRegressionGate,
+  hostRuntimeSnapshot: prepared.hostRuntimeSnapshot,
+  modelRuntimeSnapshot: runtimeTarget === WSL_NATIVE ? null : prepared.hostRuntimeSnapshot,
+  relayArtifact: prepared.relay,
 };
 const profileArtifact = safeArtifact(profileFilter);
 const artifact = [profileArtifact, runtimeTarget, stageFilter].filter(Boolean).join("-");
@@ -168,21 +168,19 @@ try {
       root: ROOT,
       resultDirectory: RESULTS,
       stages: stages.map((stage) => ({ id: stage.name, files: [stage.file], eventFile: stage.eventFile })),
-      sourceSha256: free.snapshot.sha256,
+      sourceSha256: prepared.snapshot.sha256,
       kind: `live-${profileArtifact}`,
       liveProfile: profileFilter,
-      expectedCliSha256: free.selectedRuntimeComponent.runtimeSnapshot?.cli?.sha256,
-      expectedRelaySha256: free.selectedRuntimeComponent.artifact?.sha256,
-      existingRelayPath: free.selectedRuntimeComponent.artifact?.path,
-      browserPath: free.runtimeSnapshot.browser?.path,
-      expectedBrowserSha256: free.runtimeSnapshot.browser?.sha256,
+      browserPath: prepared.hostRuntimeSnapshot.browser?.path,
+      expectedBrowserSha256: prepared.hostRuntimeSnapshot.browser?.sha256,
     });
     report.wslRuntimeSnapshot = result.runtimeSnapshot ?? null;
+    report.modelRuntimeSnapshot = result.runtimeSnapshot ?? null;
     code = result.status === "passed" ? 0 : 1;
     if (result.error) report.runtimeError = result.error;
     for (const stage of stages) report.events.push(...await readEvents(join(RESULTS, stage.eventFile)));
   } else {
-    code = await runLocalStages(stages, free.selectedRuntimeComponent.artifact?.path);
+    code = await runLocalStages(stages, prepared.relay?.path);
   }
   if (args.has("--wakeup")) {
     const wakeup = stages.find((stage) => stage.name === "live-wakeup");
@@ -205,13 +203,20 @@ try {
   process.exitCode = 1;
 }
 const finishedSnapshot = await sourceSnapshot();
-if (finishedSnapshot.sha256 !== report.snapshot.sha256) {
+report.validity = compareTestEvidence(report.snapshot, finishedSnapshot, { scope: "backend", runtimeTarget });
+if (report.backendStatus === "passed") {
+  report.runtimeValidity = await modelTestRuntimeSnapshot(runtimeTarget)
+    .then(current => compareModelRuntime(report.modelRuntimeSnapshot, current))
+    .catch(error => ({ status: "review-required", reason: error.message }));
+}
+if (report.validity.status !== "reusable" || report.runtimeValidity && report.runtimeValidity.status !== "reusable") {
   report.backendStatus = "failed";
   report.components.find((component) => component.kind === "backend").status = "failed";
   report.overallStatus = "failed";
   report.status = "stale";
-  report.sourceChangedDuringTest = true;
-  report.error = [report.error, "真实测试期间源码发生变化，报告不能用于当前源码"].filter(Boolean).join("；");
+  report.sourceChangedDuringTest = report.validity.status !== "reusable";
+  report.runtimeChangedDuringTest = Boolean(report.runtimeValidity && report.runtimeValidity.status !== "reusable");
+  report.error = [report.error, "后台组件执行输入或实际运行时发生变化/不可核对，需核对受影响组件"].filter(Boolean).join("；");
   process.exitCode = 1;
 }
 report.finishedAt = new Date().toISOString();

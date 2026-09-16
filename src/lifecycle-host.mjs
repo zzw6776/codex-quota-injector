@@ -86,9 +86,10 @@ export function evaluateLifecycleReadiness({
     now,
   });
   const hostToolsReady = hostHealth.required !== true || hostHealth.status === "ready";
+  const coreReady = codexRunning && debugReady && singleInjector && relayReady && protocolMatches;
   return {
-    ready: codexRunning && debugReady && singleInjector && relayReady && protocolMatches &&
-      hostToolsReady,
+    ready: coreReady && hostToolsReady,
+    coreReady,
     codexRunning,
     debugReady,
     singleInjector,

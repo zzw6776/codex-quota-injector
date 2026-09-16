@@ -1,3 +1,5 @@
+param([switch]$Console)
+
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
@@ -21,6 +23,9 @@ $dependencyHelper = Join-Path $projectRoot "scripts\windows-dev-dependencies.ps1
 New-Item -ItemType Directory -Path $dataRoot, $logRoot -Force | Out-Null
 . $dependencyHelper
 Reset-WindowsDevLauncherEnvironment
+if ($Console) {
+  $script:WindowsDevProcessOutputHandler = { param($text) Write-Host -NoNewline $text }
+}
 
 function Write-LauncherLog([string]$message) {
   Add-Content -LiteralPath $bootstrapLog -Value "$(Get-Date -Format o) $message" -Encoding UTF8
@@ -183,5 +188,7 @@ try {
   Write-LauncherLog "Injector started in background; PID=$($process.Id); Node=$nodeExecutable"
 } catch {
   Write-LauncherLog "Launcher failed: $($_.Exception.Message)"
+  Write-LauncherLog ($_ | Out-String)
+  Write-LauncherLog $_.ScriptStackTrace
   exit 1
 }

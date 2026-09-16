@@ -9,12 +9,20 @@ function requestCodexAppToolsReload(state) {
   sendHostToolReloadRequest(state, MCP_CONFIG_RELOAD_METHOD, "reload");
 }
 
-function sendHostToolReloadRequest(state, method, phase) {
+function requestCodexAppToolsStatus(state, threadId) {
+  if (!state.hostHealth || state.hostToolReloadInFlight ||
+    state.hostHealth.snapshot().status === "ready") return;
+  state.hostToolReloadInFlight = true;
+  sendHostToolReloadRequest(state, MCP_STATUS_LIST_METHOD, "startup-verify", threadId);
+}
+
+function sendHostToolReloadRequest(state, method, phase, threadId = null) {
   const id = `codex-quota-host-tools-${phase}-${randomUUID()}`;
   rememberPendingRequest(state, id, {
     method,
     internalHostToolReload: true,
     phase,
+    threadId,
   });
   try {
     // The official schema models config/mcpServer/reload as a unit request,
@@ -22,10 +30,10 @@ function sendHostToolReloadRequest(state, method, phase) {
     // defaults. Keep both requests schema-exact for stricter app-server builds.
     state.sendUpstream(method === MCP_CONFIG_RELOAD_METHOD
       ? { id, method }
-      : { id, method, params: {} });
+      : { id, method, params: threadId == null ? {} : { threadId } });
   } catch (error) {
     state.pendingRequests.delete(id);
-    state.hostHealth?.observeReloadFailed(error);
+    reportHostToolError(state, phase, threadId, error);
     finishHostToolReload(state);
     return;
   }
@@ -33,7 +41,7 @@ function sendHostToolReloadRequest(state, method, phase) {
   state.hostToolReloadTimer = setTimeout(() => {
     const pending = state.pendingRequests.get(id);
     if (pending) pending.expired = true;
-    state.hostHealth?.observeReloadFailed(new Error("官方 app-server 重载任务工具超时"));
+    reportHostToolError(state, phase, threadId, new Error("官方 app-server 核验任务工具超时"));
     finishHostToolReload(state);
   }, HOST_TOOL_RELOAD_TIMEOUT_MS);
   state.hostToolReloadTimer.unref?.();
@@ -44,7 +52,7 @@ function handleHostToolReloadResponse(message, pending, state) {
   clearTimeout(state.hostToolReloadTimer);
   state.hostToolReloadTimer = null;
   if (message.error) {
-    state.hostHealth?.observeReloadFailed(message.error);
+    reportHostToolError(state, pending.phase, pending.threadId, message.error);
     finishHostToolReload(state);
     return;
   }
@@ -52,8 +60,13 @@ function handleHostToolReloadResponse(message, pending, state) {
     sendHostToolReloadRequest(state, MCP_STATUS_LIST_METHOD, "verify");
     return;
   }
-  state.hostHealth?.observeStatusList(message.result, message.error);
+  state.hostHealth?.observeStatusList(message.result, message.error, pending);
   finishHostToolReload(state);
+}
+
+function reportHostToolError(state, phase, threadId, error) {
+  if (phase === "startup-verify") state.hostHealth?.observeStatusList(null, error, { threadId });
+  else state.hostHealth?.observeReloadFailed(error);
 }
 
 function finishHostToolReload(state) {
@@ -62,4 +75,4 @@ function finishHostToolReload(state) {
   state.hostToolReloadInFlight = false;
 }
 
-export { requestCodexAppToolsReload, handleHostToolReloadResponse };
+export { requestCodexAppToolsReload, requestCodexAppToolsStatus, handleHostToolReloadResponse };

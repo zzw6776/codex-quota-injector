@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { appendEvents, createManager, event, protocolUsage } from "./token-usage/support.mjs";
@@ -32,7 +32,10 @@ test("复用视图不能隐藏读取错误及恢复状态", async t => {
   const { manager, codexHome, dataDir } = await createManager(t);
   const ready = manager.getViewModel();
   const invalidHome = join(dataDir, "not-a-directory");
-  await writeFile(invalidHome, "fixture");
+  await mkdir(invalidHome);
+  // 直接读取文件路径在 Windows 与 Linux 均返回 ENOTDIR；Windows
+  // 读取文件下不存在的子路径会返回 ENOENT，无法触发读取错误契约。
+  await writeFile(join(invalidHome, "sessions"), "fixture");
   manager.codexHome = invalidHome;
   try {
     const failed = await manager.refresh({ forceDiscovery: true });

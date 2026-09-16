@@ -11,15 +11,31 @@
 3. 对版本、环境、相关读取链和失败形态均匹配，且没有相反证据的情况，复用本问题的既有官方直连/Relay 对照：标注 `blocked-upstream`、问题编号及证据路径，明确 `revalidatedThisThread: false`。这是“匹配已确认的已知上游问题”，不能写成“本任务已重新完成对照”。新任务或更换模型本身不要求重跑完整定位。
 4. 官方版本、原生环境或相关读取链变化，底层同样缺失内容，返回了错误任务，或是字段缺失、输出截断、部分回合内容异常等不符合既有对照的情况，不自动复用归因；将本问题列为优先候选，按下方步骤做必要对照。不能用旧 macOS 证据直接标记 Windows 上游阻断。
 
-报告保留原始调用及失败证据，再追加归因说明。已知上游阻断不算通过，也不算新的 DeepSeek 兼容缺陷；整批状态仍依据所有必需项与前置条件判断。只有上述复用条件不再满足、出现相反证据，或官方更新后需要确认修复时，才重新展开完整排查。
+WSL 已有下述本环境对照。再次遇到时优先核对 [快速判定条件](desktop-known-issues.md)，不重新套用“仅 macOS 已确认”的旧范围。报告保留原始调用及失败证据，再追加归因说明；原始执行项保持 `blocked-upstream`，按用户已明确授权的口径可另存验收通过报告，不能把空内容写成实际读取成功。只有上述复用条件不再满足、出现相反证据，或官方更新后需要确认修复时，才重新展开必要对照。
 
 执行器只接受绑定本次验收的归因：核对上述条件后，在当前原生环境的 `upstream-attributions-<runtime>.json` 中给 `codex-app-read-thread` 记录补充 `verifiedFor`，包含本次报告的 `marker`、`runtimeTarget`、实际 `desktopBuild`、`cliVersion` 和 `readingChainUnchanged: true`。保留原始对照及已知问题引用，说明是否重新对照；不得只复制上一轮的绑定。执行器会重新读取归因文件，旧轮次、另一环境或尚未核对的归因不自动生效。
 
 ## 已确认范围
 
-2026-09-15，在 macOS arm64、官方桌面 build 9275、实际运行 CLI `0.154.0-alpha.6.2`、项目 Relay 协议 74 上确认。版本来自当轮实际二进制，不采用长期任务创建时的 session_meta 版本。本文记录此次已验证的失效机制，不代表所有 read_thread 异常都是同一原因，也不继承为 Windows 结论。
+2026-09-15，在 macOS arm64、官方桌面 build 9275、实际运行 CLI `0.154.0-alpha.6.2`、项目 Relay 协议 74 上确认。版本来自当轮实际二进制，不采用长期任务创建时的 session_meta 版本。这组证据只确认 macOS；下述 WSL 结论来自另外执行的本环境对照。
 
 现象：官方 `read_thread` 返回两个已完成回合，但它们的 `items` 都为空；同一数据的底层完整读取能得到内容。
+
+2026-09-16，Windows 桌面 `26.908.40834` / WSL Linux x64、实际 CLI `0.154.0-alpha.6.2`、项目 `0.1.279` / Relay 81，在官方模型和 DeepSeek 的两个专用任务上重新确认同一机制。官方 Linux CLI SHA-256 为 `6970ad6a5b7615d2f5838879e19c1369e5527cb1544f1515f76900267740a403`。
+
+实际桌面 `readThreadTurnsPage` 使用 `itemsView: full`，任务历史模式为 `paginated`，缓存的 `itemsBackwardsCursor` 是旧页面的 `itemsByCreatedAtOrdinal` 边界，早于之后产生的完成回合。使用一致的原生 WSL SQLite 备份及逐字节相同的 rollout 副本，对当前官方 Linux app-server 和正式 ELF Relay 重放：
+
+| 读取入口与参数 | 官方验收回合 | 官方准备回合 | DeepSeek 验收回合 | DeepSeek 准备回合 |
+| --- | ---: | ---: | ---: | ---: |
+| 当前桌面 read_thread | 0 | 0 | 0 | 0 |
+| 官方无 Relay，实际旧页面游标 | 0 | 0 | 0 | 0 |
+| 正式 Relay，实际旧页面游标 | 0 | 0 | 0 | 0 |
+| 官方无 Relay，cursor: null | 17 | 2 | 38 | 3 |
+| 正式 Relay，cursor: null | 17 | 2 | 38 | 3 |
+
+四组对应完整响应 SHA-256 一致，SQLite 完成回合实际包含委托输入和 agentMessage。官方读取方法与 macOS 的游标传递机制一致；条件断点仅记录实参、返回 false，从不暂停，结束后已移除。此次对照没有模型回合或重启。
+
+本机证据位于 `.runtime/wsl-desktop-attribution-20260916/`：`desktop-live-cursors.json`、`official-relay-cursor-comparison.json`、`desktop-read-official.json`、`desktop-read-deepseek.json`、`diagnosis.json`。本轮通过验收报告位于 `.runtime/test-results/wsl-continuation-20260916/desktop-accepted-summary.md`。这些文件含本机诊断数据且不提交；证据不存在时不能仅凭本文描述自动绑定新报告。
 
 ## 根因与对照
 
@@ -69,7 +85,7 @@
 
 建议上游让工具完整内容读取使用独立分页，从 null 开始并沿该接口返回的 nextCursor 继续；页面 UI 的历史边界继续仅服务页面分页。此建议尚未在官方产品中实施或验证。
 
-项目不在 Relay 中无条件清除 cursor，也不修改官方安装包。底层读取只能用于定位或明确标注的临时读取，不能替代官方 read_thread 的桌面通过证据。本项保持 `blocked-upstream`，待官方修复后重新验收。
+项目不在 Relay 中无条件清除 cursor，也不修改官方安装包。底层读取只能用于定位或明确标注的临时读取，不能替代官方 read_thread 实际成功的证据。原始执行项保持 `blocked-upstream`；符合复用条件时按用户口径另存验收通过报告，保留接受项。确认官方修复后才补测实际读取能力。
 
 另一个独立问题是验收器只接受 userMessage。真实委托输入可能是 codex_app.send_message_to_thread 的 functionCallOutput；报告版本 8 支持核验其中完整的委托输入，并明确要求 includeOutputs。该修复不能修复或掩盖 items 为空的问题，旧报告不自动升级为通过。
 

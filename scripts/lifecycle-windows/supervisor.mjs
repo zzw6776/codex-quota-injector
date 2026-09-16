@@ -6,10 +6,8 @@ function windowsScheduledTaskScript({
   supervisorScript,
   controlPath,
   workingDirectory,
-  recovery = false,
 } = {}) {
-  const modeArgument = recovery ? " --recover" : "";
-  const argument = `${quoteWindowsArgument(supervisorScript)}${modeArgument} --control ${quoteWindowsArgument(controlPath)}`;
+  const argument = `${quoteWindowsArgument(supervisorScript)} --control ${quoteWindowsArgument(controlPath)}`;
   return `
 $ErrorActionPreference='Stop';
 $user=([System.Security.Principal.WindowsIdentity]::GetCurrent().Name);

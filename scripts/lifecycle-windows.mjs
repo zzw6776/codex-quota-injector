@@ -1,5 +1,4 @@
 export { createWindowsLifecyclePlan } from "./lifecycle-windows/plan.mjs";
-export { inspectWindowsSourceRecovery } from "./lifecycle-windows/plan.mjs";
 export { inspectWslLifecyclePrerequisites } from "./lifecycle-windows/plan.mjs";
 export { captureWindowsRuntimeConfiguration } from "./lifecycle-windows/runtime-configuration.mjs";
 export { setWindowsRuntimeConfiguration } from "./lifecycle-windows/runtime-configuration.mjs";
@@ -13,13 +12,8 @@ export { prepareWindowsHistoryBeforeLaunch } from "./lifecycle-windows/history.m
 export { waitForWindowsHistoryDurable } from "./lifecycle-windows/history.mjs";
 export { requestWindowsRuntimeHistoryRebuild } from "./lifecycle-windows/history-rebuild.mjs";
 export { installWindowsPackage } from "./lifecycle-windows/installation.mjs";
-export { rollbackWindowsInstallation } from "./lifecycle-windows/installation.mjs";
-export { selectWindowsRecoveryEntry } from "./lifecycle-windows/recovery-policy.mjs";
-export { selectWindowsRuntimeRestoreEntry } from "./lifecycle-windows/recovery-policy.mjs";
-export { selectWindowsInstallRollbackAction } from "./lifecycle-windows/recovery-policy.mjs";
 export { waitForWindowsTargetHost } from "./lifecycle-windows/host.mjs";
 export { launchWindowsApp } from "./lifecycle-windows/host.mjs";
-export { launchWindowsSourceEntry } from "./lifecycle-windows/host.mjs";
 export { stopWindowsInjectorOwners } from "./lifecycle-windows/process-ownership.mjs";
 export { waitForWindowsInjectorOwnersExit } from "./lifecycle-windows/process-ownership.mjs";
 export { windowsInjectorOwnedByInstalledApp } from "./lifecycle-windows/process-ownership.mjs";

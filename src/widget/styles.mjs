@@ -39,7 +39,7 @@ const WIDGET_STYLES = {
     .host-health-dot.ready { background: #43a665; box-shadow: 0 0 0 2px rgba(67,166,101,.13); }
     .host-health-dot.degraded { background: #dc4c3f; box-shadow: 0 0 0 2px rgba(220,76,63,.14); }
     .host-health-dot.direct { background: #5b8fc9; box-shadow: 0 0 0 2px rgba(91,143,201,.13); }
-    .host-health-dot.unknown { background: #8a8a95; box-shadow: 0 0 0 2px rgba(138,138,149,.13); }
+    .host-health-dot.idle, .host-health-dot.unknown { background: #8a8a95; box-shadow: 0 0 0 2px rgba(138,138,149,.13); }
     .is-warning { color: #d97706 !important; }
     .is-critical { color: #dc4c3f !important; }
     .quota-popover {
@@ -151,6 +151,7 @@ const WIDGET_STYLES = {
     .operation.success { color: #7ecb9b; background: rgba(52,168,92,.09); }
     .operation.error { color: #ef8e86; background: rgba(220,76,63,.09); }
     .host-health-banner { display: grid; gap: 7px; margin-bottom: 11px; padding: 10px 11px; border: 1px solid rgba(229,184,106,.28); border-radius: 11px; color: #f2cf8e; background: rgba(229,184,106,.09); font-size: 10.5px; line-height: 15px; }
+    .host-health-banner.idle { color: #aaaab5; border-color: rgba(138,138,149,.22); background: rgba(138,138,149,.06); }
     .host-health-banner.degraded { border-color: rgba(220,76,63,.3); color: #f3a49e; background: rgba(220,76,63,.09); }
     .host-health-title { font-size: 11.5px; font-weight: 700; }
     .host-health-detail { color: var(--token-text-secondary, #b5b5bf); overflow-wrap: anywhere; }
@@ -322,6 +323,7 @@ const WIDGET_STYLES = {
     .quota-wrap.is-light .btn:hover { background: rgba(0,0,0,.065); }
     .quota-wrap.is-light .btn.primary { color: #71438e; border-color: rgba(116,69,143,.28); background: rgba(116,69,143,.08); }
     .quota-wrap.is-light .host-health-banner { color: #8a5b00; border-color: rgba(154,101,0,.25); background: rgba(154,101,0,.07); }
+    .quota-wrap.is-light .host-health-banner.idle { color: #666672; border-color: rgba(138,138,149,.22); background: rgba(138,138,149,.06); }
     .quota-wrap.is-light .host-health-banner.degraded { color: #a7352e; border-color: rgba(181,61,53,.24); background: rgba(181,61,53,.06); }
     .quota-wrap.is-light .host-health-detail { color: #6f6f79; }
     .quota-wrap.is-light .host-health-status:hover, .quota-wrap.is-light .host-health-status:focus-visible { background: rgba(0,0,0,.065); }

@@ -24,7 +24,7 @@ const STATUS_LIST_METHOD = "mcpServerStatus/list";
 const HEALTH_DETAIL_LIMIT = 600;
 
 export function hostHealthPollInterval(status) {
-  return ["ready", "direct"].includes(String(status ?? ""))
+  return ["idle", "ready", "direct"].includes(String(status ?? ""))
     ? HOST_HEALTH_READY_POLL_MS
     : HOST_HEALTH_ACTIVE_POLL_MS;
 }
@@ -274,6 +274,7 @@ class HostHealthTracker {
     this.tail = Promise.resolve();
     this.closed = false;
     this.startupStatus = null;
+    this.catalogThreadId = null;
     const startedAt = this.now();
     this.state = {
       version: HOST_HEALTH_STATE_VERSION,
@@ -287,11 +288,11 @@ class HostHealthTracker {
       ...(Number.isSafeInteger(Number(processIdentity.processStartTicks))
         ? { processStartTicks: Number(processIdentity.processStartTicks) }
         : {}),
-      status: "starting",
-      code: "awaiting-codex-app",
-      message: "正在确认 Codex 任务工具状态",
+      status: "idle",
+      code: "awaiting-task",
+      message: "任务工具按需加载，进入任务后自动核验",
       detail: null,
-      serverStatus: "starting",
+      serverStatus: "notStarted",
       threadId: null,
       requiredTools: this.requiredTools,
       missingTools: [],
@@ -305,7 +306,6 @@ class HostHealthTracker {
     if (!this.path) return;
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     if (claim) await this.persist({ claim: true });
-    this.armGraceTimer();
   }
 
   claim() {
@@ -314,7 +314,8 @@ class HostHealthTracker {
 
   observeClientMessage(message) {
     if (!message || typeof message !== "object") return;
-    if (message.method === "initialized") this.armGraceTimer();
+    // Desktop initializes its global app-server on the home page. Task-local
+    // codex_app startup is observed separately; initialized is not its start.
   }
 
   observeServerMessage(message) {
@@ -328,7 +329,8 @@ class HostHealthTracker {
     const threadId = typeof params?.threadId === "string" ? params.threadId : null;
     this.startupStatus = { status: serverStatus, threadId };
     if (serverStatus === "ready") {
-      if (this.state.toolsVerified && this.state.missingTools.length === 0) {
+      if (this.state.toolsVerified && this.state.missingTools.length === 0 &&
+        this.catalogThreadId === threadId) {
         this.clearGraceTimer();
         void this.update({
           status: "ready",
@@ -339,7 +341,6 @@ class HostHealthTracker {
           threadId,
         });
       } else {
-        this.armGraceTimer();
         void this.update({
           status: "starting",
           code: "awaiting-tool-catalog",
@@ -347,7 +348,10 @@ class HostHealthTracker {
           detail: null,
           serverStatus,
           threadId,
+          toolsVerified: false,
+          missingTools: [],
         });
+        this.armGraceTimer();
       }
       return;
     }
@@ -363,7 +367,7 @@ class HostHealthTracker {
       return;
     }
     if (serverStatus === "starting") {
-      this.armGraceTimer();
+      this.catalogThreadId = null;
       void this.update({
         status: "starting",
         code: "codex-app-starting",
@@ -371,7 +375,10 @@ class HostHealthTracker {
         detail: null,
         serverStatus,
         threadId,
+        toolsVerified: false,
+        missingTools: [],
       });
+      this.armGraceTimer();
     }
   }
 
@@ -388,6 +395,27 @@ class HostHealthTracker {
     }
     const entries = Array.isArray(result?.data) ? result.data : [];
     const entry = entries.find((candidate) => isCodexAppServer(candidate?.name));
+    // Task-local overrides are intentionally absent from the home-page inventory.
+    // An empty global list is not evidence about an activated task's service.
+    if (!entry && threadId == null) {
+      if (this.startupStatus == null &&
+        this.state.status !== "degraded") {
+        this.clearGraceTimer();
+        this.catalogThreadId = null;
+        void this.update({
+          status: "idle", code: "awaiting-task",
+          message: "任务工具按需加载，进入任务后自动核验",
+          detail: null, serverStatus: "notStarted", threadId: null,
+          toolsVerified: false, missingTools: [],
+        });
+      } else if (this.startupStatus?.status === "ready" && this.state.status === "ready" &&
+        this.catalogThreadId !== this.startupStatus.threadId) {
+        void this.update({ status: "starting", code: "awaiting-tool-catalog",
+          message: "Codex 任务工具服务已启动，正在核对工具目录", toolsVerified: false, missingTools: [] });
+        this.armGraceTimer();
+      }
+      return;
+    }
     // Unscoped inventory reports runtimeStatus:null even after startup is ready.
     // Use the observed startup evidence, never the cached catalog alone, and
     // never combine a different task's scoped response with that evidence.
@@ -396,7 +424,10 @@ class HostHealthTracker {
     const classified = classifyCodexAppStatus(entry && entry.runtimeStatus == null && startupReady
       ? { ...entry, runtimeStatus: "connected" }
       : entry, this.requiredTools);
-    void this.update(classified);
+    this.catalogThreadId = classified.status === "ready" ? threadId : null;
+    void this.update({ ...classified,
+      ...(threadId != null ? { threadId } : {}),
+    });
     if (classified.status === "ready" || classified.status === "degraded") {
       this.clearGraceTimer();
     } else {
@@ -406,11 +437,15 @@ class HostHealthTracker {
 
   observeReloadStarted() {
     this.startupStatus = null;
+    this.catalogThreadId = null;
     this.clearGraceTimer();
     void this.update({
       status: "starting",
       code: "reloading-codex-app",
       message: "正在重新加载 Codex 任务工具",
+      toolsVerified: false,
+      missingTools: [],
+      threadId: null,
       detail: null,
       serverStatus: "starting",
     });
@@ -455,8 +490,7 @@ class HostHealthTracker {
   }
 
   armGraceTimer() {
-    if (this.closed || !this.path || this.state.status === "ready" ||
-      this.state.status === "degraded") return;
+    if (this.closed || !this.path || this.state.status !== "starting") return;
     this.clearGraceTimer();
     this.timer = this.setTimer(() => {
       this.timer = null;
@@ -640,7 +674,7 @@ export function evaluateHostHealth({
           updatedAt: finiteNumber(healthState?.updatedAt),
         };
   }
-  let status = ["starting", "ready", "degraded"].includes(healthState.status)
+  let status = ["idle", "starting", "ready", "degraded"].includes(healthState.status)
     ? healthState.status
     : "degraded";
   const requiredTools = normalizeToolNames(healthState.requiredTools).length
@@ -670,6 +704,7 @@ export function evaluateHostHealth({
     requiredTools,
     missingTools,
     toolsVerified,
+    threadId: typeof healthState.threadId === "string" ? healthState.threadId : null,
     updatedAt: finiteNumber(healthState.updatedAt),
   };
 }

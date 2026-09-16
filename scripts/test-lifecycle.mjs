@@ -26,7 +26,8 @@ import {
   launchdPlist,
   writePrivateJson,
 } from "./lifecycle-macos.mjs";
-import { requireFreeResult, RESULTS, ROOT, sourceSnapshot } from "./test-support.mjs";
+import { RESULTS, ROOT, sourceSnapshot } from "./test-support.mjs";
+import { compareTestEvidence } from "./test-impact.mjs";
 import {
   captureMacLifecycleSession,
   inspectMacLifecycleHistory,
@@ -86,7 +87,7 @@ if (resumeArgument) {
   control.progressPath ??= join(runDirectory, "progress.html");
   await writeLifecycleProgressPage(control.reportPath, control.progressPath);
   await openProgressPage(control.progressPath);
-  await launchExistingJob(control, { recovery: decision === "manual-recovery" });
+  await launchExistingJob(control);
   console.log(JSON.stringify({
     status: "resumed",
     runId,
@@ -121,7 +122,7 @@ const session = await captureMacLifecycleSession();
 // Detect structural damage before building or installing anything. The current
 // initiating turn may still run; the external supervisor waits for its terminal.
 await inspectMacLifecycleHistory(session, { allowActive: true });
-const free = await requireFreeResult();
+const initialSnapshot = await sourceSnapshot();
 const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
 const runDirectory = join(lifecycleRoot, runId);
 await mkdir(runDirectory, { recursive: true, mode: 0o700 });
@@ -131,8 +132,10 @@ const candidate = await buildMacLifecycleCandidate({
   projectVersion: packageJson.version,
 });
 const currentSnapshot = await sourceSnapshot();
-if (currentSnapshot.sha256 !== free.snapshot.sha256) {
-  throw new Error("正式包构建期间源码发生变化；请重新运行 npm run test:offline");
+if (currentSnapshot.releaseVersion !== initialSnapshot.releaseVersion ||
+  currentSnapshot.productionSha256 !== initialSnapshot.productionSha256 ||
+  compareTestEvidence(initialSnapshot, currentSnapshot, { scope: "lifecycle", runtimeTarget: "macos-native" }).status !== "reusable") {
+  throw new Error("正式包构建期间源码发生变化；请重新执行启停恢复测试准备");
 }
 
 const reportPath = join(runDirectory, "report.json");
@@ -143,7 +146,6 @@ const progressPath = join(runDirectory, "progress.html");
 const label = `com.zzw6776.codex-quota-injector.lifecycle.${runId}`;
 const installedApp = plan.host.installedApp;
 const stagingApp = `/Applications/.Codex Quota Injector.${runId}.staging.app`;
-const backupApp = `/Applications/.Codex Quota Injector.${runId}.backup.app`;
 const initialPrivate = await import("../src/lifecycle-host.mjs")
   .then(({ inspectLifecycleHost }) => inspectLifecycleHost({
     installedApp,
@@ -169,7 +171,8 @@ const report = createLifecycleReport({
     batch: plan.batch,
     name: plan.name,
     mode: "launchd-one-shot",
-    sourceSnapshot: free.snapshot,
+    failurePolicy: "stop-without-rollback",
+    sourceSnapshot: initialSnapshot,
     initialHost: plan.host,
     initiatingTurn: { threadId: session.initiatingTurn.threadId, turnId: session.initiatingTurn.turnId },
     candidate: {
@@ -206,9 +209,7 @@ const control = {
   },
   installedApp,
   stagingApp,
-  backupApp,
   initialHost: {
-    installedVersion: initialPrivate.installedVersion,
     codexPids: initialPrivate.codexPids,
     injectorPids: initialPrivate.injectorPids,
     relay: initialPrivate.relay,
@@ -251,7 +252,7 @@ console.log(JSON.stringify({
   note: "监督器由 launchd 托管；Codex 关闭不会终止它。",
 }, null, 2));
 
-async function launchExistingJob(control, { recovery = false } = {}) {
+async function launchExistingJob(control) {
   const service = `gui/${process.getuid()}/${control.launchd.label}`;
   const runDirectory = join(lifecycleRoot, control.runId);
   const plistPath = join(runDirectory, "supervisor.plist");
@@ -263,7 +264,6 @@ async function launchExistingJob(control, { recovery = false } = {}) {
     workingDirectory: ROOT,
     stdoutPath: join(runDirectory, "supervisor.stdout.log"),
     stderrPath: join(runDirectory, "supervisor.stderr.log"),
-    recovery,
   }), { mode: 0o600 });
   await execFileAsync("/bin/launchctl", ["bootout", service]).catch(() => undefined);
   return execFileAsync("/bin/launchctl", ["bootstrap", `gui/${process.getuid()}`, plistPath]);

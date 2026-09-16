@@ -152,3 +152,19 @@ test("[LCH-04 UI-02] codex_app 降级会显示常驻入口、诊断与恢复动�
   assert.match(readyTooltip, /✓ 查看用量额度/);
   assert.doesNotMatch(readyTooltip, /状态码：|list_threads|read_thread|list_projects|get_usage_limits/);
 });
+
+test("[LCH-04 UI-02] 按需加载在真实浏览器显示灰色说明，加载后切换就绪，异常仍显示恢复入口", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.update(fixtureData({ hostHealth: { required: true, status: "idle", toolsVerified: false,
+    canRestart: true, canOpenLogs: true } }));
+  await b.click(".quota-chip");
+  assert.match(await b.value(".host-health-banner.idle"), /任务工具按需加载，进入任务后自动核验/);
+  assert.equal(await b.client.evaluate(`getComputedStyle(${SHADOW}.querySelector('.host-health-dot.idle')).backgroundColor`), "rgb(138, 138, 149)");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-actions')`), null);
+  await b.update(fixtureData({ hostHealth: { required: true, status: "ready", toolsVerified: true } }));
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-banner')`), null);
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-status.status-ready') != null`), true);
+  await b.update(fixtureData({ hostHealth: { required: true, status: "degraded", code: "required-tool-missing",
+    missingTools: ["read_thread"], canRestart: true } }));
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.host-health-banner.degraded .host-health-restart') != null`), true);
+});

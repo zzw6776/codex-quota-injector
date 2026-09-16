@@ -3,6 +3,8 @@ import { WINDOWS_NATIVE, WSL_NATIVE } from "../test-runtime-targets.mjs";
 function publicHostEvidence(host, extra = {}) {
   return {
     codexPids: host.codexPids,
+    hostHealth: host.hostHealth ?? host.readiness.hostHealth,
+    ...(host.taskToolsActivation ? { taskToolsActivation: host.taskToolsActivation } : {}),
     appServerPids: host.appServerPids,
     injectorPids: host.injectorPids,
     relayPid: host.relay.pid,

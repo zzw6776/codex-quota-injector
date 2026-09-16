@@ -1,6 +1,6 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { locateHistoryDatabases } from "./lifecycle-history-store.mjs";
 
@@ -21,7 +21,7 @@ export async function findActiveCodexTurns({
   const indexedPaths = await currentRolloutPaths(sqliteHome);
   for (const path of files) {
     const current = indexedPaths.get(rolloutThreadId(path));
-    if (current && resolve(current) !== resolve(path)) {
+    if (current && toNamespacedPath(resolve(current)) !== toNamespacedPath(resolve(path))) {
       // A recovered thread may retain an abandoned rollout beside its current
       // one. Only the official index can establish that it was superseded.
       await stat(current); // A missing replacement is not evidence of idleness.

@@ -118,7 +118,7 @@ export function protectMacLifecycleOperations(operations, guard) {
   return Object.fromEntries(Object.entries(operations).map(([id, operation]) => {
     if (id === "verify-package") return [id, operation];
     const protectedOperation = { ...operation };
-    for (const method of ["run", "rollback", "reconcile"]) {
+    for (const method of ["run", "reconcile"]) {
       if (typeof operation[method] !== "function") continue;
       protectedOperation[method] = async (...args) => {
         await guard.before();

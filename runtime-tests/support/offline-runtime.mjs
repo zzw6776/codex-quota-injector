@@ -183,6 +183,17 @@ export async function stopChild(child, {
   try { await finishChildClose(child, closed, closeTimeoutMs); } finally { clearTimeout(killTimeout); }
 }
 
+export function removeRuntimeDirectory(directory) {
+  // Windows 上 sandbox 可执行文件的占用可能晚于进程退出释放。
+  // 只重试文件系统的可恢复错误；持续占用仍向测试报告抛出失败。
+  return rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === "win32" ? 20 : 0,
+    retryDelay: 50,
+  });
+}
+
 export function message(text, phase = "final_answer") {
   return { type: "message", id: `msg_${randomUUID()}`, role: "assistant", phase,
     content: [{ type: "output_text", text, annotations: [] }] };
@@ -395,12 +406,7 @@ export async function startRuntime(t, { profile = "direct", config = "", model =
     await new Promise(resolve => sockets.close(resolve));
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
-    await rm(directory, {
-      recursive: true,
-      force: true,
-      maxRetries: process.platform === "win32" ? 20 : 0,
-      retryDelay: 50,
-    });
+    await removeRuntimeDirectory(directory);
     assert.deepEqual(failures.map(e => e.message), [], "本地模型服务断言失败");
     assert.equal(steps.length, 0, "有已计划但未执行的模型请求");
   });

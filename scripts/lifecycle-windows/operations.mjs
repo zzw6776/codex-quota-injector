@@ -1,18 +1,16 @@
-import { cp, rename, rm } from "node:fs/promises";
 import { AccountManager } from "../../src/account-manager.mjs";
 import { inspectLifecycleHost, lifecycleFingerprint, readJson } from "../../src/lifecycle-host.mjs";
 import { waitForCodexTurnsIdle } from "../../src/lifecycle-turn-gate.mjs";
 import { stopCodex } from "../../src/platform.mjs";
 import { sendWakeupRequest } from "../../src/wakeup-client.mjs";
 import { WINDOWS_NATIVE, WSL_NATIVE } from "../test-runtime-targets.mjs";
-import { writePrivateJson, pathExists } from "./io.mjs";
+import { writePrivateJson } from "./io.mjs";
 import { setWindowsRuntimeConfiguration, restoreWindowsRuntimeConfiguration, windowsRuntimeConfigurationMatches } from "./runtime-configuration.mjs";
 import { verifyWindowsInstaller, installedWindowsCandidateEvidence } from "./packages.mjs";
 import { safeguardWindowsDesktopHistory, prepareWindowsHistoryBeforeLaunch, waitForWindowsHistoryDurable } from "./history.mjs";
-import { restartWindowsInitialEntry, waitForWindowsTargetHost, launchWindowsApp, launchWindowsSourceEntry, assertStableWindowsHost, waitForSettledWindowsHost } from "./host.mjs";
-import { installWindowsPackage, rollbackWindowsInstallation } from "./installation.mjs";
-import { selectWindowsRecoveryEntry, selectWindowsRuntimeRestoreEntry } from "./recovery-policy.mjs";
-import { stopWindowsInjectorOwners, waitForWindowsInjectorOwnersExit, windowsInjectorOwnedByInstalledApp, windowsInjectorOwnedBySource, terminateWindowsRelay } from "./process-ownership.mjs";
+import { waitForWindowsTargetHost, launchWindowsApp, assertStableWindowsHost, waitForSettledWindowsHost } from "./host.mjs";
+import { installWindowsPackage } from "./installation.mjs";
+import { stopWindowsInjectorOwners, waitForWindowsInjectorOwnersExit, windowsInjectorOwnedByInstalledApp, terminateWindowsRelay } from "./process-ownership.mjs";
 import { publicHostEvidence, hostRuntimeTarget, runtimeModeMatches, samePids } from "./evidence.mjs";
 
 function createWindowsLifecycleOperations(controlPath, initialControl) {
@@ -50,41 +48,10 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
     await stopWindowsInjectorOwners();
     await stopCodex();
     const restored = await restoreWindowsRuntimeConfiguration(control.runtimeConfiguration);
-    const candidateInstalled = Boolean(await installedWindowsCandidateEvidence(control));
-    const recoveryEntry = selectWindowsRuntimeRestoreEntry({
-      candidateInstalled,
-      initialEntry: selectWindowsRecoveryEntry(control.initialHost),
-    });
-    let host;
-    if (recoveryEntry === "candidate-package") {
-      host = await restartThroughInstalledEntry(originalRuntimeTarget);
-    } else if (recoveryEntry === "current-source") {
-      await launchWindowsSourceEntry(control.root, control.sourceRecoveryRelay);
-      host = await waitForWindowsTargetHost({
-        ...control,
-        expectedProtocol: control.initialHost?.relay?.protocol ?? control.expectedProtocol,
-      }, {
-        expectedRuntimeTarget: originalRuntimeTarget,
-        ownerCheck: (snapshot) => windowsInjectorOwnedBySource(snapshot.injectorPids, control.root),
-        ownerFailure: "rollback-source-owner",
-      });
-    } else {
-      await launchWindowsApp(control.installedApp);
-      host = await waitForWindowsTargetHost({
-        ...control,
-        expectedProtocol: control.initialHost?.relay?.protocol ?? null,
-      }, {
-        expectedRuntimeTarget: originalRuntimeTarget,
-        ownerCheck: (snapshot) => windowsInjectorOwnedByInstalledApp(
-          snapshot.injectorPids,
-          control.installedApp,
-        ),
-        ownerFailure: "rollback-installed-owner",
-      });
-    }
+    const host = await restartThroughInstalledEntry(originalRuntimeTarget);
     await updateControl({ activeRuntimeTarget: control.runtimeConfiguration.originalRuntime,
       runtimeConfigurationRestored: true });
-    return publicHostEvidence(host, { ...restored, recoveryEntry });
+    return publicHostEvidence(host, { ...restored, entry: "candidate-package" });
   };
   const switchRuntimeOperation = (runtimeTarget) => ({
     replaySafe: true,
@@ -105,7 +72,6 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
       await stopCodex();
       return { ...configured, previousRuntimeTarget: hostRuntimeTarget(before) };
     },
-    rollback: restoreOriginalRuntime,
   });
   const launchRuntimeOperation = (runtimeTarget) => ({
     replaySafe: true,
@@ -130,6 +96,7 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
           control.installedApp,
         ),
       });
+      if (readyHost.taskToolsActivation) host.taskToolsActivation = readyHost.taskToolsActivation;
       const history = {
         ...await waitForRuntimeHistory(runtimeTarget),
         rebuild: historyPreparation.rebuild,
@@ -297,19 +264,13 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
       reconcile: async () => control.runtime?.desktopHistory
         ? { completed: true, evidence: control.runtime.desktopHistory }
         : { completed: false, safeToRetry: true },
-      rollback: async () => restartWindowsInitialEntry(control),
     },
     "install-update": {
       replaySafe: true,
       run: async () => {
         await waitForDesktopIdle();
-        if (control.initialHost.installedPresent && !await pathExists(control.backupApp)) {
-          const backupStaging = `${control.backupApp}.staging`;
-          await rm(backupStaging, { recursive: true, force: true });
-          await cp(control.installedApp, backupStaging, { recursive: true, force: false });
-          await rename(backupStaging, control.backupApp);
-          await updateControl({ backupCreated: true });
-        }
+        await stopWindowsInjectorOwners();
+        await stopCodex();
         await updateControl({ installStarted: true });
         const evidence = await installWindowsPackage(control);
         await updateControl({ installed: true, installedEvidence: evidence });
@@ -321,7 +282,6 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
           ? { completed: true, evidence: installed }
           : { completed: false, safeToRetry: true };
       },
-      rollback: async () => rollbackWindowsInstallation(control),
     },
     ...(control.version === 1 ? {
       "launch-updated": launchRuntimeOperation(originalRuntimeTarget),
@@ -350,7 +310,6 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
           ? { completed: true, evidence: publicHostEvidence(host, { configRestored }) }
           : { completed: false, safeToRetry: true };
       },
-      rollback: restoreOriginalRuntime,
     },
     "switch-account": {
       run: async () => {
@@ -414,7 +373,6 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
           manager.close();
         }
       },
-      rollback: restoreOriginalAccount,
     },
     "restore-account": {
       replaySafe: true,
@@ -443,7 +401,6 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
           manager.close();
         }
       },
-      rollback: restoreOriginalAccount,
     },
     "final-state": {
       replaySafe: true,
@@ -468,7 +425,6 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
             manager.close();
           }
         }
-        await rm(control.backupApp, { recursive: true, force: true });
         return publicHostEvidence(host, {
           installed,
           runtimeConfigurationRestored: true,

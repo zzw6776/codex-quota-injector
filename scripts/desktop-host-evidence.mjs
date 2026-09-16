@@ -11,7 +11,7 @@ import {
 import { defaultAccountDataDir } from "../src/platform.mjs";
 import { readCodexDelegationInput } from "../src/codex-delegation.mjs";
 
-export const DESKTOP_HOST_REPORT_VERSION = 13;
+export const DESKTOP_HOST_REPORT_VERSION = 16;
 
 export function desktopBatch(profile) {
   if (profile === "official") return "model-official";
@@ -357,6 +357,11 @@ export function evaluateDesktopHostEvidence({
     checks.find((item) => item.id === "codex-app-read-thread").reason =
       "read_thread 的 JSON 返回被工具输出预算截断，无法核验内容；不等同于空回合或模型不支持";
   }
+  if (rollout?.computerUseFailure === "native-api-unavailable") {
+    const item = checks.find((item) => item.id === "computer-use");
+    if (item.status !== "passed") item.reason =
+      "原生 Computer Use 调用了运行时未提供的 API；应按当前 Windows computer-use 技能使用 node_repl 与 @oai/sky，不能据此归因 Relay 或标为不适用";
+  }
   let status = checks.every((item) => ["passed", "unsupported"].includes(item.status)) ? "passed" : "incomplete";
   const invalidComputerUse = computerUseKind === "windows-native"
     ? Number(nativeComputerUseEvidence?.launchCount ?? 0) > 1 || nativeSubmissions.length > 1 ||
@@ -522,7 +527,13 @@ export function desktopHostPrompt({
     `3. 分别调用四个常用只读 codex_app 入口：先调用 list_threads 并确认正常返回；若发起者在本提示后附带当前任务 ID，必须用该 ID，否则从返回结果识别当前任务。再单独调用 read_thread，设置 turnLimit: 2、includeOutputs: true、maxOutputCharsPerItem: 20000，并确认返回的是当前任务；返回页中每个 completed 回合都必须含真实输入和 agentMessage。输入可以是 userMessage，或 codex_app.create_thread / send_message_to_thread 的 functionCallOutput，其中必须包含完整 codex_delegation、非空 source_thread_id 和 input 正文；只有工具名称或截断输出不能通过。当前 inProgress 回合可以为空。本轮标记由 rollout 独立绑定，不要求 read_thread 重复返回尚未完成的当前输入。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
     "4. 用实际 web.run 搜索 OpenAI 官方 Codex app-server 文档，用 open 或 click 打开文档页面，再 find `thread/fork` 并确认正文实际命中；首次未命中时允许在同回合继续查找。不能用 shell 或普通 fetch 代替。",
     nativeExecutablePath
-      ? `5. 用实际 computer use 启动 Windows 原生应用 ${nativeExecutablePath}。用本轮可执行文件路径和标题中可见的 ${marker} 前缀唯一定位窗口；Windows 可能截断标题，必须从辅助功能树读取并核对完整标记后才能输入。聚焦 Marker input，原样输入并只提交一次，同时对该窗口调用一次真实截图。正确提交后应用会自动关闭。不能使用浏览器、HTTP 页面、shell 输入或辅助驱动代替。`
+      ? [
+          `5. 用实际 computer use 操作 Windows 原生应用 ${nativeExecutablePath}。先完整读取当前可用的 Windows computer-use 技能及其 guidance.md、api.md，按技能使用 node_repl 的 @oai/sky 专用入口。`,
+          `在 node_repl 初始化：if (!globalThis.sky) { const { sky } = await import("@oai/sky"); globalThis.sky = sky; }。核对 sky.target === "windows"，以及 launch_app、list_windows、get_window_state、type_text、click 均为函数；只有前置检查成功才启动材料。初始化失败或工具未开放时保留原始错误，停止该交互项并继续其余独立项。`,
+          `Windows 原生交互不要调用 cua_repl 的 cua.getApp。使用 await sky.launch_app({app:${JSON.stringify(nativeExecutablePath)}}) 只启动一次，再用 sky.list_windows() 返回的窗口对象与本轮可执行文件路径、标题中可见的 ${marker} 前缀唯一定位窗口；不能构造或猜测窗口句柄。`,
+          `先用 sky.get_window_state({window:目标窗口,include_screenshot:false,include_text:true}) 读取辅助功能树，核对完整标记。按技能分开观察与操作，聚焦 Marker input，核对焦点后用 sky.type_text 输入原样标记。`,
+          `提交前对该窗口调用一次真实截图 sky.get_window_state({window:目标窗口,include_screenshot:true,include_text:false})；截图失败仍单独留证，重新读取辅助功能树后再完成可执行的提交步骤。只提交一次，正确提交后应用会自动关闭。不能使用浏览器、HTTP 页面、shell 输入或辅助驱动代替。`,
+        ].join("\n")
       : `5. 用实际 computer use 打开 ${fixtureUrl}，读取页面标记，原样输入并只提交一次；随后截图并点击下载测试产物。`,
     `6. 正常结束任务。运行中的监视器会自动更新验收编号 ${runId} 的报告，不要编辑报告文件。`,
     "不要在回复中伪造通过；报告只采信 rollout、运行时状态和材料服务记录。",
@@ -758,17 +769,24 @@ function isComputerSubmitCall(call) {
 }
 
 function isComputerScreenshotCall(call) {
-  return /(?:include_screenshot\s*:\s*true|screenshot|captureScreenshot|emitImage)/i.test(call.input);
+  // 辅助功能读取中的 include_screenshot:false，以及通用图片转发分支，
+  // 都不能证明实际请求了截图。sky 未指定此选项时默认截图。
+  const windowsStates = [...call.input.matchAll(/\bsky\.get_window_state\s*\(\s*\{([\s\S]*?)\}\s*\)/g)];
+  return windowsStates.some(([, options]) => !/\binclude_screenshot\s*:\s*false\b/.test(options)) ||
+    /\.(?:getScreenshot|screenshot|getAXStateAndScreenshot)\s*\(|\bcaptureScreenshot\s*\(/i.test(call.input);
 }
 
 function isSuccessfulComputerUseOutput(output) {
   const value = String(output ?? "").trim();
   return Boolean(value) &&
-    !/["']?isError["']?\s*:\s*true|tool call (?:failed|error)|Mcp error|Script (?:failed|error)|Computer Use has been stopped|SetIsBorderRequired failed|coordinate input geometry is unavailable/i.test(value);
+    !/["']?isError["']?\s*:\s*true|tool call (?:failed|error)|Mcp error|Script (?:failed|error)|Computer Use has been stopped|SetIsBorderRequired failed|coordinate input geometry is unavailable|\b(?:cua|sky)\.[\w.]+ is not a function/i.test(value);
 }
 
 function classifyComputerUseFailure(output) {
   const value = String(output ?? "");
+  if (/\b(?:cua|sky)\.[\w.]+ is not a function/i.test(value)) {
+    return "native-api-unavailable";
+  }
   if (/sandboxCwd is not a local file URI/i.test(value)) {
     return "sandbox-cwd-not-local-file-uri";
   }

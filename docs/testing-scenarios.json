@@ -9,6 +9,7 @@
       ],
       "free": [
         "test/testing-boundaries.test.mjs",
+        "test/test-impact.test.mjs",
         "test/desktop-host-evidence.test.mjs",
         "runtime-tests/desktop-fixture.test.mjs",
         "runtime-tests/browser-runtime.test.mjs",
@@ -33,7 +34,7 @@
         "test/lifecycle-turn-gate.test.mjs"
       ],
       "live": "lifecycle",
-      "note": "免费批次验证外部监督、检查点、活动回合落盘门禁、目标协议、桌面主进程单实例、账号回滚和独立可视进度契约；真实关闭、重启、正式包更新与账号往返由当前平台 lifecycle 报告验收。"
+      "note": "免费批次验证外部监督、检查点、活动回合落盘门禁、目标协议、桌面主进程单实例、失败直接落盘、无安装回滚和独立可视进度契约；真实关闭、重启、正式包更新与账号往返由当前平台 lifecycle 报告验收。"
     },
     {
       "ids": [

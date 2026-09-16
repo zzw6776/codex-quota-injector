@@ -15,25 +15,26 @@ import {
   REQUIRED_CODEX_APP_TOOLS,
 } from "../src/host-health.mjs";
 import { RELAY_PROTOCOL_VERSION } from "../src/relay-contract.mjs";
+
+
+
+
 import {
+  installAppBundle,
   checksumForArchive,
   launchdPlist,
   lsofContainsFileIdentity,
-  selectInstallRollbackAction,
   waitForTargetHost,
 } from "../scripts/lifecycle-macos.mjs";
 import {
   assertStableWindowsHost,
+  createWindowsLifecycleOperations,
   captureWindowsRuntimeConfiguration,
-  inspectWindowsSourceRecovery,
   inspectWslLifecyclePrerequisites,
   prepareWindowsHistoryBeforeLaunch,
   requestWindowsRuntimeHistoryRebuild,
   restoreWindowsRuntimeConfiguration,
   safeguardWindowsDesktopHistory,
-  selectWindowsRecoveryEntry,
-  selectWindowsInstallRollbackAction,
-  selectWindowsRuntimeRestoreEntry,
   setWindowsRuntimeConfiguration,
   verifyWindowsInstallation,
   verifyWindowsInstaller,
@@ -45,9 +46,80 @@ import {
   windowsScheduledTaskScript,
 } from "../scripts/lifecycle-windows.mjs";
 import { listCodexDesktopProcessIds } from "../src/platform.mjs";
-import { open, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { useTempDir } from "./helpers.mjs";
+import { createLifecycleReport, readLifecycleReport, runLifecycleReport, writeLifecycleReport } from "../src/lifecycle-runner.mjs";
+
+test("macOS candidate installation replaces the target without reading or backing up the old bundle", async (t) => {
+  const directory = await useTempDir(t);
+  const control = {
+    candidateApp: join(directory, "candidate.app"),
+    stagingApp: join(directory, "staging.app"),
+    installedApp: join(directory, "installed.app"),
+    projectVersion: "1.2.3", arch: "arm64",
+  };
+  await mkdir(control.candidateApp);
+  await mkdir(control.installedApp);
+  await writeFile(join(control.candidateApp, "content"), "new");
+  await writeFile(join(control.installedApp, "content"), "old-with-unknown-version");
+  const checked = [];
+  const result = await installAppBundle(control, {
+    verifyBundle: async (path, options) => {
+      checked.push(path);
+      assert.equal(options.projectVersion, "1.2.3");
+      assert.equal(await readFile(join(path, "content"), "utf8"), "new");
+      return { version: "1.2.3", workerSha256: "candidate-worker" };
+    },
+    copyBundle: (source, target) => cp(source, target, { recursive: true }),
+  });
+  assert.deepEqual(checked, [control.candidateApp, control.stagingApp]);
+  assert.equal(await readFile(join(control.installedApp, "content"), "utf8"), "new");
+  assert.equal(result.installedVersion, "1.2.3");
+  assert.equal(result.previousVersion, undefined);
+});
+
+test("macOS staging verification failure stops before replacing the installation", async (t) => {
+  const directory = await useTempDir(t);
+  const control = {
+    candidateApp: join(directory, "candidate.app"), stagingApp: join(directory, "staging.app"),
+    installedApp: join(directory, "installed.app"), projectVersion: "1.2.3", arch: "arm64",
+  };
+  await mkdir(control.candidateApp);
+  await mkdir(control.installedApp);
+  await writeFile(join(control.installedApp, "content"), "old");
+  await assert.rejects(installAppBundle(control, {
+    verifyBundle: async path => {
+      if (path === control.stagingApp) throw new Error("invalid staging signature");
+      return { version: "1.2.3" };
+    },
+    copyBundle: (source, target) => cp(source, target, { recursive: true }),
+  }), /invalid staging signature/);
+  assert.equal(await readFile(join(control.installedApp, "content"), "utf8"), "old");
+});
+
+test("Windows/WSL acceptance fails at the actual step without legacy installation data or rollback", async (t) => {
+  const directory = await useTempDir(t);
+  const reportPath = join(directory, "report.json");
+  const operations = createWindowsLifecycleOperations(join(directory, "control.json"), {
+    version: 2, expectedProtocol: RELAY_PROTOCOL_VERSION,
+    installedApp: join(directory, "installed"),
+    installerPath: join(directory, "missing-setup.exe"),
+    projectVersion: "1.2.3", runtimeConfiguration: { originalRuntime: "wsl-native" },
+  });
+  for (const operation of Object.values(operations)) assert.equal(operation.rollback, undefined);
+  await writeLifecycleReport(reportPath, createLifecycleReport({
+    platform: "win32", steps: ["verify-package", "install-update"],
+  }));
+  await assert.rejects(runLifecycleReport({ reportPath, operations }), /Windows Setup 不存在/);
+  const report = await readLifecycleReport(reportPath);
+  assert.equal(report.status, "failed");
+  assert.equal(report.steps[0].status, "failed");
+  assert.equal(report.steps[1].status, "pending");
+  assert.equal(report.ownerPid, null);
+  assert.ok(report.finishedAt);
+  assert.ok(report.steps.every(step => step.rollback === null));
+});
 
 test("[LCH-01 LCH-03] 生命周期就绪必须同时满足 Codex、单实例、同代中继和目标协议", () => {
   const base = {
@@ -214,34 +286,10 @@ test("[platform:windows-native] [HAR-02 LCH-06] Windows 监督器由计划任务
   assert.match(script, /Start-ScheduledTask/);
   assert.match(script, /"C:\\repo path\\scripts\\lifecycle-supervisor\.mjs" --control "C:\\private path\\control\.json"/);
 
-  const recoveryScript = windowsScheduledTaskScript({
-    taskName: "CodexQuotaInjector-Lifecycle-1",
-    nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
-    supervisorScript: "C:\\repo path\\scripts\\lifecycle-supervisor.mjs",
-    controlPath: "C:\\private path\\control.json",
-    workingDirectory: "C:\\repo path",
-    recovery: true,
-  });
-  assert.match(recoveryScript, /"C:\\repo path\\scripts\\lifecycle-supervisor\.mjs" --recover --control "C:\\private path\\control\.json"/);
+
 });
 
-test("[platform:windows-native] [HAR-04 LCH-06] Windows 回滚必须使用调度前记录的启动入口", () => {
-  assert.equal(selectWindowsRecoveryEntry({ recoveryEntry: "current-source" }), "current-source");
-  assert.equal(selectWindowsRecoveryEntry({ recoveryEntry: "installed-package" }), "installed-package");
-  assert.throws(() => selectWindowsRecoveryEntry({}), /拒绝猜测恢复方式/);
-  assert.equal(selectWindowsRuntimeRestoreEntry({
-    candidateInstalled: true,
-    initialEntry: "current-source",
-  }), "candidate-package");
-  assert.equal(selectWindowsRuntimeRestoreEntry({
-    candidateInstalled: false,
-    initialEntry: "current-source",
-  }), "current-source");
-  assert.equal(selectWindowsRuntimeRestoreEntry({
-    candidateInstalled: false,
-    initialEntry: "installed-package",
-  }), "installed-package");
-});
+
 
 test("[platform:windows-native] [HAR-03 LCH-02] Windows 运行方式恢复保留 Codex 启动期间写入的其他配置", async (t) => {
   const directory = await useTempDir(t, "codex-runtime-switch-");
@@ -654,43 +702,7 @@ test("[platform:windows-native] [LCH-04] Windows 历史恢复使用正式 Relay 
   assert.equal(result.relayRuntime, "windows-native");
 });
 
-test("[platform:windows-native][platform:wsl-native] [LCH-06] Windows/WSL 首次安装的源码恢复入口必须是当前运行环境的有效原生产物", async () => {
-  const checked = [];
-  const validators = {
-    assertWindowsExecutable: async (path) => { checked.push(["windows", path]); },
-    assertWslExecutable: async (path) => { checked.push(["wsl", path]); },
-  };
-  assert.deepEqual(await inspectWindowsSourceRecovery({
-    installationState: "empty",
-    currentRuntime: "windows-native",
-    sourceRecoveryRelay: "C:\\relay.exe",
-    ...validators,
-  }), { status: "ready", reason: null });
-  assert.deepEqual(await inspectWindowsSourceRecovery({
-    installationState: "empty",
-    currentRuntime: "wsl-native",
-    sourceRecoveryRelay: "C:\\relay-wsl",
-    ...validators,
-  }), { status: "ready", reason: null });
-  assert.deepEqual(checked, [
-    ["windows", "C:\\relay.exe"],
-    ["wsl", "C:\\relay-wsl"],
-  ]);
-  const blocked = await inspectWindowsSourceRecovery({
-    installationState: "empty",
-    currentRuntime: "windows-native",
-    sourceRecoveryRelay: "missing.exe",
-    assertWindowsExecutable: async () => { throw new Error("invalid PE"); },
-  });
-  assert.equal(blocked.status, "blocked-invalid-or-missing-native-relay");
-  assert.match(blocked.reason, /invalid PE/);
-  assert.deepEqual(await inspectWindowsSourceRecovery({
-    installationState: "versioned",
-    currentRuntime: "windows-native",
-    sourceRecoveryRelay: "unused.exe",
-    assertWindowsExecutable: async () => assert.fail("已有安装时不依赖源码入口"),
-  }), { status: "ready", reason: null });
-});
+
 
 test("[platform:windows-native] [LCH-06] Windows Setup 和安装目录必须与同一个版本化中继集合对应", async (t) => {
   const directory = await useTempDir(t, "codex-windows-lifecycle-");
@@ -832,72 +844,9 @@ test("[platform:macos-native] [LCH-03 LCH-06] macOS 安装路径被替换后必�
   }), true);
 });
 
-test("[platform:macos-native] [LCH-06 HAR-04] macOS 安装未改写目标包时回滚保留原包，未知状态先报错再停止进程", () => {
-  assert.equal(selectInstallRollbackAction({
-    backupExists: false,
-    initialInstalledVersion: "0.1.202",
-    projectVersion: "0.1.203",
-    installedCandidate: false,
-    restoredOriginal: true,
-  }), "leave-installed", "原包已恢复并重新验签后，只重试运行时恢复");
-  assert.equal(selectInstallRollbackAction({
-    backupExists: false,
-    initialInstalledVersion: "0.1.203",
-    projectVersion: "0.1.203",
-    installedCandidate: true,
-  }), "leave-installed");
-  assert.equal(selectInstallRollbackAction({
-    backupExists: true,
-    initialInstalledVersion: "0.1.202",
-    projectVersion: "0.1.203",
-    installedCandidate: false,
-  }), "restore-backup");
-  assert.throws(() => selectInstallRollbackAction({
-    backupExists: false,
-    initialInstalledVersion: "0.1.202",
-    projectVersion: "0.1.203",
-    installedCandidate: true,
-  }), /备份不存在/);
-});
 
-test("[platform:windows-native] [LCH-06 HAR-04] Windows 回滚按安装前状态恢复旧包、移除新增包或拒绝未知状态", () => {
-  assert.equal(selectWindowsInstallRollbackAction({
-    backupExists: true,
-    initialInstalledPresent: true,
-    initialInstalledVersion: "0.1.202",
-    projectVersion: "0.1.203",
-    installedCandidate: false,
-  }), "restore-backup");
-  assert.equal(selectWindowsInstallRollbackAction({
-    backupExists: false,
-    initialInstalledPresent: false,
-    initialInstalledVersion: null,
-    projectVersion: "0.1.203",
-    installedCandidate: true,
-  }), "remove-installed");
-  assert.equal(selectWindowsInstallRollbackAction({
-    backupExists: false,
-    initialInstalledPresent: true,
-    initialInstalledVersion: "0.1.203",
-    projectVersion: "0.1.203",
-    installedCandidate: true,
-  }), "leave-installed");
-  assert.equal(selectWindowsInstallRollbackAction({
-    backupExists: false,
-    initialInstalledPresent: true,
-    initialInstalledVersion: "0.1.202",
-    projectVersion: "0.1.203",
-    installedCandidate: false,
-    installStarted: false,
-  }), "leave-original");
-  assert.throws(() => selectWindowsInstallRollbackAction({
-    backupExists: false,
-    initialInstalledPresent: true,
-    initialInstalledVersion: "0.1.202",
-    projectVersion: "0.1.203",
-    installedCandidate: true,
-  }), /备份不存在/);
-});
+
+
 
 function readyHost({ injectorPid, wslNative = false, codexPids = [10], relayPid = 30 }) {
   return {
@@ -905,6 +854,8 @@ function readyHost({ injectorPid, wslNative = false, codexPids = [10], relayPid 
     injectorPids: [injectorPid],
     relay: { pid: relayPid, wslNative },
     readiness: {
+      coreReady: true,
+      hostToolsReady: true,
       ready: true,
       codexRunning: true,
       debugReady: true,

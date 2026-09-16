@@ -1,7 +1,7 @@
 import { isSea } from "node:sea";
 import { constants as fsConstants } from "node:fs";
 import { access, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
 
 import {
@@ -326,9 +326,9 @@ async function resolveDefaultInjectionMode() {
   return await codexRunsInWindowsSubsystemForLinux() ? "wsl" : "windows";
 }
 
-function isWslNativeRelay(relayExecutable) {
-  return process.platform === "win32" &&
-    /^codex-quota-relay-wsl-\d+\.\d+\.\d+$/i.test(basename(String(relayExecutable ?? "")));
+function isWslNativeRelay(relayExecutable, platform = process.platform) {
+  return platform === "win32" &&
+    /^codex-quota-relay-wsl-\d+\.\d+\.\d+$/i.test(win32.basename(String(relayExecutable ?? "")));
 }
 
 async function resolveRelayExecutable() {
@@ -372,12 +372,23 @@ async function resolveRelayExecutable() {
   return resolve(import.meta.dirname, "launcher.mjs");
 }
 
-function relayLaunchEnvironment(relayExecutable) {
-  if (process.platform !== "win32") return { CODEX_CLI_PATH: relayExecutable };
+export function relayLaunchEnvironment(relayExecutable, {
+  platform = process.platform,
+  environment = process.env,
+} = {}) {
+  if (platform !== "win32") return { CODEX_CLI_PATH: relayExecutable };
   return {
     // The desktop app translates an absolute path to its WSL equivalent.
     // A basename would require a Windows PATH entry that WSL does not inherit.
     CODEX_CLI_PATH: relayExecutable,
+    // WSL only imports variables declared in WSLENV. The primary marker must
+    // reach the desktop Relay so it can publish state; keep other declarations
+    // and replace any old marker flags with Windows-to-WSL forwarding.
+    ...(isWslNativeRelay(relayExecutable, platform) ? {
+      WSLENV: [...String(environment.WSLENV ?? "").split(":").filter(entry =>
+        entry && entry.split("/", 1)[0].trim().toUpperCase() !== PRIMARY_APP_SERVER_ENV,
+      ), `${PRIMARY_APP_SERVER_ENV}/u`].join(":"),
+    } : {}),
   };
 }
 

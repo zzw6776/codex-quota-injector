@@ -1,5 +1,6 @@
+import { activateLifecycleTaskTools, bindLifecycleTask } from "./lifecycle-task-tools.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   access,
   chmod,
@@ -28,7 +29,6 @@ import {
 import { stopCodex } from "../src/platform.mjs";
 import { sendWakeupRequest } from "../src/wakeup-client.mjs";
 import { readSingleInstanceStatus } from "../src/single-instance.mjs";
-import { RELAY_PROTOCOL_VERSION } from "../src/relay-contract.mjs";
 import { readLatestUnfinishedLifecycle } from "../src/lifecycle-runner.mjs";
 import { createMacLifecycleSessionGuard, protectMacLifecycleOperations } from "./lifecycle-macos-session.mjs";
 
@@ -277,6 +277,8 @@ export function createMacLifecycleOperations(controlPath, initialControl, {
     "install-update": {
       replaySafe: true,
       run: async () => {
+        await stopInjectorOwners();
+        await stopDesktop();
         const evidence = await installAppBundle(control);
         await updateControl({ installed: true });
         return evidence;
@@ -287,7 +289,6 @@ export function createMacLifecycleOperations(controlPath, initialControl, {
           ? { completed: true, evidence: installed }
           : { completed: false, safeToRetry: true };
       },
-      rollback: async () => rollbackInstalledApp(control, sessionGuard),
     },
     "launch-updated": {
       replaySafe: true,
@@ -465,7 +466,6 @@ export function createMacLifecycleOperations(controlPath, initialControl, {
           manager.close();
         }
       },
-      rollback: restoreOriginalAccount,
     },
     "restore-account": {
       replaySafe: true,
@@ -490,7 +490,6 @@ export function createMacLifecycleOperations(controlPath, initialControl, {
           manager.close();
         }
       },
-      rollback: restoreOriginalAccount,
     },
     "final-state": {
       replaySafe: true,
@@ -509,7 +508,6 @@ export function createMacLifecycleOperations(controlPath, initialControl, {
             manager.close();
           }
         }
-        await rm(control.backupApp, { recursive: true, force: true });
         await rm(control.stagingApp, { recursive: true, force: true });
         return publicHostEvidence(host, {
           installed,
@@ -541,106 +539,26 @@ export function createMacLifecycleOperations(controlPath, initialControl, {
   return protectMacLifecycleOperations(operations, sessionGuard);
 }
 
-export async function installAppBundle(control) {
-  const candidate = await verifyMacAppBundle(control.candidateApp, {
+export async function installAppBundle(control, {
+  verifyBundle = verifyMacAppBundle,
+  copyBundle = (source, target) => runCommand("/usr/bin/ditto", [source, target]),
+} = {}) {
+  const candidate = await verifyBundle(control.candidateApp, {
     projectVersion: control.projectVersion,
     architecture: control.arch,
   });
-  const installed = await installedCandidateEvidence(control);
-  if (installed) return installed;
   await rm(control.stagingApp, { recursive: true, force: true });
-  await runCommand("/usr/bin/ditto", [control.candidateApp, control.stagingApp]);
-  await verifyMacAppBundle(control.stagingApp, {
+  await copyBundle(control.candidateApp, control.stagingApp);
+  await verifyBundle(control.stagingApp, {
     projectVersion: control.projectVersion,
     architecture: control.arch,
   });
-  if (await pathExists(control.installedApp)) {
-    if (!await pathExists(control.backupApp)) {
-      await rename(control.installedApp, control.backupApp);
-    } else {
-      const currentVersion = await readMacAppVersion(control.installedApp);
-      throw new Error(`安装目标已被其他进程改写（当前版本 ${currentVersion ?? "未知"}）`);
-    }
-  }
-  try {
-    await rename(control.stagingApp, control.installedApp);
-  } catch (error) {
-    if (!await pathExists(control.installedApp) && await pathExists(control.backupApp)) {
-      await rename(control.backupApp, control.installedApp).catch(() => undefined);
-    }
-    throw error;
-  }
+  await rm(control.installedApp, { recursive: true, force: true });
+  await rename(control.stagingApp, control.installedApp);
   return {
-    previousVersion: control.initialHost.installedVersion,
     installedVersion: candidate.version,
     workerSha256: candidate.workerSha256,
   };
-}
-
-export async function rollbackInstalledApp(control, sessionGuard = createMacLifecycleSessionGuard(control)) {
-  const backupExists = await pathExists(control.backupApp);
-  const installedCandidate = backupExists ? null : await installedCandidateEvidence(control);
-  // A prior rollback may have restored the bundle and then failed to launch.
-  // Verify the restored package before retrying only the runtime recovery.
-  const restoredOriginal = !backupExists && control.initialHost.installedVersion
-    ? await verifyMacAppBundle(control.installedApp, {
-      projectVersion: control.initialHost.installedVersion, architecture: control.arch,
-    }).catch(() => null)
-    : null;
-  const rollbackAction = selectInstallRollbackAction({
-    backupExists,
-    initialInstalledVersion: control.initialHost.installedVersion,
-    projectVersion: control.projectVersion,
-    installedCandidate: Boolean(installedCandidate),
-    restoredOriginal: Boolean(restoredOriginal),
-  });
-  const recoveryVersion = (await readJson(join(control.root, "package.json")))?.version;
-  if (!recoveryVersion) throw new Error("无法确认恢复所用源码版本");
-  await sessionGuard.before();
-  await stopInjectorOwners();
-  await rm(control.stagingApp, { recursive: true, force: true });
-  if (rollbackAction === "restore-backup") {
-    await rm(control.installedApp, { recursive: true, force: true });
-    await rename(control.backupApp, control.installedApp);
-  } else if (rollbackAction === "remove-installed") {
-    await rm(control.installedApp, { recursive: true, force: true });
-  }
-  await sessionGuard.before();
-  const child = spawn(process.execPath, [join(control.root, "src", "launcher.mjs"), "--explicit-start"], {
-    cwd: control.root,
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
-  const host = await waitForTargetHost({ ...control, projectVersion: recoveryVersion,
-    expectedProtocol: RELAY_PROTOCOL_VERSION }, {
-    readLauncherStatus: readSingleInstanceStatus,
-    ownerCheck: (snapshot) => injectorOwnedByExecutable(snapshot.injectorPids, process.execPath),
-    ownerFailure: "current-source-owner",
-  });
-  return publicHostEvidence(host, {
-    installedVersion: await readMacAppVersion(control.installedApp),
-    recoveryEntry: "current-source",
-    rollbackAction,
-    sourceOwner: true,
-    recoverySourceVersion: recoveryVersion,
-    recoveryRelayProtocol: RELAY_PROTOCOL_VERSION,
-    restoredOriginal,
-  });
-}
-
-export function selectInstallRollbackAction({
-  backupExists,
-  initialInstalledVersion,
-  projectVersion,
-  installedCandidate,
-  restoredOriginal = false,
-}) {
-  if (backupExists) return "restore-backup";
-  if (!initialInstalledVersion) return "remove-installed";
-  if (restoredOriginal) return "leave-installed";
-  if (initialInstalledVersion === projectVersion && installedCandidate) return "leave-installed";
-  throw new Error("安装前应用备份不存在，拒绝把未知安装状态标为已回滚");
 }
 
 export async function waitForTargetHost(control, {
@@ -652,12 +570,16 @@ export async function waitForTargetHost(control, {
   ownerFailure = "target-owner",
   inspectHost = inspectLifecycleHost,
   pollIntervalMs = WAIT_INTERVAL_MS,
+  activateTaskTools = activateLifecycleTaskTools,
   readLauncherStatus = null,
   afterLauncherRevision = null,
   stableBaseline = null,
 } = {}) {
+  const taskThreadId = control.sessionCheckpoint ? bindLifecycleTask(control).threadId : null;
   const deadline = Date.now() + timeoutMs;
   let latest = null;
+  let taskToolsActivation = null;
+  const activatedPids = new Set();
   let ownerMatches = ownerCheck === null;
   let launcherReady = readLauncherStatus === null;
   while (Date.now() < deadline) {
@@ -676,7 +598,19 @@ export async function waitForTargetHost(control, {
     const injectorChanged = previousInjectorPids == null ||
       !samePids(latest.injectorPids, previousInjectorPids);
     ownerMatches = ownerCheck === null || await ownerCheck(latest);
-    if (latest.readiness.ready && relayChanged && codexChanged && injectorChanged && ownerMatches && launcherReady) {
+    const health = latest.hostHealth ?? latest.readiness.hostHealth;
+    const taskToolsReady = latest.readiness.hostToolsReady &&
+      (health?.required !== true || taskThreadId == null || health.threadId === taskThreadId);
+    if (latest.readiness.coreReady && !taskToolsReady &&
+      relayChanged && codexChanged && injectorChanged && ownerMatches && launcherReady &&
+      !activatedPids.has(latest.codexPids[0])) {
+      taskToolsActivation = await activateTaskTools(control, latest);
+      activatedPids.add(latest.codexPids[0]);
+    }
+    if (latest.readiness.ready && taskToolsReady && relayChanged && codexChanged && injectorChanged && ownerMatches && launcherReady) {
+      if (taskToolsActivation?.codexPid === latest.codexPids[0]) {
+        latest.taskToolsActivation = { ...taskToolsActivation, verifiedAt: new Date().toISOString() };
+      }
       return latest;
     }
     await delay(pollIntervalMs);
@@ -693,6 +627,10 @@ export async function waitForTargetHost(control, {
   if (latest && previousInjectorPids != null &&
     samePids(latest.injectorPids, previousInjectorPids)) {
     reasons.push("injector-pids-unchanged");
+  }
+  const finalHealth = latest?.hostHealth ?? latest?.readiness?.hostHealth;
+  if (taskThreadId && finalHealth?.required === true && finalHealth.threadId !== taskThreadId) {
+    reasons.push("initiating-task-tools-not-verified");
   }
   if (!ownerMatches) reasons.push(ownerFailure);
   if (!launcherReady) reasons.push(`launcher-not-ready:${JSON.stringify(latest?.launcher ?? null)}`);
@@ -823,8 +761,8 @@ export async function writePrivateJson(path, value) {
 }
 
 export function launchdPlist({ label, nodeExecutable, supervisorScript, controlPath,
-  workingDirectory, stdoutPath, stderrPath, recovery = false }) {
-  const args = [nodeExecutable, supervisorScript, ...(recovery ? ["--recover"] : []), "--control", controlPath]
+  workingDirectory, stdoutPath, stderrPath }) {
+  const args = [nodeExecutable, supervisorScript, "--control", controlPath]
     .map((value) => `<string>${xmlEscape(value)}</string>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -844,6 +782,8 @@ export function launchdPlist({ label, nodeExecutable, supervisorScript, controlP
 function publicHostEvidence(host, extra = {}) {
   return {
     codexPids: host.codexPids,
+    hostHealth: host.hostHealth ?? host.readiness.hostHealth,
+    ...(host.taskToolsActivation ? { taskToolsActivation: host.taskToolsActivation } : {}),
     injectorPids: host.injectorPids,
     relayPid: host.relay.pid,
     relayProtocol: host.relay.protocol,

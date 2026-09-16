@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { requestHostToolReload } from "../src/host-health.mjs";
 import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
@@ -199,8 +200,8 @@ function runRelay({
   });
 }
 
-function spawnRelay({ configPath, relayArguments = ["app-server"] }) {
-  const child = spawn(process.execPath, ["src/launcher.mjs", ...relayArguments], {
+function spawnRelay({ configPath, relayArguments = ["app-server"], env = {}, nodeArguments = [] }) {
+  const child = spawn(process.execPath, [...nodeArguments, "src/launcher.mjs", ...relayArguments], {
     cwd: join(import.meta.dirname, ".."),
     env: {
       ...process.env,
@@ -208,6 +209,7 @@ function spawnRelay({ configPath, relayArguments = ["app-server"] }) {
       CODEX_QUOTA_PRIMARY_APP_SERVER: "1",
       CODEX_QUOTA_RELAY_CONFIG: configPath,
       CODEX_APP_SERVER_FORCE_CLI: "1",
+      ...env,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -359,13 +361,30 @@ test("[LCH-04 TOOL-04] 重新加载并检查会重载官方 MCP 并以内置状�
     hostToolsRequired: true,
   }, { requestId: "reloadrequest01", now: 1_800_000_000_000 });
 
-  const { stdout } = await runRelay({
+  // Reproduce CI startup taking longer than the old one-second stdin lifetime.
+  const startupDelayPath = join(directory, "slow-relay-start.mjs");
+  await writeFile(startupDelayPath, "await new Promise(resolve => setTimeout(resolve, 1250));\n");
+  const { child, closed } = spawnRelay({
     configPath,
-    messages: [{ id: 1, method: "initialize", params: {} }],
     env: { RELAY_TEST_REQUEST_LOG: requestLogPath },
-    closeDelayMs: 1_000,
+    nodeArguments: ["--import", pathToFileURL(startupDelayPath).href],
     relayArguments: [fakeCodexPath, "app-server"],
   });
+  t.after(async () => {
+    if (child.exitCode == null) child.kill("SIGKILL");
+    await closed.catch(() => {});
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", chunk => { stdout += chunk; });
+  child.stdin.write(`${JSON.stringify({ id: 1, method: "initialize", params: {} })}\n`);
+  // Keep the client connected until reload and catalog verification actually finish.
+  await waitFor(async () => {
+    const health = JSON.parse(await readFile(healthPath, "utf8").catch(() => "null"));
+    return health?.status === "ready" && health.toolsVerified === true;
+  }, { timeoutMs: 10_000 });
+  child.stdin.end();
+  await closed;
   const requests = (await readFile(requestLogPath, "utf8"))
     .trim().split(/\r?\n/).map((line) => JSON.parse(line));
   const reloadRequest = requests.find((message) => message.method === "config/mcpServer/reload");
@@ -378,6 +397,59 @@ test("[LCH-04 TOOL-04] 重新加载并检查会重载官方 MCP 并以内置状�
   const health = JSON.parse(await readFile(healthPath, "utf8"));
   assert.equal(health.status, "ready");
   assert.deepEqual(health.missingTools, []);
+});
+
+test("[LCH-04 TOOL-04] 任务 MCP 晚于空全局目录就绪时主动核验该任务且不重载", async t => {
+  const directory = await useTempDir(t, "codex-thread-only-host-tools-");
+  const upstream = join(directory, "thread-only.mjs");
+  const executable = join(directory, process.platform === "win32" ? "upstream.exe" : "upstream");
+  const configPath = join(directory, "relay.json");
+  const healthPath = join(directory, "health.json");
+  const logPath = join(directory, "requests.jsonl");
+  await createNodeAlias(executable);
+  await writeFile(upstream, `import {createInterface} from 'node:readline';
+import {appendFileSync} from 'node:fs';
+const send=x=>console.log(JSON.stringify(x));
+for await(const line of createInterface({input:process.stdin})) {
+ const x=JSON.parse(line);appendFileSync(process.env.RELAY_TEST_REQUEST_LOG,JSON.stringify(x)+'\\n');
+ if(x.method==='initialize') {send({id:x.id,result:{}});setTimeout(()=>send({method:'mcpServer/startupStatus/updated',params:{name:'codex_app',status:'ready',threadId:'ready-thread'}}),100);}
+ else if(x.method==='mcpServerStatus/list') {
+  const data=x.params?.threadId==='ready-thread'?[{name:'codex_app',runtimeStatus:'connected',tools:Object.fromEntries(['list_threads','read_thread','list_projects','get_usage_limits'].map(name=>[name,{name}]))}]:[];
+  send({id:x.id,result:{data}});
+ } else send({id:x.id,result:{}});
+}`);
+  await writeFile(configPath, JSON.stringify({upstreamExecutable: executable,
+    relayStatePath: join(directory, "state.json"), hostHealthPath: healthPath,
+    hostToolsRequired: true, generation: "thread-only-tools"}));
+  const {child, closed} = spawnRelay({configPath,
+    env: {RELAY_TEST_REQUEST_LOG: logPath},
+    relayArguments: [upstream, "app-server"]});
+  t.after(async () => {
+    if (child.exitCode == null) child.kill("SIGKILL");
+    await closed.catch(() => {});
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", chunk => { stdout += chunk; });
+  child.stdin.write(`${JSON.stringify({id: 1, method: "initialize", params: {}})}\n`);
+  child.stdin.write(`${JSON.stringify({id: 2, method: "mcpServerStatus/list", params: {}})}\n`);
+  await waitFor(async () => {
+    const health = JSON.parse(await readFile(healthPath, "utf8").catch(() => "null"));
+    return health?.status === "ready" && health.threadId === "ready-thread" && health.toolsVerified === true;
+  }, {timeoutMs: 10_000});
+  child.stdin.end();
+  await closed;
+  const health = JSON.parse(await readFile(healthPath, "utf8"));
+  assert.equal(health.status, "ready");
+  assert.equal(health.threadId, "ready-thread");
+  assert.deepEqual(health.missingTools, []);
+  const requests = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+  assert.ok(requests.some(x=>x.method === "mcpServerStatus/list" && x.params?.threadId === "ready-thread"));
+  assert.ok(requests.every(x=>x.method !== "config/mcpServer/reload" && x.method !== "turn/start"));
+  assert.doesNotMatch(stdout, /codex-quota-host-tools-/);
+  const responses = stdout.trim().split(/\r?\n/).map(JSON.parse);
+  assert.deepEqual(responses.find(x=>x.id === 2).result, {data: []});
+  assert.ok(responses.some(x=>x.method === "mcpServer/startupStatus/updated"));
 });
 
 test("辅助 app-server 即使没有继承 --listen 也不得覆盖桌面主中继的全局状态", async (t) => {

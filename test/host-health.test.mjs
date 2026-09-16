@@ -165,6 +165,7 @@ test("[LCH-04] 未收到 codex_app 启动终态会在宽限期后失败", async 
     },
     clearTimer() {},
   });
+  tracker.observeStartupStatus({ name: "codex_app", status: "starting", threadId: "task" });
   assert.equal(typeof timeoutHandler, "function");
   timeoutHandler();
   const state = await waitFor(async () => {
@@ -289,6 +290,7 @@ test("[LCH-04 UI-02] 健康轮询时间变化不制造页面状态更新", () =>
 });
 
 test("[LCH-04] 健康检查按状态使用低频兜底并在异常时快速自愈", () => {
+  assert.equal(hostHealthPollInterval("idle"), HOST_HEALTH_READY_POLL_MS);
   assert.equal(hostHealthPollInterval("ready"), HOST_HEALTH_READY_POLL_MS);
   assert.equal(hostHealthPollInterval("direct"), HOST_HEALTH_READY_POLL_MS);
   assert.equal(hostHealthPollInterval("starting"), HOST_HEALTH_ACTIVE_POLL_MS);
@@ -395,4 +397,90 @@ test("[LCH-04] 无任务目录的空运行状态不得覆盖启动证据，也�
   tracker.observeStatusList(catalog);
   assert.equal(tracker.snapshot().status, "starting", "重载后不得借用旧启动通知");
   } finally { await tracker.close({disconnected: false}); }
+});
+
+test("[LCH-04] 空全局目录不能推翻同一已就绪任务的完整工具证据", async t => {
+  const directory = await useTempDir(t, "host-health-task-catalog-");
+  const tracker = await createHostHealthTracker({path: join(directory, "health.json")});
+  try {
+    tracker.observeStatusList({data: []});
+    tracker.observeStartupStatus({name: "codex_app", status: "ready", threadId: "current"});
+    assert.notEqual(tracker.snapshot().status, "ready");
+    const catalog = {data: [{name: "codex_app", runtimeStatus: "connected",
+      tools: Object.fromEntries(["list_threads", "read_thread", "list_projects", "get_usage_limits"].map(name => [name, {name}]))}]};
+    tracker.observeStatusList(catalog, null, {threadId: "current"});
+    tracker.observeStatusList({data: []});
+    assert.equal(tracker.snapshot().status, "ready");
+    tracker.observeStatusList({data: []}, null, {threadId: "current"});
+    assert.equal(tracker.snapshot().code, "codex-app-not-listed");
+    tracker.observeStatusList(catalog, null, {threadId: "other"});
+    tracker.observeStatusList({data: []});
+    assert.notEqual(tracker.snapshot().status, "ready", "不能借用另一任务的目录");
+    tracker.observeStatusList(catalog, null, {threadId: "current"});
+    tracker.observeStartupStatus({name: "codex_app", status: "failed", threadId: "current"});
+    tracker.observeStatusList({data: []});
+    assert.notEqual(tracker.snapshot().status, "ready", "明确失败不能被旧目录掩盖");
+  } finally { await tracker.close({disconnected: false}); }
+});
+
+test("[LCH-04] 主页初始化与空全局目录保持按需加载，实际任务启动后仍执行超时检查", async t => {
+  const directory = await useTempDir(t, "host-health-lazy-task-");
+  let timer = null;
+  const tracker = await createHostHealthTracker({ path: join(directory, "health.json"),
+    setTimer(handler) { timer = handler; return { unref() {} }; }, clearTimer() { timer = null; } });
+  try {
+    tracker.observeClientMessage({ method: "initialized" });
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().status, "idle");
+    assert.equal(tracker.snapshot().toolsVerified, false);
+    assert.equal(timer, null, "主页停留多久都不能伪造任务工具启动超时");
+    const view = evaluateHostHealth({ binding: { hostToolsRequired: true, generation: null },
+      relayState: { pid: tracker.snapshot().pid, startedAt: Date.now() - 600_000 },
+      healthState: tracker.snapshot(), relayCurrent: true });
+    assert.equal(view.status, "idle");
+    tracker.observeStartupStatus({ name: "codex_app", status: "starting", threadId: "task" });
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().status, "starting", "空全局目录不能重置真实启动检查");
+    assert.equal(typeof timer, "function");
+    timer();
+    assert.equal(tracker.snapshot().code, "startup-status-timeout");
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().status, "degraded", "真实超时不得被转成按需加载");
+  } finally { await tracker.close({ disconnected: false }); }
+});
+
+test("[LCH-04] 按需加载不能掩盖 scoped 缺失、禁用、查询或重载失败", async t => {
+  const directory = await useTempDir(t, "host-health-lazy-failure-");
+  const tracker = await createHostHealthTracker({ path: join(directory, "health.json") });
+  try {
+    tracker.observeStatusList({ data: [] }, null, { threadId: "task" });
+    assert.equal(tracker.snapshot().code, "codex-app-not-listed");
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().code, "codex-app-not-listed");
+    tracker.observeStatusList({ data: [{ name: "codex_app", runtimeStatus: "disabled" }] });
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().code, "codex-app-disabled");
+    tracker.observeStatusList(null, { message: "query failed" });
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().code, "status-query-failed");
+    tracker.observeReloadStarted();
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().status, "idle");
+    tracker.observeReloadFailed(new Error("reload failed"));
+    tracker.observeStatusList({ data: [] });
+    assert.equal(tracker.snapshot().code, "codex-app-reload-failed");
+  } finally { await tracker.close({ disconnected: false }); }
+});
+
+test("[LCH-04 UI-02] 按需加载显示中性说明，不提示重启或冒充工具通过", async () => {
+  const { createHostHealth } = await import("../src/widget/host-health.mjs");
+  const health = { required: true, status: "idle", canRestart: true, canOpenLogs: true };
+  const widget = createHostHealth({ state: { data: { hostHealth: health } },
+    escapeHtml: String, formatUpdatedAt: String });
+  const banner = widget.renderHostHealthBanner(health);
+  assert.match(banner, /任务工具按需加载/);
+  assert.doesNotMatch(banner, /重新加载|重启|不可用|缺少/);
+  const controls = widget.renderPanelControls(health);
+  assert.match(controls, /status-idle/);
+  assert.doesNotMatch(controls, /已加载|任务功能异常|建议：/);
 });

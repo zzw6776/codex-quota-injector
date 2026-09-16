@@ -8,7 +8,7 @@ const STEP_LABELS = new Map([
   ["verify-package", "验证正式包签名、架构与哈希"],
   ["wait-desktop-idle", "等待 Codex 活动回合完成并落盘"],
   ["repair-desktop-history", "检查并修复 Codex 会话历史"],
-  ["install-update", "安装当前版本并保留回滚副本"],
+  ["install-update", "安装当前版本"],
   ["switch-windows-runtime", "切换到 Windows 原生运行方式"],
   ["launch-windows-native", "Windows 原生 Relay：正式入口接管"],
   ["repeat-windows-native", "Windows 原生 Relay：重复启动与单实例"],

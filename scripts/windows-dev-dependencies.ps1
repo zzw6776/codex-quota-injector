@@ -43,11 +43,30 @@ function Invoke-WindowsProcess {
       -ArgumentList $argumentLine `
       -WorkingDirectory (Get-Location).ProviderPath `
       -NoNewWindow `
-      -Wait `
       -PassThru `
       -RedirectStandardOutput $stdoutPath `
       -RedirectStandardError $stderrPath `
       -ErrorAction Stop
+    # Keep the process handle before it exits so Windows PowerShell 5.1 can
+    # retrieve its real exit code when Start-Process is used without -Wait.
+    $null = $process.Handle
+    if ($script:WindowsDevProcessOutputHandler) {
+      . (Join-Path $PSScriptRoot "dev-launch-log-reader.ps1")
+      $streams = @(New-DevLogCursor $stdoutPath; New-DevLogCursor $stderrPath)
+      do {
+        foreach ($stream in $streams) {
+          Read-DevLogCursor $stream -OnOutput $script:WindowsDevProcessOutputHandler
+        }
+        if ($process.HasExited) { break }
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+      } while ($true)
+      foreach ($stream in $streams) {
+        Read-DevLogCursor $stream -OnOutput $script:WindowsDevProcessOutputHandler
+      }
+    }
+    $process.WaitForExit()
+    $process.Refresh()
     $output = @()
     if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
       $output += @(Get-Content -LiteralPath $stdoutPath -ErrorAction Stop)

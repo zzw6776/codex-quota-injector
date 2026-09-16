@@ -1,45 +1,53 @@
-#!/bin/zsh
+#!/bin/bash
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-cd "$SCRIPT_DIR" || exit 1
-
-# Finder 启动的 .command 不一定继承交互式终端中的 PATH。
-export PATH="$HOME/.volta/bin:$HOME/.local/share/mise/shims:$HOME/.asdf/shims:/opt/homebrew/bin:/usr/local/bin:$PATH"
-if ! command -v node >/dev/null 2>&1 && [[ -s "$HOME/.nvm/nvm.sh" ]]; then
-  export NVM_DIR="$HOME/.nvm"
-  source "$NVM_DIR/nvm.sh"
-  nvm use --silent default >/dev/null 2>&1 || true
-fi
-
-pause_on_error() {
-  echo
-  read -r "?Press Enter to close..."
-}
-
-if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-  echo "Node.js 22 or newer is required."
-  pause_on_error
-  exit 1
-fi
-
-if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
-  echo "Node.js 22 or newer is required. Current version: $(node --version 2>/dev/null)"
-  pause_on_error
-  exit 1
-fi
-
-if [[ ! -d "node_modules" ]]; then
-  echo "Installing dependencies for the first launch..."
-  if ! npm install; then
-    echo "Failed to install dependencies."
-    pause_on_error
-    exit 1
+finish_console() {
+  local result=$?
+  trap - EXIT
+  [[ -n "${runtime_tail_pid:-}" ]] && kill "$runtime_tail_pid" 2>/dev/null
+  [[ -n "${startup_tail_pid:-}" ]] && kill "$startup_tail_pid" 2>/dev/null
+  if [[ "$result" -ne 0 ]]; then
+    echo
+    echo "Development launcher failed (exit code $result). See the output above."
+    echo "Press Enter to close..."
+    read -r _ || true
   fi
-fi
-
+  exit "$result"
+}
+trap finish_console EXIT
+trap 'exit 130' INT TERM
+set -e
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+LOG_DIR="$HOME/Library/Logs/Codex Quota Injector"
+mkdir -p "$LOG_DIR"
+STARTUP_LOG="$(mktemp "$LOG_DIR/dev-launch-XXXXXXXX")"
+RUNTIME_LOG="$LOG_DIR/injector.log"
+touch "$RUNTIME_LOG"
 echo "Starting Codex Quota Injector development version..."
-if ! npm run launch; then
-  echo "Launch failed. Check the message above or injector.log."
-  pause_on_error
-  exit 1
+echo "Startup log: $STARTUP_LOG"
+echo "Runtime log: $RUNTIME_LOG"
+echo "This window stays open and follows logs. Closing it only stops log viewing."
+echo "Recent runtime output (previous launches may appear here):"
+tail -n 20 "$RUNTIME_LOG"
+# Observe the existing runtime before spawning; the startup file is unique, so
+# reading it from its beginning also retains output emitted before tail opens it.
+tail -n 0 -F "$RUNTIME_LOG" &
+runtime_tail_pid=$!
+tail -n +1 -F "$STARTUP_LOG" &
+startup_tail_pid=$!
+nohup /bin/bash "$SCRIPT_DIR/scripts/start-injector-macos.sh" >>"$STARTUP_LOG" 2>&1 < /dev/null &
+launcher_pid=$!
+set +e
+wait "$launcher_pid"
+result=$?
+set -e
+if [[ "$result" -ne 0 ]]; then
+  # Print the complete captured bootstrap output before pausing, even when the
+  # follower has not consumed its final bytes yet.
+  echo "Complete startup output:"
+  cat "$STARTUP_LOG"
+  exit "$result"
 fi
+echo "Launcher returned successfully. Continuing to follow the running injector's logs."
+echo "Close this window to stop viewing logs; the background injector remains running."
+wait "$runtime_tail_pid"

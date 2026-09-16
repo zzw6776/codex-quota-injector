@@ -2,7 +2,7 @@
 
 为 macOS 和 Windows 版 Codex 客户端动态注入多账号额度面板。程序没有独立界面，双击入口后会直接启动官方 Codex，并在后台完成注入。
 
-开发时按修改目标查阅[代码功能地图](docs/code-map.md)，其中列出了公共入口、功能模块、状态归属与对应测试。
+开发时按修改目标查阅[代码功能地图](docs/code-map.md)，其中列出了公共入口、功能模块、状态归属与对应测试。全部测试组件、macOS/Windows/WSL环境覆盖与结果来源见[测试总索引](docs/testing-index.md)。修改后可用 `npm run test:impact` 查看受影响范围；文档或发布版本变化不要求全面重测，结果按组件输入证据复用。
 
 ## 功能
 
@@ -116,7 +116,9 @@ npm run launch
 - macOS：`启动开发版.app`（Finder、QSpace Pro 均推荐）或 `启动开发版.command`
 - Windows：`启动开发版.cmd`
 
-Windows 开发入口会先使用项目内或系统中的 Node.js 22 准备 relay，再隐藏启动注入器。普通 Windows 模式会在首次启动当前项目版本时原子生成版本化的原生 Windows SEA relay；源码开发版若要重建 WSL relay，需要在 `runtime/node-v22.23.1-linux-x64/bin/node` 准备本地 Linux Node。正式 Windows 安装包已经压缩内置构建好的 WSL relay，安装和运行均不需要该开发运行时。启动器根据版本和运行模式协商是否接管已运行的注入器；旧版本协议无法识别时，会在确认旧进程属于本项目后终止旧进程并继续启动。CDP 和模型中继均就绪时保留官方 Codex，否则需要重启以加载配置；Windows 开发入口不会保留 npm 或 PowerShell 前台窗口。启动日志位于 `%LOCALAPPDATA%\Codex Quota Injector\Logs\launcher.log`，运行日志位于同目录的 `injector.log`。
+Windows 开发入口会先使用项目内或系统中的 Node.js 22 准备 relay，再启动后台注入器并保留终端显示启动流程和持续运行日志。普通 Windows 模式会在首次启动当前项目版本时原子生成版本化的原生 Windows SEA relay；源码开发版若要重建 WSL relay，需要在 `runtime/node-v22.23.1-linux-x64/bin/node` 准备本地 Linux Node。正式 Windows 安装包已经压缩内置构建好的 WSL relay，安装和运行均不需要该开发运行时。启动器根据版本和运行模式协商是否接管已运行的注入器；旧版本协议无法识别时，会在确认旧进程属于本项目后终止旧进程并继续启动。CDP 和模型中继均就绪时保留官方 Codex，否则需要重启以加载配置；Windows 的 CMD 和 macOS 的 `.command` 终端会保留并持续显示日志；准备阶段或启动失败时保留错误输出，失败后需按键关闭。Windows 创建后台进程不代表启动成功，以运行日志中的实际就绪或错误信息为准。关闭日志窗口不会主动关闭后台注入器。启动日志位于 `%LOCALAPPDATA%\Codex Quota Injector\Logs\launcher.log`，运行日志位于同目录的 `injector.log`。
+
+WSL 开发启动出现“WSL 进程查询失败：1”时，已有主中继标记转发遗漏的定位与修复证据，见[排查说明](docs/wsl-primary-relay-startup-investigation.md)。仅错误文字相同不能直接套用归因，需核对实际 Relay PID、状态文件和主标记。
 
 其他命令：
 

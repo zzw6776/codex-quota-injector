@@ -76,7 +76,9 @@ export async function readLifecycleReport(path) {
   return report;
 }
 
-export async function readLatestUnfinishedLifecycle(latestPath) {
+export async function readLatestUnfinishedLifecycle(latestPath, {
+  ownerAlive = isProcessAlive,
+} = {}) {
   let pointer;
   try {
     pointer = JSON.parse(await readFile(latestPath, "utf8"));
@@ -95,6 +97,7 @@ export async function readLatestUnfinishedLifecycle(latestPath) {
     throw error;
   }
   if (["passed", "failed"].includes(report.status)) return null;
+  if (report.status === "rollback-failed" && !ownerAlive(report.ownerPid)) return null;
   return {
     runId: report.runId,
     status: report.status,
@@ -108,7 +111,7 @@ export function lifecycleResumeDecision(report, {
 } = {}) {
   validateLifecycleReport(report);
   if (["passed", "failed"].includes(report.status)) return "terminal";
-  if (report.status === "rollback-failed") return "manual-recovery";
+  if (report.status === "rollback-failed") return ownerAlive(report.ownerPid) ? "already-running" : "terminal";
   if (report.status === "running" && ownerAlive(report.ownerPid)) return "already-running";
   return "resume";
 }
@@ -194,152 +197,14 @@ export async function runLifecycleReport({
       activeStep.error = publicError(error);
       activeStep.finishedAt = now().toISOString();
     }
-    // Persist all outstanding restoration work before the first rollback.
-    // If the controller exits here, the existing recovery path must still own it.
-    const rollbackSteps = [...report.steps].reverse().filter((step) =>
-      ["passed", "failed"].includes(step.status) &&
-      typeof operations?.[step.id]?.rollback === "function");
-    for (const step of rollbackSteps) {
-      step.rollback = { status: "pending" };
-    }
-    report.status = rollbackSteps.length ? "rollback-failed" : "failed";
+    report.status = "failed";
     report.error = publicError(error);
-    report.updatedAt = now().toISOString();
-    await writeLifecycleReport(reportPath, report);
-
-    let rollbackFailed = false;
-    for (const step of rollbackSteps) {
-      const operation = operations?.[step.id];
-      step.rollback = { status: "running", startedAt: now().toISOString() };
-      report.updatedAt = step.rollback.startedAt;
-      await writeLifecycleReport(reportPath, report);
-      try {
-        const evidence = await operation.rollback(createContext(reportPath, report, step));
-        step.rollback = {
-          ...step.rollback,
-          status: "passed",
-          finishedAt: now().toISOString(),
-          evidence: evidence ?? null,
-        };
-      } catch (rollbackError) {
-        rollbackFailed = true;
-        step.rollback = {
-          ...step.rollback,
-          status: "failed",
-          finishedAt: now().toISOString(),
-          error: publicError(rollbackError),
-        };
-      }
-      report.updatedAt = step.rollback.finishedAt;
-      await writeLifecycleReport(reportPath, report);
-    }
-    report.status = rollbackFailed ? "rollback-failed" : "failed";
     report.ownerPid = null;
     report.finishedAt = now().toISOString();
     report.updatedAt = report.finishedAt;
     await writeLifecycleReport(reportPath, report);
     error.lifecycleReport = report;
     throw error;
-  } finally {
-    await releaseLock();
-  }
-}
-
-export async function recoverLifecycleRollbacks({
-  reportPath,
-  operations,
-  now = () => new Date(),
-  ownerPid = process.pid,
-} = {}) {
-  if (!reportPath) throw new Error("缺少生命周期报告路径");
-  const releaseLock = await acquireLifecycleLock(`${reportPath}.lock`, ownerPid);
-  let report;
-  try {
-    report = await readLifecycleReport(reportPath);
-    if (report.status !== "rollback-failed") {
-      throw new Error(`生命周期报告状态为 ${report.status}，没有可恢复的失败回滚`);
-    }
-    const failedSteps = [...report.steps].reverse()
-      .filter((step) => ["pending", "running", "failed"].includes(step.rollback?.status));
-    if (failedSteps.length === 0) {
-      throw new Error("生命周期报告没有可恢复的失败回滚");
-    }
-
-    const startedAt = now().toISOString();
-    report.ownerPid = ownerPid;
-    report.recovery = {
-      status: "running",
-      attempts: Number(report.recovery?.attempts ?? 0) + 1,
-      startedAt,
-      finishedAt: null,
-      error: null,
-    };
-    report.updatedAt = startedAt;
-    await writeLifecycleReport(reportPath, report);
-
-    let recoveryFailed = false;
-    for (const step of failedSteps) {
-      const operation = operations?.[step.id];
-      if (typeof operation?.rollback !== "function") {
-        recoveryFailed = true;
-        step.rollback = {
-          ...step.rollback,
-          status: "failed",
-          recoveryAttempts: Number(step.rollback?.recoveryAttempts ?? 0) + 1,
-          recoveryFinishedAt: now().toISOString(),
-          error: publicError(new Error(`生命周期步骤 ${step.id} 没有回滚实现`)),
-        };
-        report.updatedAt = step.rollback.recoveryFinishedAt;
-        await writeLifecycleReport(reportPath, report);
-        continue;
-      }
-
-      step.rollback = {
-        ...step.rollback,
-        status: "running",
-        recoveryAttempts: Number(step.rollback?.recoveryAttempts ?? 0) + 1,
-        recoveryStartedAt: now().toISOString(),
-        recoveryFinishedAt: null,
-      };
-      report.updatedAt = step.rollback.recoveryStartedAt;
-      await writeLifecycleReport(reportPath, report);
-      try {
-        const evidence = await operation.rollback(createContext(reportPath, report, step));
-        step.rollback = {
-          ...step.rollback,
-          status: "passed",
-          recoveryFinishedAt: now().toISOString(),
-          evidence: evidence ?? null,
-          error: null,
-        };
-      } catch (error) {
-        recoveryFailed = true;
-        step.rollback = {
-          ...step.rollback,
-          status: "failed",
-          recoveryFinishedAt: now().toISOString(),
-          error: publicError(error),
-        };
-      }
-      report.updatedAt = step.rollback.recoveryFinishedAt;
-      await writeLifecycleReport(reportPath, report);
-    }
-
-    const finishedAt = now().toISOString();
-    report.status = recoveryFailed ? "rollback-failed" : "failed";
-    report.ownerPid = null;
-    report.finishedAt = finishedAt;
-    report.recovery = {
-      ...report.recovery,
-      status: recoveryFailed ? "failed" : "passed",
-      finishedAt,
-      error: recoveryFailed
-        ? publicError(new Error("一个或多个生命周期回滚仍未恢复"))
-        : null,
-    };
-    report.updatedAt = finishedAt;
-    await writeLifecycleReport(reportPath, report);
-    return report;
   } finally {
     await releaseLock();
   }

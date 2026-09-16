@@ -1,43 +1,11 @@
+import { activateLifecycleTaskTools, bindLifecycleTask } from "../lifecycle-task-tools.mjs";
 import { inspectLifecycleHost } from "../../src/lifecycle-host.mjs";
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
-import process from "node:process";
 import { WAIT_INTERVAL_MS, delay } from "./io.mjs";
-import { selectWindowsRecoveryEntry } from "./recovery-policy.mjs";
 import { windowsInjectorOwnedByInstalledApp, windowsInjectorOwnedBySource } from "./process-ownership.mjs";
 import { publicHostEvidence, runtimeModeMatches, hostRuntimeTarget, samePids, assertSamePids } from "./evidence.mjs";
-
-async function restartWindowsInitialEntry(control) {
-  const runtimeTarget = control.runtimeConfiguration?.originalRuntime ?? control.sourceRecoveryMode;
-  const current = await inspectLifecycleHost({
-    installedApp: control.installedApp,
-    expectedProtocol: control.initialHost?.relay?.protocol ?? control.expectedProtocol,
-  });
-  if (current.readiness.ready && runtimeModeMatches(current, runtimeTarget)) {
-    return publicHostEvidence(current, { recoveryEntry: "already-running" });
-  }
-  const recoveryEntry = selectWindowsRecoveryEntry(control.initialHost);
-  let ownerCheck;
-  let ownerFailure;
-  if (recoveryEntry === "current-source") {
-    await launchWindowsSourceEntry(control.root, control.sourceRecoveryRelay);
-    ownerCheck = (snapshot) => windowsInjectorOwnedBySource(snapshot.injectorPids, control.root);
-    ownerFailure = "rollback-source-owner";
-  } else {
-    await launchWindowsApp(control.installedApp);
-    ownerCheck = (snapshot) => windowsInjectorOwnedByInstalledApp(
-      snapshot.injectorPids,
-      control.installedApp,
-    );
-    ownerFailure = "rollback-installed-owner";
-  }
-  const host = await waitForWindowsTargetHost({
-    ...control,
-    expectedProtocol: control.initialHost?.relay?.protocol ?? control.expectedProtocol,
-  }, { expectedRuntimeTarget: runtimeTarget, ownerCheck, ownerFailure });
-  return publicHostEvidence(host, { recoveryEntry });
-}
 
 async function waitForWindowsTargetHost(control, {
   timeoutMs = 90_000,
@@ -49,9 +17,13 @@ async function waitForWindowsTargetHost(control, {
   ownerFailure = "target-owner",
   inspectHost = inspectLifecycleHost,
   pollIntervalMs = WAIT_INTERVAL_MS,
+  activateTaskTools = activateLifecycleTaskTools,
 } = {}) {
+  const taskThreadId = control.sessionCheckpoint ? bindLifecycleTask(control).threadId : null;
   const deadline = Date.now() + timeoutMs;
   let latest = null;
+  let taskToolsActivation = null;
+  const activatedPids = new Set();
   let ownerMatches = ownerCheck === null;
   while (Date.now() < deadline) {
     latest = await inspectHost({
@@ -65,8 +37,20 @@ async function waitForWindowsTargetHost(control, {
     const runtimeMatches = expectedRuntimeTarget == null ||
       runtimeModeMatches(latest, expectedRuntimeTarget);
     ownerMatches = ownerCheck === null || await ownerCheck(latest);
-    if (latest.readiness.ready && runtimeMatches && relayChanged && codexChanged &&
+    const health = latest.hostHealth ?? latest.readiness.hostHealth;
+    const taskToolsReady = latest.readiness.hostToolsReady &&
+      (health?.required !== true || taskThreadId == null || health.threadId === taskThreadId);
+    if (latest.readiness.coreReady && !taskToolsReady &&
+      runtimeMatches && relayChanged && codexChanged && injectorChanged && ownerMatches &&
+      !activatedPids.has(latest.codexPids[0])) {
+      taskToolsActivation = await activateTaskTools(control, latest);
+      activatedPids.add(latest.codexPids[0]);
+    }
+    if (latest.readiness.ready && taskToolsReady && runtimeMatches && relayChanged && codexChanged &&
       injectorChanged && ownerMatches) {
+      if (taskToolsActivation?.codexPid === latest.codexPids[0]) {
+        latest.taskToolsActivation = { ...taskToolsActivation, verifiedAt: new Date().toISOString() };
+      }
       return latest;
     }
     await delay(pollIntervalMs);
@@ -84,6 +68,10 @@ async function waitForWindowsTargetHost(control, {
     samePids(latest.injectorPids, previousInjectorPids)) {
     reasons.push("injector-pids-unchanged");
   }
+  const finalHealth = latest?.hostHealth ?? latest?.readiness?.hostHealth;
+  if (taskThreadId && finalHealth?.required === true && finalHealth.threadId !== taskThreadId) {
+    reasons.push("initiating-task-tools-not-verified");
+  }
   if (!ownerMatches) reasons.push(ownerFailure);
   if (latest && expectedRuntimeTarget != null && !runtimeModeMatches(latest, expectedRuntimeTarget)) {
     reasons.push(`runtime-${hostRuntimeTarget(latest)}-expected-${expectedRuntimeTarget}`);
@@ -98,26 +86,6 @@ async function launchWindowsApp(installDir) {
     detached: true,
     stdio: "ignore",
     windowsHide: false,
-  });
-  await new Promise((resolveSpawn, reject) => {
-    child.once("spawn", resolveSpawn);
-    child.once("error", reject);
-  });
-  child.unref();
-}
-
-async function launchWindowsSourceEntry(root, relayExecutable) {
-  await access(relayExecutable);
-  const child = spawn(process.execPath, [join(root, "src", "launcher.mjs"), "--explicit-start"], {
-    cwd: root,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: false,
-    env: {
-      ...process.env,
-      CODEX_QUOTA_EXPLICIT_START: "1",
-      CODEX_QUOTA_RELAY_EXECUTABLE: relayExecutable,
-    },
   });
   await new Promise((resolveSpawn, reject) => {
     child.once("spawn", resolveSpawn);
@@ -183,4 +151,4 @@ async function waitForSettledWindowsHost(control, initialHost, {
   throw new Error("Windows Codex 首次启动后未在限定时间内达到稳定状态");
 }
 
-export { restartWindowsInitialEntry, waitForWindowsTargetHost, launchWindowsApp, launchWindowsSourceEntry, assertStableWindowsHost, waitForSettledWindowsHost };
+export { waitForWindowsTargetHost, launchWindowsApp, assertStableWindowsHost, waitForSettledWindowsHost };

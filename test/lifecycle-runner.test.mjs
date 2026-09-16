@@ -8,12 +8,37 @@ import {
   lifecycleResumeDecision,
   readLatestUnfinishedLifecycle,
   readLifecycleReport,
-  recoverLifecycleRollbacks,
   runLifecycleReport,
   validateLifecycleControl,
   writeLifecycleReport,
 } from "../src/lifecycle-runner.mjs";
 import { useTempDir } from "./helpers.mjs";
+
+test("New acceptance ignores stopped legacy rollback failures without changing their report", async (t) => {
+  const directory = await useTempDir(t);
+  const reportPath = join(directory, "report.json");
+  const latestPath = join(directory, "latest.json");
+  const report = createLifecycleReport({ platform: "win32", steps: ["install"] });
+  report.status = "rollback-failed";
+  report.ownerPid = process.pid;
+  await writeLifecycleReport(reportPath, report);
+  await writeFile(latestPath, JSON.stringify({ reportPath }));
+  const original = await readFile(reportPath, "utf8");
+  assert.equal(await readLatestUnfinishedLifecycle(latestPath, {
+    ownerAlive: () => false,
+  }), null);
+  assert.equal((await readLatestUnfinishedLifecycle(latestPath, {
+    ownerAlive: () => true,
+  })).status, "rollback-failed");
+  assert.equal((await readLatestUnfinishedLifecycle(latestPath)).status, "rollback-failed");
+  assert.equal(await readFile(reportPath, "utf8"), original);
+  // Arbitrary PID 123 may belong to a live process on CI. Use explicit terminal ownership.
+  report.ownerPid = null;
+  await writeLifecycleReport(reportPath, report);
+  const stopped = await readFile(reportPath, "utf8");
+  assert.equal(await readLatestUnfinishedLifecycle(latestPath), null);
+  assert.equal(await readFile(reportPath, "utf8"), stopped);
+});
 
 test("[HAR-02 LCH-01 LCH-05] 外部执行器在被测进程退出后继续落盘并完成后续步骤", async (t) => {
   const directory = await useTempDir(t);
@@ -69,7 +94,7 @@ test("[HAR-03 LCH-03] 中断后按检查点核对已完成副作用，不重复�
   assert.deepEqual(result.steps[0].evidence, { installedVersion: "1.0.0" });
 });
 
-test("[HAR-03 ACC-04] 无法确认的账号动作不会重放，失败后反向恢复已完成步骤", async (t) => {
+test("[HAR-03 ACC-04] 无法确认的账号动作不会重放，失败直接落盘且不执行回滚", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({
@@ -93,36 +118,13 @@ test("[HAR-03 ACC-04] 无法确认的账号动作不会重放，失败后反向�
   } }), /结果未知，拒绝自动重放/);
   const saved = await readLifecycleReport(reportPath);
   assert.equal(saved.status, "failed");
-  assert.equal(saved.steps[0].rollback.status, "passed");
-  assert.equal(restored, 1);
+  assert.equal(saved.steps[0].rollback, null);
+  assert.equal(restored, 0);
+  assert.equal(saved.ownerPid, null);
+  assert.ok(saved.finishedAt);
 });
 
-test("[HAR-03 LCH-05] 回滚中断快照仍阻止新测试且能恢复未开始与运行中的回滚", async (t) => {
-  const directory = await useTempDir(t);
-  const reportPath = join(directory, "report.json");
-  await writeLifecycleReport(reportPath, createLifecycleReport({ steps: ["install", "switch-runtime", "verify"] }));
-  let interrupted;
-  await assert.rejects(runLifecycleReport({ reportPath, operations: {
-    install: { run: async () => {}, rollback: async () => {} },
-    "switch-runtime": { run: async () => {}, rollback: async () => {
-      interrupted = await readLifecycleReport(reportPath);
-      assert.equal(interrupted.status, "rollback-failed");
-      assert.deepEqual(interrupted.steps.slice(0, 2).map((step) => step.rollback.status), ["pending", "running"]);
-    } },
-    verify: { run: async () => { throw new Error("verification failed"); } },
-  } }), /verification failed/);
-  await writeLifecycleReport(reportPath, interrupted);
-  const latestPath = join(directory, "latest.json");
-  await writeFile(latestPath, JSON.stringify({ reportPath }));
-  assert.equal((await readLatestUnfinishedLifecycle(latestPath)).status, "rollback-failed");
-  const restored = [];
-  await recoverLifecycleRollbacks({ reportPath, operations: {
-    install: { rollback: async () => { restored.push("install"); } },
-    "switch-runtime": { rollback: async () => { restored.push("runtime"); } },
-  } });
-  assert.deepEqual(restored, ["runtime", "install"]);
-  assert.equal(await readLatestUnfinishedLifecycle(latestPath), null);
-});
+
 
 test("[LCH-06] 报告使用原子替换，拒绝未来版本和重复步骤", async (t) => {
   const directory = await useTempDir(t);
@@ -186,7 +188,7 @@ test("[platform:windows-native][platform:wsl-native] [HAR-04 LCH-01] 生命周�
   ]);
 });
 
-test("[HAR-03 LCH-05] 新生命周期运行不会覆盖尚未完成或回滚失败的恢复现场", async (t) => {
+test("[HAR-03 LCH-05] 新生命周期运行保持活动任务互斥，旧回滚失败不阻塞", async (t) => {
   const directory = await useTempDir(t);
   const latestPath = join(directory, "latest.json");
   const reportPath = join(directory, "report.json");
@@ -205,7 +207,7 @@ test("[HAR-03 LCH-05] 新生命周期运行不会覆盖尚未完成或回滚失�
 
   report.status = "rollback-failed";
   await writeLifecycleReport(reportPath, report);
-  assert.equal((await readLatestUnfinishedLifecycle(latestPath)).status, "rollback-failed");
+  assert.equal(await readLatestUnfinishedLifecycle(latestPath), null);
 
   report.status = "failed";
   await writeLifecycleReport(reportPath, report);
@@ -220,35 +222,8 @@ test("[HAR-03 LCH-05] 恢复入口只重新调度确实中断的生命周期任�
   assert.equal(lifecycleResumeDecision(report, { ownerAlive: () => true }), "already-running");
   assert.equal(lifecycleResumeDecision(report, { ownerAlive: () => false }), "resume");
   report.status = "rollback-failed";
-  assert.equal(lifecycleResumeDecision(report), "manual-recovery");
+  assert.equal(lifecycleResumeDecision(report, { ownerAlive: () => false }), "terminal");
+  assert.equal(lifecycleResumeDecision(report, { ownerAlive: () => true }), "already-running");
   report.status = "passed";
   assert.equal(lifecycleResumeDecision(report), "terminal");
-});
-
-test("[HAR-03 LCH-05] 回滚恢复只重试失败项并保留原测试失败结论", async (t) => {
-  const directory = await useTempDir(t);
-  const reportPath = join(directory, "report.json");
-  const report = createLifecycleReport({ steps: ["install", "switch-runtime", "launch"] });
-  report.status = "rollback-failed";
-  report.error = { name: "Error", code: null, message: "重复启动意外重启了 Codex" };
-  report.steps[0].status = "passed";
-  report.steps[0].rollback = { status: "failed", error: { message: "安装恢复失败" } };
-  report.steps[1].status = "passed";
-  report.steps[1].rollback = { status: "failed", error: { message: "配置恢复失败" } };
-  report.steps[2].status = "failed";
-  report.steps[2].rollback = { status: "passed", evidence: { alreadyRestored: true } };
-  await writeLifecycleReport(reportPath, report);
-
-  const events = [];
-  const recovered = await recoverLifecycleRollbacks({ reportPath, operations: {
-    install: { rollback: async () => { events.push("install"); return { installed: "restored" }; } },
-    "switch-runtime": { rollback: async () => { events.push("runtime"); return { runtime: "restored" }; } },
-    launch: { rollback: async () => assert.fail("已通过的回滚不应重复执行") },
-  } });
-
-  assert.deepEqual(events, ["runtime", "install"]);
-  assert.equal(recovered.status, "failed");
-  assert.equal(recovered.error.message, "重复启动意外重启了 Codex");
-  assert.equal(recovered.recovery.status, "passed");
-  assert.deepEqual(recovered.steps.map((step) => step.rollback.status), ["passed", "passed", "passed"]);
 });

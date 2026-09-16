@@ -1,21 +1,18 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { execFile } from "node:child_process";
 import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { officialExecutable } from "../runtime-tests/support/offline-runtime.mjs";
 import { browserExecutable } from "../runtime-tests/support/browser.mjs";
-import {
-  COMMON_COMPONENT,
-  WSL_NATIVE,
-  currentRuntimeTarget,
-  hashFile,
-  runtimeComponentId,
-} from "./test-runtime-targets.mjs";
+import { WINDOWS_NATIVE, prepareWindowsNativeRelay } from "./test-runtime-targets.mjs";
+import { evidenceFile, evidenceManifest } from "./test-impact.mjs";
 export const ROOT = resolve(import.meta.dirname, "..");
 export const RESULTS = join(ROOT, ".runtime", "test-results");
 
 export async function runtimeSnapshot() {
-  const files = { cli: await officialExecutable(), browser: await browserExecutable() };
+  const files = { cli: await officialExecutable(), browser: await browserExecutable(), node: process.execPath };
   for (const [name, path] of Object.entries(files)) {
     const bundle = path.match(/^(.*\.app\/Contents)\//)?.[1];
     if (bundle) files[`${name}BundleInfo`] = join(bundle, "Info.plist");
@@ -29,7 +26,18 @@ export async function runtimeSnapshot() {
   return result;
 }
 
-export async function sourceSnapshot() {
+export async function modelTestRuntimeSnapshot(runtimeTarget, { inspectHostRuntime = runtimeSnapshot, exec = promisify(execFile) } = {}) {
+  const host = await inspectHostRuntime();
+  if (runtimeTarget !== "wsl-native") return host;
+  // POSIX sh implementations may process only the first name in command -v.
+  const paths = (await exec("wsl.exe", ["-e", "sh", "-lc", 'for task_runtime_command in codex node; do command -v "$task_runtime_command" || exit; done'], { windowsHide: true })).stdout.trim().split(/\r?\n/);
+  if (paths.length !== 2 || paths.some(path => !path.startsWith("/"))) throw Error("无法核对WSL原生CLI与Node");
+  const hashes = (await exec("wsl.exe", ["-e", "sha256sum", "--", ...paths], { windowsHide: true })).stdout.trim().split(/\r?\n/).map(line => line.split(/\s+/)[0]);
+  if (hashes.length !== 2 || hashes.some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw Error("WSL运行时摘要不可用");
+  return { cli: { path: paths[0], sha256: hashes[0] }, node: { path: paths[1], sha256: hashes[1] }, browser: host.browser };
+}
+
+export async function sourceSnapshot({ root = ROOT } = {}) {
   const files = [
     "package.json",
     "package-lock.json",
@@ -39,7 +47,7 @@ export async function sourceSnapshot() {
     "docs/testing-desktop-host.md",
   ];
   async function walk(directory) {
-    for (const entry of await readdir(join(ROOT, directory), { withFileTypes: true })) {
+    for (const entry of await readdir(join(root, directory), { withFileTypes: true })) {
       const path = `${directory}/${entry.name}`;
       if (entry.isDirectory()) await walk(path);
       else files.push(path);
@@ -47,8 +55,30 @@ export async function sourceSnapshot() {
   }
   for (const path of ["src", "scripts", "test", "runtime-tests", "live-tests"]) await walk(path);
   const hash = createHash("sha256");
-  for (const path of files.sort()) { hash.update(path); hash.update("\0"); hash.update(await readFile(join(ROOT, path))); hash.update("\0"); }
-  return { sha256: hash.digest("hex"), fileCount: files.length };
+  const inputs = [];
+  let releaseVersion;
+  for (const path of files.sort()) {
+    const bytes = await readFile(join(root, path));
+    hash.update(path); hash.update("\0"); hash.update(bytes); hash.update("\0");
+    inputs.push(evidenceFile(path, bytes));
+    if (path === "package.json") releaseVersion = JSON.parse(String(bytes)).version;
+  }
+  // Package assets were missing from the old full-source digest. Keep its exact
+  // algorithm for legacy provenance, while the new evidence includes these inputs.
+  for (const directory of ["assets", "installer", ".github"]) {
+    async function extra(relative) {
+      for (const entry of await readdir(join(root, relative), { withFileTypes: true }).catch(error => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      })) {
+        const path = `${relative}/${entry.name}`;
+        if (entry.isDirectory()) await extra(path);
+        else inputs.push(evidenceFile(path, await readFile(join(root, path))));
+      }
+    }
+    await extra(directory);
+  }
+  return { sha256: hash.digest("hex"), fileCount: files.length, ...evidenceManifest(inputs, releaseVersion) };
 }
 
 export async function writeReport(path, value) {
@@ -73,25 +103,15 @@ export async function scenarioCoverage(tests = []) {
   }));
 }
 
-export async function requireFreeResult({ runtimeTarget = null, requireAll = false } = {}) {
-  const report = JSON.parse(await readFile(join(RESULTS, "offline.json"), "utf8").catch(() => {
-    throw new Error("请先运行 npm run test:offline 并取得当前代码的完整免费通过报告");
-  }));
-  const snapshot = await sourceSnapshot();
-  const target = runtimeTarget ?? await currentRuntimeTarget();
-  const common = report.components?.find((component) => component.id === COMMON_COMPONENT);
-  const runtime = report.components?.find((component) => component.id === runtimeComponentId(target));
-  const statusReady = common?.status === "passed" && runtime?.status === "passed" &&
-    (!requireAll || report.allSupportedStatus === "passed");
-  if (!statusReady || report.platform !== process.platform || report.arch !== process.arch || report.snapshot.sha256 !== snapshot.sha256) {
-    throw new Error("免费报告未通过或不属于当前代码/平台；请先运行 npm run test:offline");
-  }
-  if (JSON.stringify(report.runtimeSnapshot) !== JSON.stringify(await runtimeSnapshot())) throw new Error("官方 CLI 或测试浏览器已更换；请重新运行 npm run test:offline");
-  if (runtime.artifact?.path) {
-    const actualHash = await hashFile(runtime.artifact.path).catch(() => null);
-    if (actualHash !== runtime.artifact.sha256) {
-      throw new Error(`${target === WSL_NATIVE ? "WSL" : "Windows"} 原生 Relay 已变化；请重新运行完整免费回归`);
-    }
-  }
-  return { ...report, selectedRuntime: target, selectedRuntimeComponent: runtime };
+export async function prepareModelTestRuntime({
+  runtimeTarget,
+  root = ROOT,
+  snapshotSource = sourceSnapshot,
+  inspectRuntime = runtimeSnapshot,
+  buildWindowsRelay = prepareWindowsNativeRelay,
+} = {}) {
+  const [snapshot, hostRuntimeSnapshot] = await Promise.all([snapshotSource(), inspectRuntime()]);
+  // Windows 使用当前源码构建 PE；WSL 执行器在 Linux 独立准备 ELF 和依赖。
+  const relay = runtimeTarget === WINDOWS_NATIVE ? await buildWindowsRelay({ root }) : null;
+  return { snapshot, hostRuntimeSnapshot, relay, freeRegressionGate: "not-required" };
 }

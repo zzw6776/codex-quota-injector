@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -18,6 +18,7 @@ import {
   RpcClient,
   ROOT,
   stopChild,
+  removeRuntimeDirectory,
 } from "../runtime-tests/support/offline-runtime.mjs";
 import {
   MACOS_NATIVE,
@@ -196,7 +197,11 @@ export async function startLiveRuntime(t, profile, budget) {
   let child;
   let router;
   const requestShapes = [];
-  t.after(async () => { await stopChild(child); await router?.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => {
+    await stopChild(child);
+    await router?.close();
+    await removeRuntimeDirectory(directory);
+  });
   const cli = await officialExecutable();
   const catalogResult = await execOffline(cli, ["debug", "models"], {
     directory,

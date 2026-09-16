@@ -7,19 +7,16 @@ import process from "node:process";
 import { notifyLifecycleCompletion } from "../src/lifecycle-completion.mjs";
 import { startLifecycleProgressRenderer } from "../src/lifecycle-progress.mjs";
 import {
-  recoverLifecycleRollbacks,
   runLifecycleReport,
   validateLifecycleControl,
 } from "../src/lifecycle-runner.mjs";
 import { createMacLifecycleOperations } from "./lifecycle-macos.mjs";
 
 const args = process.argv.slice(2);
-const recoveryMode = args[0] === "--recover";
-const controlOffset = recoveryMode ? 1 : 0;
-if (args.length !== controlOffset + 2 || args[controlOffset] !== "--control") {
-  throw new Error("用法: lifecycle-supervisor.mjs [--recover] --control <control.json>");
+if (args.length !== 2 || args[0] !== "--control") {
+  throw new Error("用法: lifecycle-supervisor.mjs --control <control.json>");
 }
-const controlPath = resolve(args[controlOffset + 1]);
+const controlPath = resolve(args[1]);
 const control = JSON.parse(await readFile(controlPath, "utf8"));
 validateLifecycleControl(control, {
   root: resolve(import.meta.dirname, ".."),
@@ -35,7 +32,7 @@ try {
     ? await import("./lifecycle-windows.mjs")
       .then(({ createWindowsLifecycleOperations }) => createWindowsLifecycleOperations(controlPath, control))
     : createMacLifecycleOperations(controlPath, control);
-  const report = await (recoveryMode ? recoverLifecycleRollbacks : runLifecycleReport)({
+  const report = await runLifecycleReport({
     reportPath: control.reportPath,
     operations,
   });

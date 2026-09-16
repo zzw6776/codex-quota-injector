@@ -104,7 +104,7 @@ test("[platform:macos-native] [LCH-04] Mac 投影不追平或活动回合仍存�
   await assert.rejects(active.before(), /仍有活动回合/);
 });
 
-test("[platform:macos-native] [LCH-03 LCH-04 LCH-06] Mac 实际操作表的关闭、接管、账号与回滚入口全部经过门禁", async () => {
+test("[platform:macos-native] [LCH-03 LCH-04 LCH-06] Mac 实际操作表的关闭、接管、账号入口全部经过门禁且没有回滚", async () => {
   let calls = 0;
   const blocked = new Error("test-session-blocked");
   const ops = createMacLifecycleOperations("/nonexistent/control.json", control, {
@@ -113,27 +113,26 @@ test("[platform:macos-native] [LCH-03 LCH-04 LCH-06] Mac 实际操作表的关�
   let checked = 0;
   for (const [id, operation] of Object.entries(ops)) {
     if (id === "verify-package") continue;
-    for (const method of ["run", "reconcile", "rollback"]) {
+    for (const method of ["run", "reconcile"]) {
       if (!operation[method]) continue;
       await assert.rejects(operation[method](), error => error === blocked, `${id}/${method}`);
       checked++;
     }
   }
-  assert.ok(checked >= 20);
+  assert.ok(checked >= 18);
+  assert.ok(Object.values(ops).every(operation => operation.rollback === undefined));
   assert.equal(calls, checked);
 });
 
-test("[platform:macos-native] [LCH-04] Mac 控制器恢复和回滚不能跳过重启后历史检查", async () => {
+test("[platform:macos-native] [LCH-04] Mac 控制器恢复不能跳过重启后历史检查", async () => {
   const events = [];
   const ops = protectMacLifecycleOperations({ test: {
     reconcile: async () => ({ completed: true, evidence: { recovered: true } }),
-    rollback: async () => ({ restored: true }),
   } }, {
     before: async () => { events.push("before"); },
     after: async () => { events.push("after"); throw new Error("projection-behind"); },
   });
   await assert.rejects(ops.test.reconcile(), /projection-behind/);
-  await assert.rejects(ops.test.rollback(), /projection-behind/);
-  assert.deepEqual(events, ["before", "after", "before", "after"]);
-  assert.match(launchdPlist({ recovery: true }), /<string>--recover<\/string><string>--control<\/string>/);
+  assert.deepEqual(events, ["before", "after"]);
+  assert.doesNotMatch(launchdPlist({}), /--recover/);
 });

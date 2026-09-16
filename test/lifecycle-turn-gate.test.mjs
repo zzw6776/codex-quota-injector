@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -64,7 +64,7 @@ test("[HAR-04 LCH-04] 调度时固定发起启停恢复测试的任务和回合�
     "01a09a62-8415-7290-a294-aff2102807d2",
     "2026-09-13T11:00:00.000Z",
   )}\n`);
-  const checkpoint = await captureCodexSessionCheckpoint({ codexHome });
+  const checkpoint = await captureCodexSessionCheckpoint({ codexHome, sqliteHome: codexHome });
   assert.equal(checkpoint.turns.length, 1);
   assert.deepEqual(checkpoint.turns[0], {
     path: rollout,
@@ -122,5 +122,28 @@ test("[HAR-04 LCH-03] 官方索引指向恢复后的 rollout 时，旧文件不�
     assert.deepEqual((await findActiveCodexTurns({ codexHome, sqliteHome: codexHome })).map(x => x.turnId), ["actually-running"]);
     database.prepare("UPDATE threads SET rollout_path = ?").run(join(sessions, "missing.jsonl"));
     await assert.rejects(findActiveCodexTurns({ codexHome, sqliteHome: codexHome }), { code: "ENOENT" });
+  } finally { database.close(); }
+});
+
+test("[HAR-04 LCH-03] Windows 官方扩展路径索引不能漏掉同一 rollout 的活动回合", {
+  skip: process.platform !== "win32",
+}, async t => {
+  const codexHome = await useTempDir(t, "codex-turn-namespaced-");
+  const sessions = join(codexHome, "sessions");
+  await mkdir(sessions);
+  const id = "01a0aa58-e184-7023-818a-9bf792b318c4";
+  const rollout = join(sessions, `rollout-${id}.jsonl`);
+  await writeFile(rollout, record("task_started", "active", "2026-09-16T14:57:14Z") + "\n");
+  const database = new DatabaseSync(join(codexHome, "state_5.sqlite"));
+  try {
+    database.exec("CREATE TABLE threads (id TEXT, rollout_path TEXT)");
+    database.prepare("INSERT INTO threads VALUES (?, ?)").run(id, toNamespacedPath(rollout));
+    const checkpoint = await captureCodexSessionCheckpoint({ codexHome, sqliteHome: codexHome });
+    assert.deepEqual(checkpoint.turns.map(turn => turn.turnId), ["active"]);
+    await assert.rejects(waitForCodexTurnsIdle({ codexHome, sqliteHome: codexHome,
+      stableDurationMs: 0, pollIntervalMs: 1, timeoutMs: 25 }), /拒绝关闭桌面应用/);
+    await appendFile(rollout, record("task_complete", "active", "2026-09-16T15:00:00Z") + "\n");
+    assert.equal((await waitForCodexTurnsIdle({ codexHome, sqliteHome: codexHome,
+      stableDurationMs: 0, timeoutMs: 100 })).idle, true);
   } finally { database.close(); }
 });

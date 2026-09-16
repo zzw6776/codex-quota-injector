@@ -21,7 +21,8 @@ import {
   runtimeTargetsForPlatform,
   WSL_NATIVE,
 } from "./test-runtime-targets.mjs";
-import { requireFreeResult, RESULTS, ROOT, sourceSnapshot, writeReport } from "./test-support.mjs";
+import { modelTestRuntimeSnapshot, RESULTS, ROOT, sourceSnapshot, writeReport } from "./test-support.mjs";
+import { acceptableRuntimeVersions, compareModelRuntime, compareTestEvidence } from "./test-impact.mjs";
 import {
   DESKTOP_HOST_REPORT_VERSION,
   backendComponentId,
@@ -305,8 +306,10 @@ async function desktopPlan(profile, runtimeTarget, triggerMode = "direct") {
 }
 
 async function runDesktopSession(plan) {
-  const free = await requireFreeResult({ runtimeTarget: plan.runtimeTarget });
-  const backend = await requireBackendReport(plan, free.snapshot.sha256);
+  const snapshot = await sourceSnapshot();
+  const backend = await requireBackendReport(plan, snapshot);
+  plan = { ...plan, sourceSnapshot: snapshot,
+    acceptableRuntimeVersions: acceptableRuntimeVersions(snapshot, backend.report.snapshot, plan.projectVersion) };
   const runtimeBinding = await inspectDesktopRuntime(plan);
   const upstreamAttributions = await readDesktopUpstreamAttributions(plan.runtimeTarget);
   const customModels = (await liveProfiles()).filter((profile) => profile.id !== "official")
@@ -343,7 +346,10 @@ async function runDesktopSession(plan) {
       path: backend.path,
       status: backend.report.backendStatus,
       component: backendComponentId(plan.profile, plan.runtimeTarget),
+      validity: backend.validity,
+      testedReleaseVersion: backend.report.snapshot.releaseVersion ?? null,
     },
+    modelRuntimeSnapshot: backend.report.modelRuntimeSnapshot,
     runtimeBinding,
     upstreamAttributions,
     customModels,
@@ -508,7 +514,8 @@ async function readDesktopUpstreamAttributions(runtimeTarget) {
 
 async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerminal = false } = {}) {
   const snapshot = await sourceSnapshot();
-  const sourceCurrent = snapshot.sha256 === report.sourceSnapshot.sha256;
+  report.validity = compareTestEvidence(report.sourceSnapshot, snapshot, { scope: "desktop", runtimeTarget: report.runtimeTarget });
+  const sourceCurrent = report.validity.status === "reusable";
   report.runtimeBinding = await inspectDesktopRuntime(report);
   report.upstreamAttributions = await readDesktopUpstreamAttributions(report.runtimeTarget);
   const explicitWslPath = typeof rolloutPath === "string" && rolloutPath.startsWith("wsl:")
@@ -566,17 +573,29 @@ async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerm
   await updateBackendReport(backend.path, report);
 }
 
-async function requireBackendReport(plan, sourceSha256) {
+export function validateBackendReport(report, plan, snapshot, { platform = process.platform, arch = process.arch } = {}) {
+  const validity = compareTestEvidence(report.snapshot, snapshot, { scope: "backend", runtimeTarget: plan.runtimeTarget });
+  if (report.profileFilter !== plan.profile || report.runtimeTarget !== plan.runtimeTarget ||
+    report.platform !== platform || report.arch !== arch || report.backendStatus !== "passed") {
+    throw new Error(`${plan.backendComponent} 未通过或不属于当前模型/平台/运行环境`);
+  }
+  if (validity.status !== "reusable") {
+    throw new Error(validity.status === "review-required" ? validity.reason
+      : `${plan.backendComponent} 的执行输入已改变，仅需重测该后台组件`);
+  }
+  return validity;
+}
+
+async function requireBackendReport(plan, snapshot) {
   const path = join(RESULTS, `live-${plan.profile}-${plan.runtimeTarget}.json`);
   const report = JSON.parse(await readFile(path, "utf8").catch(() => {
     throw new Error(`缺少 ${plan.backendComponent} 报告；请先运行对应模型的后台功能测试`);
   }));
-  if (report.profileFilter !== plan.profile || report.runtimeTarget !== plan.runtimeTarget ||
-    report.platform !== process.platform || report.arch !== process.arch ||
-    report.snapshot?.sha256 !== sourceSha256 || report.backendStatus !== "passed") {
-    throw new Error(`${plan.backendComponent} 未通过、已过期或不属于当前平台/运行环境`);
-  }
-  return { path, report };
+  const validity = validateBackendReport(report, plan, snapshot);
+  const runtimeValidity = compareModelRuntime(report.modelRuntimeSnapshot, await modelTestRuntimeSnapshot(plan.runtimeTarget));
+  if (runtimeValidity.status !== "reusable") throw Error(runtimeValidity.reason ??
+    `${plan.backendComponent} 的实际运行时已改变：${runtimeValidity.changed.join("、")}；仅需对应环境验收`);
+  return { path, report, validity, runtimeValidity };
 }
 
 async function inspectDesktopRuntime(plan) {
@@ -617,8 +636,7 @@ async function inspectDesktopRuntimeOnce(plan) {
     const widget = await inspectWidget();
     const runtimeMatches = plan.runtimeTarget === "macos-native" ||
       (plan.runtimeTarget === WSL_NATIVE ? host.relay.wslNative : !host.relay.wslNative);
-    const versionPattern = new RegExp(`(?:^|\\s)v${escapeRegex(plan.projectVersion)}(?:\\.dev)?(?:$|\\s)`);
-    const versionMatches = versionPattern.test(widget.footerText ?? "");
+    const versionMatches = desktopLoadedVersionMatches(plan, widget.footerText);
     const passed = desktopRuntimeInfrastructureReady(host.readiness) && runtimeMatches &&
       widget.runtimeVersion === plan.expectedWidgetRuntime && versionMatches;
     return {
@@ -634,6 +652,11 @@ async function inspectDesktopRuntimeOnce(plan) {
   } catch (error) {
     return { status: "failed", expected, error: error.message };
   }
+}
+
+export function desktopLoadedVersionMatches(plan, footerText) {
+  return (plan.acceptableRuntimeVersions ?? [plan.projectVersion]).some(version =>
+    new RegExp(`(?:^|\\s)v${escapeRegex(version)}(?:\\.dev)?(?:$|\\s)`).test(footerText ?? ""));
 }
 
 async function inspectWidget() {
@@ -658,7 +681,8 @@ export function readDesktopWidgetState(scope) {
 
 async function updateBackendReport(path, desktopReport) {
   const backend = JSON.parse(await readFile(path, "utf8"));
-  if (backend.snapshot?.sha256 !== desktopReport.sourceSnapshot.sha256 ||
+  if (compareTestEvidence(backend.snapshot, desktopReport.sourceSnapshot,
+    { scope: "backend", runtimeTarget: desktopReport.runtimeTarget }).status !== "reusable" ||
     backend.profileFilter !== desktopReport.profile || backend.runtimeTarget !== desktopReport.runtimeTarget) return;
   backend.desktopHostStatus = desktopReport.desktopHostStatus;
   backend.desktopHostReport = desktopReport.reportPath;
@@ -686,7 +710,20 @@ async function printDesktopStatus(runId, rolloutPath) {
   const report = JSON.parse(await readFile(reportPath, "utf8").catch(() => {
     throw new Error(`找不到桌面验收报告 ${runId}`);
   }));
-  const backend = await requireBackendReport(report, report.sourceSnapshot.sha256);
+  const snapshot = await sourceSnapshot();
+  const validity = compareTestEvidence(report.sourceSnapshot, snapshot, { scope: "desktop", runtimeTarget: report.runtimeTarget });
+  if (report.finishedAt || validity.status === "review-required") {
+    let runtimeValidity = { status: "review-required", reason: "旧报告没有独立运行时输入清单" };
+    if (report.modelRuntimeSnapshot) {
+      runtimeValidity = await modelTestRuntimeSnapshot(report.runtimeTarget)
+        .then(current => compareModelRuntime(report.modelRuntimeSnapshot, current))
+        .catch(error => ({ status: "review-required", reason: error.message }));
+    }
+    console.log(JSON.stringify({ runId, status: report.status, summary: report.summary,
+      validity, runtimeValidity, reportPath }, null, 2));
+    return; // Querying history must not rewrite the original execution outcome.
+  }
+  const backend = await requireBackendReport(report, snapshot);
   await refreshDesktopReport(report, { backend, rolloutPath, preserveTerminal: true });
   console.log(JSON.stringify({
     runId,

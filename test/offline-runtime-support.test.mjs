@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,7 +13,7 @@ import {
   bridgeWebSocketUrl,
   wslWindowsHostAddress,
 } from "../runtime-tests/support/browser.mjs";
-import { stopChild } from "../runtime-tests/support/offline-runtime.mjs";
+import { stopChild, removeRuntimeDirectory } from "../runtime-tests/support/offline-runtime.mjs";
 import { waitFor } from "./helpers.mjs";
 
 test("[platform:windows-native] [HAR-01] Windows 浏览器隔离保留真实用户目录并继续隔离浏览器数据", () => {
@@ -90,6 +90,34 @@ if (process.platform === "win32") test("[platform:windows-native] [HAR-01 OBS-03
     },
   });
   assert.notEqual(child.exitCode, null);
+});
+
+if (process.platform === "win32") test("[platform:windows-native] [HAR-01 OBS-03] 模型测试清理在真实文件锁释放后成功删除临时目录", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "runtime-cleanup-lock-"));
+  const executable = join(directory, "codex-upstream.exe");
+  await writeFile(executable, "sandbox executable fixture");
+  const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script = "$stream=[System.IO.File]::Open($env:QUOTA_LOCK_FIXTURE,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read); try {[Console]::WriteLine('locked'); [Console]::ReadLine() | Out-Null} finally {$stream.Dispose()}";
+  const locker = spawn(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+    env: { ...process.env, QUOTA_LOCK_FIXTURE: executable },
+    stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
+  });
+  let output = "";
+  locker.stdout.on("data", chunk => { output += chunk; });
+  let release;
+  t.after(async () => {
+    clearTimeout(release);
+    locker.stdin.end("release\n");
+    await stopChild(locker);
+    await removeRuntimeDirectory(directory);
+  });
+  await waitFor(() => output.includes("locked"), { timeoutMs: 5_000 });
+  // 先证明这是真实删除失败，而非只模拟 rm 的返回值。
+  await assert.rejects(rm(directory, { recursive: true, force: true }),
+    error => ["EBUSY", "EPERM", "EACCES"].includes(error.code));
+  release = setTimeout(() => locker.stdin.end("release\n"), 150);
+  await removeRuntimeDirectory(directory);
+  await assert.rejects(stat(directory), { code: "ENOENT" });
 });
 
 test("[HAR-01 OBS-03] 已退出父进程的管道被孤儿后代占用时清理仍有界完成", async t => {
