@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { CdpClient } from "../../src/cdp-client.mjs";
 import { widgetInstallExpression, widgetUpdateExpression } from "../../src/widget.mjs";
-import { waitFor } from "../../test/helpers.mjs";
+import { startHttpServer, waitFor } from "../../test/helpers.mjs";
 import { isolatedEnv, sandboxCommand, stopChild, ROOT } from "./offline-runtime.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -209,11 +209,23 @@ export async function startBrowser(t) {
   await client.request("Page.enable");
   await client.request("Runtime.enable");
   await client.request("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-  const { frameTree } = await client.request("Page.getFrameTree");
-  await client.request("Page.setDocumentContent", { frameId: frameTree.frame.id, html: FIXTURE_HTML });
+  const fixture = await startHttpServer(t, (_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(FIXTURE_HTML);
+  });
+  await client.request("Page.navigate", { url: fixture.origin });
+  await waitFor(() => client.evaluate("document.getElementById('profile-row') != null"));
+  assert.equal(await client.evaluate("isSecureContext && typeof crypto.randomUUID === 'function'"), true,
+    "页面动作夹具必须提供真实浏览器的安全上下文与随机 ID");
   await client.evaluate(widgetInstallExpression());
   await client.evaluate(widgetUpdateExpression(fixtureData()));
-  const settled = () => client.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))");
+  const settled = () => client.evaluate(`(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    // Measure real pointer targets after the popover's opening transition, not mid-transform.
+    const panel = document.getElementById('codex-quota-injector-root')?.shadowRoot?.querySelector('.quota-popover');
+    await Promise.all((panel?.getAnimations() ?? []).map(animation => animation.finished.catch(() => {})));
+    return true;
+  })()`);
   await settled();
   const nodeExpression = (selector, shadow = true) => `${shadow ? SHADOW : "document"}.querySelector(${JSON.stringify(selector)})`;
   return { client, child, port: endpoint.port, directory, launchArguments, settled,

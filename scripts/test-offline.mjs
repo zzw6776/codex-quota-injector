@@ -90,6 +90,9 @@ try {
   const contractFiles = await testFiles("test");
   const contractFilesByScope = await groupContractFiles(contractFiles);
   const allRuntimeFiles = await testFiles("runtime-tests");
+  for (const file of allRuntimeFiles) {
+    if (file.startsWith("runtime-tests/widget-browser-")) COMMON_RUNTIME_FILES.add(file);
+  }
   const commonRuntimeFiles = allRuntimeFiles.filter((file) => COMMON_RUNTIME_FILES.has(file));
   const relayRuntimeFiles = allRuntimeFiles.filter((file) => !COMMON_RUNTIME_FILES.has(file));
   const commonStages = [

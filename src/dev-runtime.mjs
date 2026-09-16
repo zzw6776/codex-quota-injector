@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, realpath } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export function isCodexHostedDevLaunch(environment = process.env) {
   return Boolean(String(environment.CODEX_APP_TOOLS_PIPE_PATH ?? "").trim());
 }
 
-// Only the self-contained Widget module can be reloaded in place. Any other
+// The Widget entry and its browser feature modules can be reloaded in place. Any other
 // runtime or dependency change must keep using the normal upgrade path.
 export async function readDevRuntimeIdentity(root = fileURLToPath(new URL("../", import.meta.url))) {
   const directory = await realpath(root);
@@ -21,7 +22,7 @@ export async function readDevRuntimeIdentity(root = fileURLToPath(new URL("../",
     const entries = await readdir(join(directory, relative), { withFileTypes: true });
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       const path = join(relative, entry.name);
-      if (path === join("src", "widget.mjs")) continue;
+      if (path === join("src", "widget.mjs") || path === join("src", "widget")) continue;
       if (entry.isDirectory()) await visit(path);
       else add(path, await readFile(join(directory, path)));
     }
@@ -36,11 +37,31 @@ export async function readDevRuntimeIdentity(root = fileURLToPath(new URL("../",
   return hash.digest("hex");
 }
 
-export async function loadDevWidget() {
-  const url = new URL("./widget.mjs", import.meta.url);
-  const content = await readFile(url);
-  url.searchParams.set("revision", createHash("sha256").update(content).digest("hex"));
-  const widget = await import(url.href);
+export async function loadDevWidget(root = fileURLToPath(new URL("../", import.meta.url))) {
+  // A fresh module graph avoids retaining cached child imports after a feature edit.
+  // Read the complete snapshot before importing, and remove it after ESM linking.
+  const sources = [["widget.mjs", await readFile(join(root, "src", "widget.mjs"))]];
+  async function visit(relative) {
+    const entries = await readdir(join(root, "src", relative), { withFileTypes: true });
+    for (const entry of entries) {
+      const path = join(relative, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) sources.push([path, await readFile(join(root, "src", path))]);
+    }
+  }
+  await visit("widget");
+  const snapshot = await mkdtemp(join(tmpdir(), "codex-quota-widget-"));
+  let widget;
+  try {
+    for (const [relative, content] of sources) {
+      const path = join(snapshot, relative);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, content);
+    }
+    widget = await import(pathToFileURL(join(snapshot, "widget.mjs")).href);
+  } finally {
+    await rm(snapshot, { recursive: true, force: true });
+  }
   for (const name of [
     "widgetInstallExpression", "widgetDrainActionsExpression", "widgetRuntimeVersionExpression",
     "widgetUpdateExpressionJson", "widgetTokenUsageDeltaUpdateExpressionJson",

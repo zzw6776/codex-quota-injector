@@ -2,36 +2,36 @@ import { AccountManager } from "./account-manager.mjs";
 import { AccountWakeupManager } from "./account-wakeup.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { CodexContextManager } from "./codex-context.mjs";
-import { prepareCodexLaunch, refreshCodexModelCatalog } from "./codex-bridge.mjs";
-import { ExtraModelManager } from "./extra-model-manager.mjs";
 import {
-  directHostHealth,
-  hostHealthPollInterval,
-  readHostHealthViewModel,
-  requestHostToolReload,
-  watchHostHealthFiles,
-} from "./host-health.mjs";
+  prepareCodexLaunch,
+  refreshCodexModelCatalog,
+} from "./codex-bridge.mjs";
+import { ExtraModelManager } from "./extra-model-manager.mjs";
+import { requestHostToolReload } from "./host-health.mjs";
 import { ModelRouterManager } from "./model-router.mjs";
-import { isCodexRunning, isRelayStateCurrent, restartCodex } from "./platform.mjs";
+import {
+  isCodexRunning,
+  isRelayStateCurrent,
+  restartCodex,
+} from "./platform.mjs";
 import { TokenUsageManager } from "./token-usage.mjs";
-import packageJson from "../package.json" with { type: "json" };
 import { isSea } from "node:sea";
 import * as initialWidget from "./widget.mjs";
-
-const DEFAULT_PORT = 9229;
-const APP_VERSION = String(packageJson.version ?? "0.0.0");
-const APP_DISPLAY_VERSION = isSea() ? APP_VERSION : `${APP_VERSION}.dev`;
-const TARGET_POLL_MS = 1_500;
-const QUOTA_REFRESH_MS = 60_000;
-const MODEL_CATALOG_REFRESH_MS = 4 * 60_000 + 30_000;
-const MODEL_CATALOG_BUSY_RETRY_MS = 30_000;
-const DEEPSEEK_BALANCE_REFRESH_MS = 5 * 60_000;
-const STARTUP_GRACE_MS = 30_000;
-const TOKEN_USAGE_FALLBACK_MS = 15_000;
-const WIDGET_HEALTH_CHECK_MS = 15_000;
-const TOKEN_USAGE_STABILITY_GRACE_MS = 5_000;
-const INJECTION_ERROR_LOG_INTERVAL_MS = 10_000;
-const DEBUG_LOGGING = process.env.CODEX_QUOTA_DEBUG === "1";
+import {
+  DEFAULT_PORT,
+  APP_DISPLAY_VERSION,
+  TARGET_POLL_MS,
+  QUOTA_REFRESH_MS,
+  MODEL_CATALOG_REFRESH_MS,
+  MODEL_CATALOG_BUSY_RETRY_MS,
+  DEEPSEEK_BALANCE_REFRESH_MS,
+  STARTUP_GRACE_MS,
+  TOKEN_USAGE_FALLBACK_MS,
+  INJECTION_ERROR_LOG_INTERVAL_MS,
+} from "./injector/contract.mjs";
+import { delay, debugLog } from "./injector/logging.mjs";
+import { createWidgetSession } from "./injector/widget-session.mjs";
+import { createHostHealthSession } from "./injector/host-health-session.mjs";
 
 export async function runInjector({
   port = DEFAULT_PORT,
@@ -44,13 +44,15 @@ export async function runInjector({
   tokenUsageManager = new TokenUsageManager(),
   managersInitialized = false,
   accountManagerInitialized = false,
-  prepareLaunch = () => prepareCodexLaunch({
-    accountManager,
-    extraModelManager,
-    contextManager,
-    modelRouterManager,
-  }),
-  refreshModelCatalog = () => refreshCodexModelCatalog({ accountManager, contextManager }),
+  prepareLaunch = () =>
+    prepareCodexLaunch({
+      accountManager,
+      extraModelManager,
+      contextManager,
+      modelRouterManager,
+    }),
+  refreshModelCatalog = () =>
+    refreshCodexModelCatalog({ accountManager, contextManager }),
   recoverLaunch = null,
   registerLaunchRecovery = null,
   registerWidgetReload = null,
@@ -68,20 +70,9 @@ export async function runInjector({
   if (once) await tokenInitialization;
   let cdp = null;
   let targetId = null;
-  let widgetInstalled = false;
-  let lastStaticJson = null;
-  let lastStaticCoreJson = null;
-  let lastTokenUsageSignatures = new Map();
-  let lastTokenUsageStatus = null;
-  let lastTokenUsageError = null;
-  let widgetUpdateRevision = 0;
-  let widgetUpdatePromise = null;
-  let widgetUpdateRequested = false;
-  let widgetDataDirty = true;
-  let widgetDataRevision = 0;
+
   let lastAccountOperationJson = null;
-  let lastStableTokenUsage = null;
-  let lastStableTokenUsageAt = 0;
+
   let removeTokenUsageListener = () => {};
   let removeNetworkListener = () => {};
   let removeExtraModelListener = () => {};
@@ -98,7 +89,7 @@ export async function runInjector({
   let modelCatalogRefreshTimer = null;
   let modelCatalogRefreshPromise = null;
   let tokenUsageFallbackTimer = null;
-  let lastWidgetHealthCheckAt = 0;
+
   let lastInjectionError = null;
   let lastInjectionErrorAt = 0;
   let launchRecoveryRequested = false;
@@ -107,142 +98,77 @@ export async function runInjector({
   let pendingWidgetReload = null;
   let widgetReloading = false;
   let modelRouterClosePromise = null;
-  let hostHealth = directHostHealth();
-  let hostHealthJson = JSON.stringify(hostHealth);
-  let hostHealthActionError = null;
-  let hostHealthSyncPromise = null;
-  let lastHostHealthCheckAt = 0;
-  let hostHealthWatcher = null;
-  let hostHealthWatcherKey = null;
-  let hostHealthWatchAttemptKey = null;
-  let lastHostHealthWatchAttemptAt = 0;
-  let lastHostHealthWatchError = null;
+
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
+  const widgetSession = createWidgetSession({
+    get injectionMode() {
+      return injectionMode;
+    },
+    get accountManager() {
+      return accountManager;
+    },
+    get contextManager() {
+      return contextManager;
+    },
+    get extraModelManager() {
+      return extraModelManager;
+    },
+    get modelRouterManager() {
+      return modelRouterManager;
+    },
+    get tokenUsageManager() {
+      return tokenUsageManager;
+    },
+    get cdp() {
+      return cdp;
+    },
+    get stopped() {
+      return stopped;
+    },
+    get widget() {
+      return widget;
+    },
+    get appDisplayVersion() {
+      return appDisplayVersion;
+    },
+    get widgetReloading() {
+      return widgetReloading;
+    },
+    get hostHealth() {
+      return hostHealthSession.hostHealth;
+    },
+    get wakeupManager() {
+      return wakeupManager;
+    },
+  });
+
+  const hostHealthSession = createHostHealthSession({
+    get getLaunchOptions() {
+      return getLaunchOptions;
+    },
+    get stopped() {
+      return stopped;
+    },
+    get markWidgetDataDirty() {
+      return widgetSession.markWidgetDataDirty;
+    },
+    get requestWidgetUpdate() {
+      return widgetSession.requestWidgetUpdate;
+    },
+  });
+
   const wakeupManager = new AccountWakeupManager(accountManager, () => {
-    markWidgetDataDirty();
-    void requestWidgetUpdate().catch((error) => {
+    widgetSession.markWidgetDataDirty();
+    void widgetSession.requestWidgetUpdate().catch((error) => {
       console.error(`[wakeup] 面板刷新失败：${error.message}`);
     });
   });
-
-  function markWidgetDataDirty() {
-    widgetDataDirty = true;
-    widgetDataRevision += 1;
-  }
 
   function syncAsyncAccountOperation() {
     const operationJson = JSON.stringify(accountManager.operation ?? null);
     if (operationJson === lastAccountOperationJson) return;
     lastAccountOperationJson = operationJson;
-    markWidgetDataDirty();
-  }
-
-  function closeHostHealthWatcher() {
-    hostHealthWatcher?.close();
-    hostHealthWatcher = null;
-    hostHealthWatcherKey = null;
-  }
-
-  function hostHealthBindingKey(binding) {
-    if (!binding?.hostToolsRequired) return "direct";
-    return JSON.stringify([
-      String(binding.statePath ?? ""),
-      String(binding.healthPath ?? ""),
-      String(binding.generation ?? ""),
-      binding.wslNative === true,
-    ]);
-  }
-
-  function ensureHostHealthWatcher(binding, now = Date.now()) {
-    const key = hostHealthBindingKey(binding);
-    if (hostHealthWatcher?.active && key === hostHealthWatcherKey) return;
-    if (!binding?.hostToolsRequired) {
-      if (hostHealthWatcher || key !== hostHealthWatcherKey) closeHostHealthWatcher();
-      hostHealthWatcherKey = key;
-      return;
-    }
-    if (key === hostHealthWatchAttemptKey &&
-      now - lastHostHealthWatchAttemptAt < hostHealthPollInterval("starting")) return;
-
-    closeHostHealthWatcher();
-    hostHealthWatcherKey = key;
-    hostHealthWatchAttemptKey = key;
-    lastHostHealthWatchAttemptAt = now;
-    const watcher = watchHostHealthFiles(binding, {
-      onChange() {
-        void refreshHostHealthFromEvent();
-      },
-      onError(error) {
-        closeHostHealthWatcher();
-        const message = error?.message ?? String(error);
-        if (message !== lastHostHealthWatchError) {
-          console.error(`[host-health] 状态文件监听失败，回退轮询：${message}`);
-          lastHostHealthWatchError = message;
-        }
-      },
-    });
-    if (watcher.active) {
-      hostHealthWatcher = watcher;
-      lastHostHealthWatchError = null;
-    } else {
-      hostHealthWatcherKey = null;
-    }
-  }
-
-  async function refreshHostHealthFromEvent() {
-    try {
-      await hostHealthSyncPromise;
-      if (stopped) return;
-      lastHostHealthCheckAt = 0;
-      await syncHostHealth({ force: true });
-      await requestWidgetUpdate();
-    } catch (error) {
-      console.error(`[host-health] 事件刷新失败：${error.message}`);
-    }
-  }
-
-  async function syncHostHealth({ force = false } = {}) {
-    const now = Date.now();
-    const binding = getLaunchOptions?.()?.relay;
-    ensureHostHealthWatcher(binding, now);
-    const pollMs = binding?.hostToolsRequired && !hostHealthWatcher?.active
-      ? hostHealthPollInterval("starting")
-      : hostHealthPollInterval(hostHealth.status);
-    if (!force && now - lastHostHealthCheckAt < pollMs) return hostHealth;
-    if (hostHealthSyncPromise) return hostHealthSyncPromise;
-    lastHostHealthCheckAt = now;
-    const task = (async () => {
-      const next = await readHostHealthViewModel(binding);
-      const displayed = hostHealthActionError
-        ? { ...next, actionError: hostHealthActionError }
-        : next;
-      const nextJson = JSON.stringify(displayed);
-      if (nextJson !== hostHealthJson) {
-        hostHealth = displayed;
-        hostHealthJson = nextJson;
-        markWidgetDataDirty();
-      }
-      return hostHealth;
-    })().catch((error) => {
-      const displayed = {
-        ...hostHealth,
-        status: "degraded",
-        code: "health-check-failed",
-        message: "无法读取 Codex 任务工具状态",
-        detail: error.message,
-      };
-      const nextJson = JSON.stringify(displayed);
-      if (nextJson !== hostHealthJson) {
-        hostHealth = displayed;
-        hostHealthJson = nextJson;
-        markWidgetDataDirty();
-      }
-      return hostHealth;
-    }).finally(() => {
-      if (hostHealthSyncPromise === task) hostHealthSyncPromise = null;
-    });
-    hostHealthSyncPromise = task;
-    return task;
+    widgetSession.markWidgetDataDirty();
   }
 
   const stop = () => {
@@ -254,7 +180,7 @@ export async function runInjector({
     clearTimeout(deepSeekBalanceTimer);
     clearTimeout(modelCatalogRefreshTimer);
     clearTimeout(tokenUsageFallbackTimer);
-    closeHostHealthWatcher();
+    hostHealthSession.closeHostHealthWatcher();
     quotaRefreshTimer = null;
     modelCatalogRefreshTimer = null;
     tokenUsageFallbackTimer = null;
@@ -275,9 +201,13 @@ export async function runInjector({
   const stopAndExit = async () => {
     if (stopping) return;
     stopping = true;
-    await accountManager.syncCurrentAccountFromOfficialCredentials().catch((error) => {
-      console.error(`[lifecycle] 退出前同步 Codex 凭证失败: ${error.message}`);
-    });
+    await accountManager
+      .syncCurrentAccountFromOfficialCredentials()
+      .catch((error) => {
+        console.error(
+          `[lifecycle] 退出前同步 Codex 凭证失败: ${error.message}`,
+        );
+      });
     stop();
     await tokenUsageManager.flush().catch((error) => {
       console.error(`[token-usage] 退出前保存缓存失败: ${error.message}`);
@@ -294,13 +224,14 @@ export async function runInjector({
     });
   }
   registerWidgetReload?.((nextWidget, version) => {
-    if (!stopped && !isSea()) pendingWidgetReload = { widget: nextWidget, version };
+    if (!stopped && !isSea())
+      pendingWidgetReload = { widget: nextWidget, version };
   });
 
   async function refreshQuotas() {
     if (accountManager.store.list().length > 0) {
       await accountManager.refreshAll();
-      markWidgetDataDirty();
+      widgetSession.markWidgetDataDirty();
     }
   }
 
@@ -324,15 +255,14 @@ export async function runInjector({
         try {
           await refreshQuotas();
         } catch (error) {
-          markWidgetDataDirty();
+          widgetSession.markWidgetDataDirty();
           console.error(`[quota] ${error.message}`);
         }
       } while (quotaRefreshRequested && !stopped);
-    })()
-      .finally(() => {
-        if (quotaRefreshPromise === task) quotaRefreshPromise = null;
-        scheduleQuotaRefresh();
-      });
+    })().finally(() => {
+      if (quotaRefreshPromise === task) quotaRefreshPromise = null;
+      scheduleQuotaRefresh();
+    });
     quotaRefreshPromise = task;
     return task;
   }
@@ -346,23 +276,23 @@ export async function runInjector({
       cdp = new CdpClient(target.webSocketDebuggerUrl);
       await cdp.connect();
       targetId = target.id;
-      lastStaticJson = null;
-      lastTokenUsageSignatures = new Map();
-      lastTokenUsageStatus = null;
-      lastTokenUsageError = null;
-      widgetUpdateRevision = 0;
-      widgetInstalled = false;
-      lastWidgetHealthCheckAt = 0;
+      widgetSession.lastStaticJson = null;
+      widgetSession.lastTokenUsageSignatures = new Map();
+      widgetSession.lastTokenUsageStatus = null;
+      widgetSession.lastTokenUsageError = null;
+      widgetSession.widgetUpdateRevision = 0;
+      widgetSession.widgetInstalled = false;
+      widgetSession.lastWidgetHealthCheckAt = 0;
       lastAccountOperationJson = null;
-      markWidgetDataDirty();
+      widgetSession.markWidgetDataDirty();
       reconnected = true;
       await contextManager.refresh();
     }
-    if (!widgetInstalled) {
+    if (!widgetSession.widgetInstalled) {
       await cdp.evaluate(widget.widgetInstallExpression());
-      widgetInstalled = true;
-      lastWidgetHealthCheckAt = Date.now();
-      markWidgetDataDirty();
+      widgetSession.widgetInstalled = true;
+      widgetSession.lastWidgetHealthCheckAt = Date.now();
+      widgetSession.markWidgetDataDirty();
     }
     if (reconnected) {
       const tokenRefresh = tokenUsageManager.refresh().catch((error) => {
@@ -371,7 +301,7 @@ export async function runInjector({
       if (once) await tokenRefresh;
       void tokenRefresh
         .then(() => {
-          if (!once) return requestWidgetUpdate();
+          if (!once) return widgetSession.requestWidgetUpdate();
           return undefined;
         })
         .catch((error) => {
@@ -379,7 +309,7 @@ export async function runInjector({
         });
       scheduleTokenUsageFallback();
     }
-    await requestWidgetUpdate();
+    await widgetSession.requestWidgetUpdate();
     if (reconnected) {
       if (lastInjectionError) console.log("[injector] Codex 页面连接已恢复");
       console.log(`[injector] 已连接并注入 Codex 主页面（${targetId}）`);
@@ -404,191 +334,56 @@ export async function runInjector({
     }, TOKEN_USAGE_FALLBACK_MS);
   }
 
-  async function pushWidgetViewModel() {
-    const currentCdp = cdp;
-    if (!currentCdp?.isConnected || !widgetInstalled || stopped) return false;
-    if (widgetInstalled && Date.now() - lastWidgetHealthCheckAt >= WIDGET_HEALTH_CHECK_MS) {
-      lastWidgetHealthCheckAt = Date.now();
-      const runtimeVersion = await currentCdp.evaluate(widget.widgetRuntimeVersionExpression());
-      if (runtimeVersion !== widget.WIDGET_RUNTIME_VERSION) {
-        await currentCdp.evaluate(widget.widgetInstallExpression());
-        widgetInstalled = true;
-        lastStaticJson = null;
-        lastTokenUsageSignatures = new Map();
-        lastTokenUsageStatus = null;
-        lastTokenUsageError = null;
-        widgetUpdateRevision = 0;
-        markWidgetDataDirty();
-      }
-    }
-    if (!widgetDataDirty) return cdp === currentCdp;
-    const dataRevisionAtStart = widgetDataRevision;
-    const tokenUsage = tokenUsageManager.getViewModel();
-    const hasCurrentTurns = Array.isArray(tokenUsage.turns) && tokenUsage.turns.length > 0;
-    if (tokenUsage.status === "ready" &&
-      (hasCurrentTurns || !lastStableTokenUsage)) {
-      lastStableTokenUsage = tokenUsage;
-      lastStableTokenUsageAt = Date.now();
-    }
-    const keepStableTokenUsage = lastStableTokenUsage &&
-      Date.now() - lastStableTokenUsageAt < TOKEN_USAGE_STABILITY_GRACE_MS;
-    if (!hasCurrentTurns && tokenUsage.status === "ready" && !keepStableTokenUsage) {
-      lastStableTokenUsage = tokenUsage;
-      lastStableTokenUsageAt = Date.now();
-    }
-    const stableTokenUsage = keepStableTokenUsage &&
-      (!hasCurrentTurns || tokenUsage.status !== "ready")
-      ? {
-          ...lastStableTokenUsage,
-          status: tokenUsage.status,
-          error: tokenUsage.error,
-        }
-      : tokenUsage;
-    const viewModel = {
-      ...accountManager.getViewModel(),
-      context: contextManager.getViewModel(),
-      extraModels: extraModelManager.getViewModel(),
-      network: modelRouterManager.getNetworkViewModel?.() ?? null,
-      tokenUsage: stableTokenUsage,
-    };
-    const staticViewModel = {
-      version: appDisplayVersion,
-      injectionMode,
-      accounts: viewModel.accounts.map((account) => ({
-        ...account,
-        wakeup: wakeupManager.getViewModel(account.id),
-      })),
-      windows: viewModel.windows,
-      currentAccountId: viewModel.currentAccountId,
-      operation: viewModel.operation,
-      context: viewModel.context,
-      extraModels: viewModel.extraModels,
-      network: viewModel.network,
-      hostHealth,
-    };
-    const staticJson = JSON.stringify(staticViewModel);
-    const { extraModels: _extraModels, ...staticCoreViewModel } = staticViewModel;
-    const staticCoreJson = JSON.stringify(staticCoreViewModel);
-    const nextTokenUsageSignatures = new Map();
-    const tokenUsageUpdates = [];
-    for (const turn of Array.isArray(stableTokenUsage.turns) ? stableTokenUsage.turns : []) {
-      const turnId = String(turn?.turnId ?? "");
-      if (!turnId) continue;
-      const signature = JSON.stringify(turn);
-      nextTokenUsageSignatures.set(turnId, signature);
-      if (signature !== lastTokenUsageSignatures.get(turnId)) tokenUsageUpdates.push(turn);
-    }
-    const removedTurnIds = [...lastTokenUsageSignatures.keys()]
-      .filter((turnId) => !nextTokenUsageSignatures.has(turnId));
-    const tokenUsageDelta = {
-      status: stableTokenUsage.status,
-      error: stableTokenUsage.error ?? null,
-      updates: tokenUsageUpdates,
-      removedTurnIds,
-    };
-    const tokenUsageChanged = stableTokenUsage.status !== lastTokenUsageStatus ||
-      (stableTokenUsage.error ?? null) !== lastTokenUsageError ||
-      tokenUsageUpdates.length > 0 || removedTurnIds.length > 0;
-    if (staticJson !== lastStaticJson) {
-      if (lastStaticJson != null && staticCoreJson === lastStaticCoreJson) {
-        await currentCdp.evaluate(widget.widgetExtraModelsUpdateExpressionJson(
-          JSON.stringify(staticViewModel.extraModels),
-          ++widgetUpdateRevision,
-        ));
-        if (tokenUsageChanged) {
-          await currentCdp.evaluate(widget.widgetTokenUsageDeltaUpdateExpressionJson(
-            JSON.stringify(tokenUsageDelta),
-            ++widgetUpdateRevision,
-          ));
-        }
-      } else {
-        await currentCdp.evaluate(widget.widgetUpdateExpressionJson(
-          JSON.stringify({ ...staticViewModel, tokenUsage: stableTokenUsage }),
-          ++widgetUpdateRevision,
-        ));
-      }
-      if (cdp === currentCdp) {
-        lastStaticJson = staticJson;
-        lastStaticCoreJson = staticCoreJson;
-        lastTokenUsageSignatures = nextTokenUsageSignatures;
-        lastTokenUsageStatus = stableTokenUsage.status;
-        lastTokenUsageError = stableTokenUsage.error ?? null;
-      }
-    } else if (tokenUsageChanged) {
-      await currentCdp.evaluate(widget.widgetTokenUsageDeltaUpdateExpressionJson(
-        JSON.stringify(tokenUsageDelta),
-        ++widgetUpdateRevision,
-      ));
-      if (cdp === currentCdp) {
-        lastTokenUsageSignatures = nextTokenUsageSignatures;
-        lastTokenUsageStatus = stableTokenUsage.status;
-        lastTokenUsageError = stableTokenUsage.error ?? null;
-      }
-    }
-    if (cdp === currentCdp && widgetDataRevision === dataRevisionAtStart) {
-      widgetDataDirty = false;
-    }
-    return cdp === currentCdp;
-  }
-
-  function requestWidgetUpdate() {
-    if (widgetReloading) return Promise.resolve(false);
-    widgetUpdateRequested = true;
-    if (widgetUpdatePromise) return widgetUpdatePromise;
-    const task = (async () => {
-      do {
-        widgetUpdateRequested = false;
-        await pushWidgetViewModel();
-      } while (widgetUpdateRequested && !stopped);
-    })().finally(() => {
-      if (widgetUpdatePromise === task) widgetUpdatePromise = null;
-    });
-    widgetUpdatePromise = task;
-    return task;
-  }
-
   removeTokenUsageListener = tokenUsageManager.onChange(() => {
-    markWidgetDataDirty();
-    void requestWidgetUpdate().catch((error) => {
+    widgetSession.markWidgetDataDirty();
+    void widgetSession.requestWidgetUpdate().catch((error) => {
       console.error(`[token-usage] 事件驱动 Widget 刷新失败: ${error.message}`);
     });
   });
-  removeNetworkListener = modelRouterManager.onNetworkChange?.(() => {
-    markWidgetDataDirty();
-    void requestWidgetUpdate().catch((error) => {
-      console.error(`[model-router] 网络状态 Widget 刷新失败: ${error.message}`);
-    });
-  }) ?? (() => {});
-  removeExtraModelListener = extraModelManager.onChange?.(() => {
-    markWidgetDataDirty();
-    void requestWidgetUpdate().catch((error) => {
-      console.error(`[extra-models] 面板状态刷新失败: ${error.message}`);
-    });
-  }) ?? (() => {});
+  removeNetworkListener =
+    modelRouterManager.onNetworkChange?.(() => {
+      widgetSession.markWidgetDataDirty();
+      void widgetSession.requestWidgetUpdate().catch((error) => {
+        console.error(
+          `[model-router] 网络状态 Widget 刷新失败: ${error.message}`,
+        );
+      });
+    }) ?? (() => {});
+  removeExtraModelListener =
+    extraModelManager.onChange?.(() => {
+      widgetSession.markWidgetDataDirty();
+      void widgetSession.requestWidgetUpdate().catch((error) => {
+        console.error(`[extra-models] 面板状态刷新失败: ${error.message}`);
+      });
+    }) ?? (() => {});
 
   async function startAction(action) {
-    markWidgetDataDirty();
+    widgetSession.markWidgetDataDirty();
     try {
       switch (action?.type) {
         case "host-health-recheck":
-          hostHealthActionError = null;
+          hostHealthSession.hostHealthActionError = null;
           await requestHostToolReload(getLaunchOptions?.()?.relay);
-          lastHostHealthCheckAt = 0;
-          await syncHostHealth({ force: true });
+          hostHealthSession.lastHostHealthCheckAt = 0;
+          await hostHealthSession.syncHostHealth({ force: true });
           break;
         case "host-health-open-logs":
-          hostHealthActionError = null;
-          if (typeof openLogs !== "function") throw new Error("当前启动入口没有日志打开能力");
+          hostHealthSession.hostHealthActionError = null;
+          if (typeof openLogs !== "function")
+            throw new Error("当前启动入口没有日志打开能力");
           await openLogs();
-          lastHostHealthCheckAt = 0;
-          await syncHostHealth({ force: true });
+          hostHealthSession.lastHostHealthCheckAt = 0;
+          await hostHealthSession.syncHostHealth({ force: true });
           break;
         case "host-health-restart":
-          hostHealthActionError = null;
+          hostHealthSession.hostHealthActionError = null;
           await restartForHostHealth();
           break;
         case "wakeup-save":
-          await wakeupManager.save(action.accountId, { enabled: action.enabled, times: action.times });
+          await wakeupManager.save(action.accountId, {
+            enabled: action.enabled,
+            times: action.times,
+          });
           break;
         case "wakeup-now":
           wakeupManager.trigger(action.accountId);
@@ -649,7 +444,9 @@ export async function runInjector({
           break;
         case "extra-platform-save": {
           await extraModelManager.savePlatform(action.platform, {
-            reservedModelIds: contextManager.getViewModel().models.map((model) => model.slug),
+            reservedModelIds: contextManager
+              .getViewModel()
+              .models.map((model) => model.slug),
             requestId: action.requestId,
           });
           scheduleDeepSeekBalanceRefresh();
@@ -659,7 +456,9 @@ export async function runInjector({
           await extraModelManager.refreshPresetModels(action.platform);
           break;
         case "extra-model-detect": {
-          await extraModelManager.detectModel(action.platform, action.modelId, { requestId: action.requestId });
+          await extraModelManager.detectModel(action.platform, action.modelId, {
+            requestId: action.requestId,
+          });
           break;
         }
         case "extra-platform-remove":
@@ -674,15 +473,18 @@ export async function runInjector({
       }
     } catch (error) {
       if (String(action?.type ?? "").startsWith("host-health-")) {
-        hostHealthActionError = error.message;
-        lastHostHealthCheckAt = 0;
-        await syncHostHealth({ force: true });
+        hostHealthSession.hostHealthActionError = error.message;
+        hostHealthSession.lastHostHealthCheckAt = 0;
+        await hostHealthSession.syncHostHealth({ force: true });
       }
       if (String(action?.type ?? "").startsWith("context-")) {
         contextManager.setError(error.message);
       }
-      if ((String(action?.type ?? "").startsWith("extra-platform-") || action?.type === "extra-model-detect") &&
-        action?.type !== "extra-deepseek-refresh-balance") {
+      if (
+        (String(action?.type ?? "").startsWith("extra-platform-") ||
+          action?.type === "extra-model-detect") &&
+        action?.type !== "extra-deepseek-refresh-balance"
+      ) {
         extraModelManager.setError(error.message);
       }
       console.error(`[action] ${error.message}`);
@@ -717,8 +519,8 @@ export async function runInjector({
       await restartCodex(port, options);
       extraModelManager.markRestarted();
       resetAfterCodexRestart();
-      lastHostHealthCheckAt = 0;
-      await syncHostHealth({ force: true });
+      hostHealthSession.lastHostHealthCheckAt = 0;
+      await hostHealthSession.syncHostHealth({ force: true });
     } finally {
       restartingCodex = false;
     }
@@ -729,7 +531,9 @@ export async function runInjector({
     try {
       const options = await prepareLaunch();
       if (options.preparationError) {
-        throw new Error(`模型中继准备失败，配置尚未生效：${options.preparationError}`);
+        throw new Error(
+          `模型中继准备失败，配置尚未生效：${options.preparationError}`,
+        );
       }
       await restartCodex(port, options);
       extraModelManager.markRestarted();
@@ -745,14 +549,14 @@ export async function runInjector({
     cdp?.close();
     cdp = null;
     targetId = null;
-    widgetInstalled = false;
-    lastStaticJson = null;
-    lastWidgetHealthCheckAt = 0;
-    lastHostHealthCheckAt = 0;
-    lastTokenUsageSignatures = new Map();
-    lastTokenUsageStatus = null;
-    lastTokenUsageError = null;
-    markWidgetDataDirty();
+    widgetSession.widgetInstalled = false;
+    widgetSession.lastStaticJson = null;
+    widgetSession.lastWidgetHealthCheckAt = 0;
+    hostHealthSession.lastHostHealthCheckAt = 0;
+    widgetSession.lastTokenUsageSignatures = new Map();
+    widgetSession.lastTokenUsageStatus = null;
+    widgetSession.lastTokenUsageError = null;
+    widgetSession.markWidgetDataDirty();
   }
 
   function scheduleModelCatalogRefresh(delayMs = MODEL_CATALOG_REFRESH_MS) {
@@ -766,7 +570,10 @@ export async function runInjector({
 
   async function runModelCatalogRefresh({ manual = false } = {}) {
     if (modelCatalogRefreshPromise) return modelCatalogRefreshPromise;
-    if (!manual && (activeAction || activeModelDetections.size > 0 || restartingCodex)) {
+    if (
+      !manual &&
+      (activeAction || activeModelDetections.size > 0 || restartingCodex)
+    ) {
       scheduleModelCatalogRefresh(MODEL_CATALOG_BUSY_RETRY_MS);
       return undefined;
     }
@@ -774,7 +581,7 @@ export async function runInjector({
     const task = (async () => {
       try {
         if (!manual) {
-          if (!await isCodexRunning()) return;
+          if (!(await isCodexRunning())) return;
           // Scheduled refreshes only update the cache. Rebuilding relay files or
           // restarting here can interrupt an unrelated in-flight user task.
           const refresh = await refreshModelCatalog();
@@ -789,14 +596,14 @@ export async function runInjector({
         if (options.preparationError) throw new Error(options.preparationError);
         const relay = options?.relay;
         const relayRequired = Boolean(relay && !relay.expectAbsent);
-        const relayCurrent = !relayRequired || await isRelayStateCurrent(
-          relay.statePath,
-          relay.generation,
-          { wslNative: relay.wslNative === true },
-        );
+        const relayCurrent =
+          !relayRequired ||
+          (await isRelayStateCurrent(relay.statePath, relay.generation, {
+            wslNative: relay.wslNative === true,
+          }));
         const catalogReloadRequired = options.officialCatalogChanged;
         if (relayRequired && (catalogReloadRequired || !relayCurrent)) {
-          if (!await isCodexRunning()) return;
+          if (!(await isCodexRunning())) return;
           console.log(
             catalogReloadRequired
               ? "[models] 检测到官方模型目录更新，正在重启 Codex 以加载最新模型"
@@ -818,7 +625,9 @@ export async function runInjector({
           scheduleDeepSeekBalanceRefresh();
           resetAfterCodexRestart();
         } else if (options.officialCatalogError) {
-          contextManager.setError(`官方模型目录刷新失败：${options.officialCatalogError}`);
+          contextManager.setError(
+            `官方模型目录刷新失败：${options.officialCatalogError}`,
+          );
         } else if (options.officialCatalogChecked) {
           contextManager.markOfficialCatalogCurrent();
         } else if (options.officialCatalogSource === "bundled") {
@@ -827,17 +636,19 @@ export async function runInjector({
           await contextManager.refresh({ sync: false });
         }
       } catch (error) {
-        if (manual) contextManager.setError(`官方模型目录刷新失败：${error.message}`);
+        if (manual)
+          contextManager.setError(`官方模型目录刷新失败：${error.message}`);
         console.error(`[models] 官方模型目录刷新失败: ${error.message}`);
       } finally {
         if (manual) restartingCodex = false;
-        markWidgetDataDirty();
-        void requestWidgetUpdate().catch((error) => {
+        widgetSession.markWidgetDataDirty();
+        void widgetSession.requestWidgetUpdate().catch((error) => {
           console.error(`[models] Widget 刷新失败: ${error.message}`);
         });
       }
     })().finally(() => {
-      if (modelCatalogRefreshPromise === task) modelCatalogRefreshPromise = null;
+      if (modelCatalogRefreshPromise === task)
+        modelCatalogRefreshPromise = null;
       scheduleModelCatalogRefresh();
     });
     modelCatalogRefreshPromise = task;
@@ -854,8 +665,8 @@ export async function runInjector({
       } catch (error) {
         console.error(`[deepseek-balance] ${error.message}`);
       } finally {
-        markWidgetDataDirty();
-        void requestWidgetUpdate().catch((error) => {
+        widgetSession.markWidgetDataDirty();
+        void widgetSession.requestWidgetUpdate().catch((error) => {
           console.error(`[deepseek-balance] Widget 刷新失败: ${error.message}`);
         });
         scheduleDeepSeekBalanceRefresh();
@@ -864,9 +675,15 @@ export async function runInjector({
   }
 
   function deepSeekBalanceTarget() {
-    const managed = extraModelManager.getViewModel().platforms
-      .find((platform) => platform.preset === "deepseek" && platform.enabled && platform.apiKey);
-    return managed ? { refresh: () => extraModelManager.refreshDeepSeekBalance() } : null;
+    const managed = extraModelManager
+      .getViewModel()
+      .platforms.find(
+        (platform) =>
+          platform.preset === "deepseek" && platform.enabled && platform.apiKey,
+      );
+    return managed
+      ? { refresh: () => extraModelManager.refreshDeepSeekBalance() }
+      : null;
   }
 
   if (once) {
@@ -881,13 +698,14 @@ export async function runInjector({
     scheduleModelCatalogRefresh();
     const balanceTarget = deepSeekBalanceTarget();
     if (balanceTarget) {
-      void balanceTarget.refresh()
+      void balanceTarget
+        .refresh()
         .then(() => {
-          markWidgetDataDirty();
-          return requestWidgetUpdate();
+          widgetSession.markWidgetDataDirty();
+          return widgetSession.requestWidgetUpdate();
         })
         .catch((error) => {
-          markWidgetDataDirty();
+          widgetSession.markWidgetDataDirty();
           console.error(`[deepseek-balance] ${error.message}`);
         });
       scheduleDeepSeekBalanceRefresh();
@@ -895,29 +713,43 @@ export async function runInjector({
   }
   let _loopCount = 0;
   while (!stopped) {
-    if (pendingWidgetReload && !activeAction && activeModelDetections.size === 0 && !restartingCodex && !modelCatalogRefreshPromise) {
+    if (
+      pendingWidgetReload &&
+      !activeAction &&
+      activeModelDetections.size === 0 &&
+      !restartingCodex &&
+      !modelCatalogRefreshPromise
+    ) {
       widgetReloading = true;
       try {
-        await widgetUpdatePromise?.catch(() => {});
+        await widgetSession.widgetUpdatePromise?.catch(() => {});
         const next = pendingWidgetReload;
         pendingWidgetReload = null;
         widget = next.widget;
         appDisplayVersion = `${next.version}.dev`;
-        widgetInstalled = false;
-        lastStaticJson = null;
-        lastTokenUsageSignatures = new Map();
-        lastTokenUsageStatus = null;
-        lastTokenUsageError = null;
-        widgetUpdateRevision = 0;
-        lastWidgetHealthCheckAt = 0;
-        markWidgetDataDirty();
+        widgetSession.widgetInstalled = false;
+        widgetSession.lastStaticJson = null;
+        widgetSession.lastTokenUsageSignatures = new Map();
+        widgetSession.lastTokenUsageStatus = null;
+        widgetSession.lastTokenUsageError = null;
+        widgetSession.widgetUpdateRevision = 0;
+        widgetSession.lastWidgetHealthCheckAt = 0;
+        widgetSession.markWidgetDataDirty();
       } finally {
         widgetReloading = false;
       }
     }
     _loopCount++;
-    debugLog(`[DEBUG] loop#${_loopCount} cdp=${!!cdp} cdp.isConnected=${cdp?.isConnected} restartingCodex=${restartingCodex} hasSeenCodexProcess=${hasSeenCodexProcess} stopped=${stopped} deadline=${Date.now() >= startupDeadline}`);
-    if (launchRecoveryRequested && !activeAction && activeModelDetections.size === 0 && !restartingCodex && !modelCatalogRefreshPromise) {
+    debugLog(
+      `[DEBUG] loop#${_loopCount} cdp=${!!cdp} cdp.isConnected=${cdp?.isConnected} restartingCodex=${restartingCodex} hasSeenCodexProcess=${hasSeenCodexProcess} stopped=${stopped} deadline=${Date.now() >= startupDeadline}`,
+    );
+    if (
+      launchRecoveryRequested &&
+      !activeAction &&
+      activeModelDetections.size === 0 &&
+      !restartingCodex &&
+      !modelCatalogRefreshPromise
+    ) {
       launchRecoveryRequested = false;
       restartingCodex = true;
       try {
@@ -944,13 +776,20 @@ export async function runInjector({
       }
     }
     try {
-      await syncHostHealth();
+      await hostHealthSession.syncHostHealth();
       syncAsyncAccountOperation();
       debugLog(`[DEBUG] loop#${_loopCount} calling connectAndInject...`);
       const injected = await connectAndInject();
       debugLog(`[DEBUG] loop#${_loopCount} injected=${injected}`);
-      if (injected && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
-        const actions = await cdp.evaluate(widget.widgetDrainActionsExpression());
+      if (
+        injected &&
+        !activeAction &&
+        !restartingCodex &&
+        !modelCatalogRefreshPromise
+      ) {
+        const actions = await cdp.evaluate(
+          widget.widgetDrainActionsExpression(),
+        );
         if (Array.isArray(actions) && actions.length > 0) {
           activeAction = (async () => {
             await modelCatalogRefreshPromise;
@@ -961,15 +800,19 @@ export async function runInjector({
               }
               const pending = startAction(action).finally(() => {
                 activeModelDetections.delete(pending);
-                markWidgetDataDirty();
-                void requestWidgetUpdate().catch(error => console.error(`[widget] 检测后刷新失败: ${error.message}`));
+                widgetSession.markWidgetDataDirty();
+                void widgetSession
+                  .requestWidgetUpdate()
+                  .catch((error) =>
+                    console.error(`[widget] 检测后刷新失败: ${error.message}`),
+                  );
               });
               activeModelDetections.add(pending);
             }
           })().finally(() => {
             activeAction = null;
-            markWidgetDataDirty();
-            void requestWidgetUpdate().catch((error) => {
+            widgetSession.markWidgetDataDirty();
+            void widgetSession.requestWidgetUpdate().catch((error) => {
               console.error(`[widget] 操作后刷新失败: ${error.message}`);
             });
           });
@@ -981,7 +824,10 @@ export async function runInjector({
       const message = error?.message ?? String(error);
       const now = Date.now();
       debugLog(`[DEBUG] loop#${_loopCount} catch: ${message}`);
-      if (message !== lastInjectionError || now - lastInjectionErrorAt >= INJECTION_ERROR_LOG_INTERVAL_MS) {
+      if (
+        message !== lastInjectionError ||
+        now - lastInjectionErrorAt >= INJECTION_ERROR_LOG_INTERVAL_MS
+      ) {
         console.error(`[injector] 连接或注入失败: ${message}`);
         lastInjectionError = message;
         lastInjectionErrorAt = now;
@@ -989,9 +835,9 @@ export async function runInjector({
       cdp?.close();
       cdp = null;
       targetId = null;
-      widgetInstalled = false;
-      lastWidgetHealthCheckAt = 0;
-      markWidgetDataDirty();
+      widgetSession.widgetInstalled = false;
+      widgetSession.lastWidgetHealthCheckAt = 0;
+      widgetSession.markWidgetDataDirty();
     }
     await delay(TARGET_POLL_MS);
   }
@@ -1009,14 +855,6 @@ export async function runInjector({
     console.error(`[token-usage] 保存缓存失败: ${error.message}`);
   });
   await modelRouterClosePromise;
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function debugLog(message) {
-  if (DEBUG_LOGGING) console.log(message);
 }
 
 export { DEFAULT_PORT };

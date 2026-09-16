@@ -31,12 +31,12 @@
 | E01 | [account-manager.test.mjs](../test/account-manager.test.mjs)，12 | 凭据格式、额度请求、刷新、工作区匹配、凭据写回 | OAuth 浏览器流程、Keychain 交接和桌面切换恢复已完成 |
 | E02 | [account-store.test.mjs](../test/account-store.test.mjs)，5 | 加密、篡改检测、持久化、迁移、唤醒时间 | 全部写入失败和并发操作场景已覆盖 |
 | E03 | [account-wakeup.test.mjs](../test/account-wakeup.test.mjs)，5 | 时间设置、幂等占位、休眠跳过、异常恢复、刷新失败 | 官方唤醒子进程的异常路径已验证 |
-| E04 | [model-configuration.test.mjs](../test/model-configuration.test.mjs)，13；[model-capability-probe.test.mjs](../test/model-capability-probe.test.mjs)，23 | DeepSeek 预设及实时模型列表、额外模型、自动协议和能力探测、推理强度与推理模式工具选择、目录、上下文、外部配置保护、Swift shim 参数 | 真实官方参数解析、完整启动决策和模型功能已验证；能力探测使用受控供应商响应，目录探测和 shim 使用假 CLI |
-| E05 | [model-router.test.mjs](../test/model-router.test.mjs)，32 | HTTP/WS、辅助与未知 API、鉴权、路由、能力拒绝、重连、usage | 工具已执行、官方任务已压缩或主入口已完成任务；上游为本地模拟服务 |
+| E04 | `model-configuration*.test.mjs`；`model-capability-probe*.test.mjs`（[功能地图](code-map.md)） | DeepSeek 预设及实时模型列表、额外模型、自动协议和能力探测、推理强度与推理模式工具选择、目录、上下文、外部配置保护、Swift shim 参数 | 真实官方参数解析、完整启动决策和模型功能已验证；能力探测使用受控供应商响应，目录探测和 shim 使用假 CLI |
+| E05 | `model-router*.test.mjs`（[功能地图](code-map.md)） | HTTP/WS、辅助与未知 API、鉴权、路由、能力拒绝、重连、usage | 工具已执行、官方任务已压缩或主入口已完成任务；上游为本地模拟服务 |
 | E06 | [app-server-relay.test.mjs](../test/app-server-relay.test.mjs)，1 | 模型列表、新任务、新轮次、环境与 usage 的一条组合流程 | 所有 RPC 和任务生命周期已覆盖；上游是假 CLI，Windows 跳过该用例 |
 | E07 | [chat-compat-proxy.test.mjs](../test/chat-compat-proxy.test.mjs)，12；[responses-tool-adapter.test.mjs](../test/responses-tool-adapter.test.mjs)，5 | Responses 选择性工具适配、文本/图片 Chat 回退、工具历史关联、SSE 截断、原生透传 | 真实 Codex 执行工具及供应商全部能力已验证 |
 | E08 | [runtime-contracts.test.mjs](../test/runtime-contracts.test.mjs)，11 | CDP、就绪、进程识别、单实例协议、Widget 数据桥、格式计算和工具列表 | 完整 launcher/injector 生命周期、真实页面挂载、窗口点击已验证 |
-| E09 | [token-usage.test.mjs](../test/token-usage.test.mjs)，13 | 去重、压缩计量、并发任务、子任务、缓存、Worker 回退、工具账本关联 | 压缩、子智能体和这些工具实际可用；此处测试的是记录解析 |
+| E09 | `token-usage*.test.mjs`（[功能地图](code-map.md)） | 去重、压缩计量、并发任务、子任务、缓存、Worker 回退、工具账本关联 | 压缩、子智能体和这些工具实际可用；此处测试的是记录解析 |
 | E10 | [tool-executions.test.mjs](../test/tool-executions.test.mjs)，6 | 原生工具类型识别、同名调用、时间归属、脱敏摘要、命令与完整列表投影 | 清单中的 web、MCP、图像和协作工具都执行成功 |
 | E11 | [token-pricing.test.mjs](../test/token-pricing.test.mjs)，5 | 价格、长上下文分层、未知价格、汇率缓存 | 估价等于 OAuth 额度或实际账单 |
 | E12 | [current-account-smoke.test.mjs](../live-tests/current-account-smoke.test.mjs)，1 | 当前 OAuth 账号通过独立官方唤醒进程回复 OK | 日常主入口、shim/relay、Router、桌面工具和完整任务可用 |

@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-import { readDevRuntimeIdentity } from "../src/dev-runtime.mjs";
+import { loadDevWidget, readDevRuntimeIdentity } from "../src/dev-runtime.mjs";
 import { acquireSingleInstance, closeSingleInstance } from "../src/single-instance.mjs";
 import { useTempDir } from "./helpers.mjs";
 
@@ -15,11 +15,14 @@ async function writeManifest(root, version, ws = "8.21.3") {
 test("开发版指纹允许页面与发布版本更新，后端、依赖或来源变化必须重新加载进程", async (t) => {
   const root = await useTempDir(t);
   await mkdir(join(root, "src"));
+  await mkdir(join(root, "src", "widget"));
   await writeFile(join(root, "src", "widget.mjs"), "widget-v1");
+  await writeFile(join(root, "src", "widget", "models.mjs"), "models-v1");
   await writeFile(join(root, "src", "model-router.mjs"), "router-v1");
   await writeManifest(root, "1.0.0");
   const original = await readDevRuntimeIdentity(root);
   await writeFile(join(root, "src", "widget.mjs"), "widget-v2");
+  await writeFile(join(root, "src", "widget", "models.mjs"), "models-v2");
   await writeManifest(root, "1.0.1");
   assert.equal(await readDevRuntimeIdentity(root), original);
   await writeFile(join(root, "src", "model-router.mjs"), "router-v2");
@@ -33,6 +36,27 @@ test("开发版指纹允许页面与发布版本更新，后端、依赖或来�
   await writeFile(join(other, "src", "model-router.mjs"), "router-v1");
   await writeManifest(other, "1.0.1");
   assert.notEqual(await readDevRuntimeIdentity(other), original);
+});
+
+test("开发版子模块更新重新加载整个页面依赖，入口不变也能取得新实现", async (t) => {
+  const root = await useTempDir(t);
+  const directory = join(root, "src", "widget");
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(root, "src", "widget.mjs"), `
+    import { text } from "./widget/models.mjs";
+    export const WIDGET_RUNTIME_VERSION = 1;
+    export const widgetInstallExpression = () => text;
+    export const widgetDrainActionsExpression = () => "[]";
+    export const widgetRuntimeVersionExpression = () => "1";
+    export const widgetUpdateExpressionJson = () => "void 0";
+    export const widgetTokenUsageDeltaUpdateExpressionJson = () => "void 0";
+  `);
+  await writeFile(join(directory, "models.mjs"), 'export const text = "first";');
+  const first = await loadDevWidget(root);
+  await writeFile(join(directory, "models.mjs"), 'export const text = "second";');
+  const second = await loadDevWidget(root);
+  assert.equal(first.widgetInstallExpression(), "first");
+  assert.equal(second.widgetInstallExpression(), "second");
 });
 
 test("开发版仅页面更新保留单实例进程，页面更新失败也不触发接管", async (t) => {

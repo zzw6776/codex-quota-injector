@@ -44,6 +44,12 @@
       ],
       "free": [
         "test/model-configuration.test.mjs",
+        "test/model-configuration-catalog.test.mjs",
+        "test/model-configuration-context.test.mjs",
+        "test/model-configuration-deepseek-balance.test.mjs",
+        "test/model-configuration-detection-events.test.mjs",
+        "test/model-configuration-detection.test.mjs",
+        "test/model-configuration-official-catalog.test.mjs",
         "runtime-tests/official-workflows.test.mjs"
       ],
       "live": "backend",
@@ -58,10 +64,23 @@
         "test/lifecycle-history-store.test.mjs",
         "test/runtime-contracts.test.mjs",
         "test/model-configuration.test.mjs",
+        "test/model-configuration-catalog.test.mjs",
+        "test/model-configuration-context.test.mjs",
+        "test/model-configuration-deepseek-balance.test.mjs",
+        "test/model-configuration-detection-events.test.mjs",
+        "test/model-configuration-detection.test.mjs",
+        "test/model-configuration-official-catalog.test.mjs",
         "test/host-health.test.mjs",
         "test/app-server-relay.test.mjs",
         "test/lifecycle-host.test.mjs",
-        "runtime-tests/widget-browser.test.mjs"
+        "runtime-tests/widget-browser.test.mjs",
+        "runtime-tests/widget-browser-accounts.test.mjs",
+        "runtime-tests/widget-browser-context-wakeup.test.mjs",
+        "runtime-tests/widget-browser-deepseek.test.mjs",
+        "runtime-tests/widget-browser-layout.test.mjs",
+        "runtime-tests/widget-browser-model-detection.test.mjs",
+        "runtime-tests/widget-browser-model-forms.test.mjs",
+        "runtime-tests/widget-browser-navigation.test.mjs"
       ],
       "note": "就绪、失效状态与参数契约；codex_app 启动通知、状态列表、超时、必需工具、状态所有权和 UI 降级均有免费回归；生命周期回归复现重复 ordinal、缺失回合终态和分页投影停滞，验证对话内容不变、目标任务定向重建及数据库备份；实际客户端启动恢复随 LCH-01 处理。"
     },
@@ -73,6 +92,16 @@
       ],
       "free": [
         "test/model-router.test.mjs",
+        "test/model-router-auxiliary.test.mjs",
+        "test/model-router-capabilities.test.mjs",
+        "test/model-router-compression.test.mjs",
+        "test/model-router-delegation.test.mjs",
+        "test/model-router-diagnostics.test.mjs",
+        "test/model-router-http.test.mjs",
+        "test/model-router-observation.test.mjs",
+        "test/model-router-ownership.test.mjs",
+        "test/model-router-websocket-errors.test.mjs",
+        "test/model-router-websocket.test.mjs",
         "test/model-router-recovery.test.mjs",
         "test/chat-protocol-tools.test.mjs",
         "runtime-tests/official-workflows.test.mjs",
@@ -109,6 +138,16 @@
       ],
       "free": [
         "test/model-router.test.mjs",
+        "test/model-router-auxiliary.test.mjs",
+        "test/model-router-capabilities.test.mjs",
+        "test/model-router-compression.test.mjs",
+        "test/model-router-delegation.test.mjs",
+        "test/model-router-diagnostics.test.mjs",
+        "test/model-router-http.test.mjs",
+        "test/model-router-observation.test.mjs",
+        "test/model-router-ownership.test.mjs",
+        "test/model-router-websocket-errors.test.mjs",
+        "test/model-router-websocket.test.mjs",
         "test/model-router-recovery.test.mjs",
         "test/chat-tool-contracts.test.mjs",
         "test/chat-protocol-tools.test.mjs",
@@ -126,7 +165,18 @@
         "runtime-tests/official-context.test.mjs",
         "runtime-tests/official-task-state.test.mjs",
         "runtime-tests/deepseek-history.test.mjs",
-        "test/model-router.test.mjs"
+        "test/model-router.test.mjs",
+        "test/model-router-auxiliary.test.mjs",
+        "test/model-router-capabilities.test.mjs",
+        "test/model-router-compression.test.mjs",
+        "test/model-router-delegation.test.mjs",
+        "test/model-router-diagnostics.test.mjs",
+        "test/model-router-http.test.mjs",
+        "test/model-router-observation.test.mjs",
+        "test/model-router-ownership.test.mjs",
+        "test/model-router-recovery.test.mjs",
+        "test/model-router-websocket-errors.test.mjs",
+        "test/model-router-websocket.test.mjs"
       ],
       "live": "backend",
       "note": "官方模型覆盖远程手动及自动压缩，DeepSeek/第三方供应商覆盖本地摘要压缩；实际模型是否保留语义由 B 判定。"
@@ -258,7 +308,11 @@
         "runtime-tests/official-context.test.mjs",
         "runtime-tests/official-workflows.test.mjs",
         "test/chat-tool-contracts.test.mjs",
-        "test/token-usage.test.mjs"
+        "test/token-usage.test.mjs",
+        "test/token-usage-cache.test.mjs",
+        "test/token-usage-generation.test.mjs",
+        "test/token-usage-rollout.test.mjs",
+        "test/token-usage-subagents.test.mjs"
       ],
       "live": "backend+host",
       "note": "有效图片/附件、大文件、阶段及流式终态；真实识图仅运行于声明支持图片的模型。"
@@ -289,7 +343,14 @@
         "test/account-oauth.test.mjs",
         "test/account-transfer.test.mjs",
         "test/account-reliability.test.mjs",
-        "runtime-tests/widget-browser.test.mjs"
+        "runtime-tests/widget-browser.test.mjs",
+        "runtime-tests/widget-browser-accounts.test.mjs",
+        "runtime-tests/widget-browser-context-wakeup.test.mjs",
+        "runtime-tests/widget-browser-deepseek.test.mjs",
+        "runtime-tests/widget-browser-layout.test.mjs",
+        "runtime-tests/widget-browser-model-detection.test.mjs",
+        "runtime-tests/widget-browser-model-forms.test.mjs",
+        "runtime-tests/widget-browser-navigation.test.mjs"
       ],
       "live": "backend+host",
       "note": "测试凭据的 OAuth/取消/超时、临时迁移、完整转移、恢复、加密、并发、损坏和写失败；不操作真实 Keychain，不为测试购买、兑换或发送邮件。"
@@ -302,7 +363,14 @@
       "free": [
         "test/account-wakeup.test.mjs",
         "test/wakeup-client.test.mjs",
-        "runtime-tests/widget-browser.test.mjs"
+        "runtime-tests/widget-browser.test.mjs",
+        "runtime-tests/widget-browser-accounts.test.mjs",
+        "runtime-tests/widget-browser-context-wakeup.test.mjs",
+        "runtime-tests/widget-browser-deepseek.test.mjs",
+        "runtime-tests/widget-browser-layout.test.mjs",
+        "runtime-tests/widget-browser-model-detection.test.mjs",
+        "runtime-tests/widget-browser-model-forms.test.mjs",
+        "runtime-tests/widget-browser-navigation.test.mjs"
       ],
       "live": "wakeup",
       "note": "免费状态机和真实子进程控制、超时、刷新/最低价选择；真实唤醒单独授权，独立辅助链不能替代主入口。"
@@ -316,6 +384,10 @@
       "free": [
         "test/desktop-host-evidence.test.mjs",
         "test/token-usage.test.mjs",
+        "test/token-usage-cache.test.mjs",
+        "test/token-usage-generation.test.mjs",
+        "test/token-usage-rollout.test.mjs",
+        "test/token-usage-subagents.test.mjs",
         "test/tool-executions.test.mjs",
         "test/token-pricing.test.mjs",
         "test/generation-speed.test.mjs",
@@ -335,6 +407,13 @@
       ],
       "free": [
         "runtime-tests/widget-browser.test.mjs",
+        "runtime-tests/widget-browser-accounts.test.mjs",
+        "runtime-tests/widget-browser-context-wakeup.test.mjs",
+        "runtime-tests/widget-browser-deepseek.test.mjs",
+        "runtime-tests/widget-browser-layout.test.mjs",
+        "runtime-tests/widget-browser-model-detection.test.mjs",
+        "runtime-tests/widget-browser-model-forms.test.mjs",
+        "runtime-tests/widget-browser-navigation.test.mjs",
         "runtime-tests/browser-host.test.mjs",
         "test/runtime-contracts.test.mjs"
       ],
