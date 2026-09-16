@@ -56,7 +56,7 @@ test("WSL 报告不能覆盖失败退出、遗漏阶段或复用其他源码的�
   assert.deepEqual(await readWslTestManifest(path, options), passed);
 });
 
-test("[A HAR-01] 平台契约必须显式标记，标题提到其他平台仍属于公共逻辑", () => {
+test("[HAR-01] 平台契约必须显式标记，标题提到其他平台仍属于公共逻辑", () => {
   const source = [
     'test("Windows 与 WSL 结果不能互相继承", () => {});',
     `test("${CONTRACT_PLATFORM_MARKERS[MACOS_NATIVE]} macOS 原生进程", () => {});`,
@@ -73,7 +73,7 @@ test("[A HAR-01] 平台契约必须显式标记，标题提到其他平台仍属
   assert.equal(commonPattern.test("test/file.test.mjs\n[platform:windows-native] Windows 原生进程"), false);
 });
 
-test("[A HAR-01 HAR-04] Windows 与 WSL 是独立运行环境，公共证据只复用一次", async () => {
+test("[HAR-01 HAR-04] Windows 与 WSL 是独立运行环境，公共证据只复用一次", async () => {
   assert.deepEqual(runtimeTargetsForPlatform("darwin"), [MACOS_NATIVE]);
   assert.deepEqual(runtimeTargetsForPlatform("win32"), [WINDOWS_NATIVE, WSL_NATIVE]);
   assert.equal(await currentRuntimeTarget({ platform: "win32", windowsWslEnabled: false }), WINDOWS_NATIVE);
@@ -94,11 +94,11 @@ test("[A HAR-01 HAR-04] Windows 与 WSL 是独立运行环境，公共证据只�
   }), /一次只能选择一个运行环境/);
 });
 
-test("[A HAR-04 OBS-03] 总报告只汇总每个执行阶段的最终 summary", () => {
+test("[HAR-04 OBS-03] 总报告只汇总每个执行阶段的最终 summary", () => {
   const events = [
-    { type: "test:summary", component: "A-common", stage: "contracts", counts: { tests: 2, passed: 2 }, duration_ms: 2 },
-    { type: "test:summary", component: "A-common", stage: "contracts", counts: { tests: 5, passed: 5 }, duration_ms: 5 },
-    { type: "test:summary", component: "A-common", stage: "browser", counts: { tests: 3, passed: 3 }, duration_ms: 7 },
+    { type: "test:summary", component: "free-common", stage: "contracts", counts: { tests: 2, passed: 2 }, duration_ms: 2 },
+    { type: "test:summary", component: "free-common", stage: "contracts", counts: { tests: 5, passed: 5 }, duration_ms: 5 },
+    { type: "test:summary", component: "free-common", stage: "browser", counts: { tests: 3, passed: 3 }, duration_ms: 7 },
   ];
   assert.deepEqual(summarizeFinalStageEvents(events), {
     counts: { tests: 8, passed: 8 },
@@ -106,7 +106,7 @@ test("[A HAR-04 OBS-03] 总报告只汇总每个执行阶段的最终 summary", 
   });
 });
 
-test("[A HAR-04] 当前环境通过与全部支持环境通过分别判定，结果不能互相继承", () => {
+test("[HAR-04] 当前环境通过与全部支持环境通过分别判定，结果不能互相继承", () => {
   const components = [
     { id: COMMON_COMPONENT, status: "passed" },
     { id: runtimeComponentId(WINDOWS_NATIVE), status: "passed" },

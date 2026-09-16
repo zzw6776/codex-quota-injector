@@ -3,18 +3,17 @@ import { request as requestHttps } from "node:https";
 import { randomBytes, randomUUID } from "node:crypto";
 import WebSocket, { WebSocketServer } from "ws";
 import { startModelCompatibilityProxy } from "./chat-compat-proxy.mjs";
-import { GENERATION_METRICS_VERSION } from "./relay-contract.mjs";
 import { ResponsesHistory } from "./responses-history.mjs";
-import { MODEL_ROUTER_PROVIDER_ID, MODEL_ROUTER_TOKEN_ENV, MODEL_ROUTER_TOKEN_HEADER, OPENAI_API_BASE_URL, CHATGPT_CODEX_BASE_URL, MAX_REQUEST_BYTES, THREAD_ROUTE_TTL_MS, MAX_THREAD_ROUTES, MAX_TURN_USAGE, MAX_PENDING_TOOL_BATCHES, DEFAULT_ENDPOINT_REUSE_WAIT_MS, ENDPOINT_REUSE_RETRY_MS, DEFAULT_NETWORK_PROBE_INTERVAL_MS, DEFAULT_NETWORK_PROBE_TIMEOUT_MS, httpError, nonEmptyString } from "./model-router/contract.mjs";
+import { MODEL_ROUTER_PROVIDER_ID, MODEL_ROUTER_TOKEN_ENV, MODEL_ROUTER_TOKEN_HEADER, OPENAI_API_BASE_URL, CHATGPT_CODEX_BASE_URL, MAX_REQUEST_BYTES, DEFAULT_ENDPOINT_REUSE_WAIT_MS, ENDPOINT_REUSE_RETRY_MS, DEFAULT_NETWORK_PROBE_INTERVAL_MS, DEFAULT_NETWORK_PROBE_TIMEOUT_MS, httpError, nonEmptyString } from "./model-router/contract.mjs";
 import { normalizeRoutingConfiguration, buildRoutingSnapshot, officialTarget } from "./model-router/configuration.mjs";
 import { prepareCustomRequest, customRequestShape, requestToolInventory } from "./model-router/request-policy.mjs";
 import { rawRequestHeaders, upstreamWebSocketHeaders, responseHeaders, authenticatedRoute, isApiPath, isResponsesPath, isModelsPath, apiTargetUrl, readRequestBody, parseRequestJson, writeError, rejectUpgrade, listen, delay, closeServer, closeWebSocketServer, forwardModelResponse } from "./model-router/http-transport.mjs";
-import { requestThreadId, turnIdFromHeaders, turnIdFromMetadata, requestStartFromMetadata, containsCallReference, collectCallReferenceIds, pendingToolCallKey, pendingToolBatchKey } from "./model-router/request-metadata.mjs";
+import { requestThreadId, turnIdFromHeaders, turnIdFromMetadata, requestStartFromMetadata, containsCallReference } from "./model-router/request-metadata.mjs";
 import { observeResponse, createResponseObservation } from "./model-router/response-observation.mjs";
 import { createWebSocketObservationQueue, ignoredResponseObservation } from "./model-router/websocket-observation.mjs";
 import { startHttpWebSocketBridge } from "./model-router/websocket-bridge.mjs";
 import { sendWebSocketPrewarm, sendWebSocketFailure, sendWebSocketData, webSocketProtocols, parseWebSocketJson, normalizedStreamId, webSocketLane, webSocketTargetUrl, validWebSocketCloseCode, proxyAuxiliaryWebSocket } from "./model-router/websocket-transport.mjs";
-import { emptyUsage, addUsage, createUsageEventWriter } from "./model-router/usage.mjs";
+import { RouterRequestLedger } from "./model-router/request-ledger.mjs";
 import { RouterNetworkMonitor } from "./model-router/network-monitor.mjs";
 
 export class ModelRouterManager {
@@ -38,13 +37,8 @@ export class ModelRouterManager {
     this.snapshot = null;
     this.snapshotSignature = null;
     this.chatCompatibilityProxy = null;
-    this.usageWriter = null;
-    this.usageEventPath = null;
-    this.threadRoutes = new Map();
-    this.turnUsage = new Map();
-    this.pendingToolBatches = new Map();
-    this.toolCallBatchKeys = new Map();
     this.networkMonitor = new RouterNetworkMonitor({ networkProbeIntervalMs, networkProbeTimeoutMs });
+    this.requestLedger = new RouterRequestLedger(this.networkMonitor);
 
     this.closed = false;
     this.officialBaseUrls = {
@@ -84,7 +78,7 @@ export class ModelRouterManager {
 
     this.#reuseIdentity(reusableIdentity);
     await this.#ensureServer();
-    await this.#ensureUsageWriter(usageEventPath);
+    await this.requestLedger.ensureUsageWriter(usageEventPath);
     const snapshotSignature = `${normalized.signature}:observe-official=${Boolean(observeOfficial)}`;
     if (snapshotSignature !== this.snapshotSignature) {
       const replacingSnapshot = this.snapshotSignature !== null;
@@ -93,7 +87,7 @@ export class ModelRouterManager {
       this.chatCompatibilityProxy = nextCompatibilityProxy;
       this.snapshot = buildRoutingSnapshot(normalized, nextCompatibilityProxy);
       this.snapshotSignature = snapshotSignature;
-      this.threadRoutes.clear();
+      this.requestLedger.clearRoutes();
       if (replacingSnapshot) {
         this.#closeWebSocketConnections(1012, "模型路由配置已更新");
       }
@@ -125,10 +119,7 @@ export class ModelRouterManager {
   async disable() {
     this.snapshot = null;
     this.snapshotSignature = null;
-    this.threadRoutes.clear();
-    this.turnUsage.clear();
-    this.pendingToolBatches.clear();
-    this.toolCallBatchKeys.clear();
+    this.requestLedger.reset();
     this.networkMonitor.stopAllNetworkMonitors();
     this.#closeWebSocketConnections(1012, "模型路由配置已更新");
     const compatibilityProxy = this.chatCompatibilityProxy;
@@ -142,14 +133,11 @@ export class ModelRouterManager {
     const server = this.server;
     const webSocketServer = this.webSocketServer;
     const compatibilityProxy = this.chatCompatibilityProxy;
-    const usageWriter = this.usageWriter;
     this.server = null;
     this.webSocketServer = null;
     this.chatCompatibilityProxy = null;
-    this.usageWriter = null;
     this.snapshot = null;
-    this.pendingToolBatches.clear();
-    this.toolCallBatchKeys.clear();
+    const ledgerClose = this.requestLedger.close();
     this.networkMonitor.stopAllNetworkMonitors({ notify: false });
     this.networkMonitor.close();
     this.#closeWebSocketConnections(1001, "模型路由器已关闭");
@@ -158,7 +146,7 @@ export class ModelRouterManager {
       server ? closeServer(server) : Promise.resolve(),
       webSocketServer ? closeWebSocketServer(webSocketServer) : Promise.resolve(),
       compatibilityProxy ? compatibilityProxy.close() : Promise.resolve(),
-      usageWriter ? usageWriter.close() : Promise.resolve(),
+      ledgerClose,
     ]);
   }
 
@@ -255,15 +243,6 @@ export class ModelRouterManager {
     this.instanceId = instanceId;
   }
 
-  async #ensureUsageWriter(path) {
-    const normalizedPath = String(path ?? "").trim() || null;
-    if (normalizedPath === this.usageEventPath && this.usageWriter) return;
-    const previousWriter = this.usageWriter;
-    this.usageEventPath = normalizedPath;
-    this.usageWriter = createUsageEventWriter(normalizedPath);
-    if (previousWriter) await previousWriter.close();
-  }
-
   async #routeRequest(request, response) {
     try {
       const route = authenticatedRoute(request, this.token);
@@ -297,7 +276,7 @@ export class ModelRouterManager {
         );
         let routeClaim = null;
         try {
-          routeClaim = this.#activateRequestContext(context);
+          routeClaim = this.requestLedger.activateRequestContext(context);
           const accepted = await this.#forwardResponse(
             request,
             response,
@@ -306,10 +285,10 @@ export class ModelRouterManager {
             context.target,
             context,
           );
-          this.#settleThreadRoute(routeClaim, accepted);
+          this.requestLedger.settleThreadRoute(routeClaim, accepted);
           routeClaim = null;
         } finally {
-          this.#settleThreadRoute(routeClaim, false);
+          this.requestLedger.settleThreadRoute(routeClaim, false);
         }
         return;
       }
@@ -358,7 +337,7 @@ export class ModelRouterManager {
           observeResponse(upstreamResponse, {
             requestStartedAt: observationContext.requestStartedAt,
             onUsage: (usage, responseId) =>
-              this.#recordUsage(observationContext, usage, responseId),
+              this.requestLedger.recordUsage(observationContext, usage, responseId),
             onToolCall: () => {},
             onGeneration: () => {},
           });
@@ -390,7 +369,7 @@ export class ModelRouterManager {
         officialTarget(snapshot, headers, this.officialBaseUrls);
     }
     const threadId = requestThreadId(body, headers);
-    const remembered = threadId ? this.threadRoutes.get(threadId) : null;
+    const remembered = threadId ? this.requestLedger.rememberedRoute(threadId) : null;
     return remembered
       ? snapshot.targets.get(remembered.model) ??
         officialTarget(snapshot, headers, this.officialBaseUrls)
@@ -406,7 +385,7 @@ export class ModelRouterManager {
     const turnId = nonEmptyString(metadata?.turn_id) ??
       turnIdFromMetadata(metadata) ??
       turnIdFromHeaders(headers);
-    const remembered = threadId ? this.threadRoutes.get(threadId) : null;
+    const remembered = threadId ? this.requestLedger.rememberedRoute(threadId) : null;
     const model = nonEmptyString(body.model) ?? nonEmptyString(remembered?.model);
     if (!threadId || !turnId || !model) return null;
     return {
@@ -533,16 +512,16 @@ export class ModelRouterManager {
         const observation = createResponseObservation({
           requestStartedAt: context.requestStartedAt,
           requireCompleted: true,
-          onUsage: (usage, responseId) => this.#recordUsage(context, usage, responseId),
-          onToolCall: (call) => this.#recordPendingToolCall(context, call),
-          onGeneration: (generation) => this.#recordGeneration(context, {
+          onUsage: (usage, responseId) => this.requestLedger.recordUsage(context, usage, responseId),
+          onToolCall: (call) => this.requestLedger.recordPendingToolCall(context, call),
+          onGeneration: (generation) => this.requestLedger.recordGeneration(context, {
             ...generation,
             requestId: context.requestId,
           }),
         });
-        let routeClaim = this.#activateRequestContext(context);
+        let routeClaim = this.requestLedger.activateRequestContext(context);
         const settleRoute = (accepted) => {
-          this.#settleThreadRoute(routeClaim, accepted);
+          this.requestLedger.settleThreadRoute(routeClaim, accepted);
           routeClaim = null;
         };
         const entry = observations.add(streamId, observation, {
@@ -572,7 +551,7 @@ export class ModelRouterManager {
       let bridge;
       let routeClaim = null;
       const settleRoute = (accepted) => {
-        this.#settleThreadRoute(routeClaim, accepted);
+        this.requestLedger.settleThreadRoute(routeClaim, accepted);
         routeClaim = null;
       };
       const expanded = customHistory.expand(body, context.target.routeKey);
@@ -585,9 +564,9 @@ export class ModelRouterManager {
           target: context.target,
           context,
           streamId,
-          onUsage: (usage, responseId) => this.#recordUsage(context, usage, responseId),
-          onToolCall: (call) => this.#recordPendingToolCall(context, call),
-          onGeneration: (generation) => this.#recordGeneration(context, {
+          onUsage: (usage, responseId) => this.requestLedger.recordUsage(context, usage, responseId),
+          onToolCall: (call) => this.requestLedger.recordPendingToolCall(context, call),
+          onGeneration: (generation) => this.requestLedger.recordGeneration(context, {
             ...generation,
             requestId: context.requestId,
           }),
@@ -598,7 +577,7 @@ export class ModelRouterManager {
             routeKey: context.target.routeKey,
             shape: structuredClone(shape),
           }),
-          onPrepared: () => { routeClaim = this.#activateRequestContext(context); },
+          onPrepared: () => { routeClaim = this.requestLedger.activateRequestContext(context); },
           onAccepted: () => settleRoute(true),
           onDone: () => {
             settleRoute(false);
@@ -684,281 +663,14 @@ export class ModelRouterManager {
     };
   }
 
-  #activateRequestContext(context) {
-    if (!context.generates) return null;
-    const routeClaim = this.#reserveThreadRoute(context);
-    try {
-      this.#recordCompletedToolCalls(
-        context.input,
-        context.threadId,
-        context.requestStartedAt,
-      );
-      const {
-        threadId,
-        turnId,
-        model,
-        rolloutUsageFallback,
-        networkLatencySupported,
-        networkConnectionId,
-        networkLatency,
-      } = context;
-      if (turnId) {
-        this.usageWriter?.write({
-          type: "request-tool-inventory",
-          threadId,
-          turnId,
-          model,
-          modelSource: "turn-request",
-          tools: context.toolInventory,
-        });
-        this.usageWriter?.write({
-          type: "thread-active",
-          threadId,
-          model,
-          modelSource: "turn-request",
-          rolloutUsageFallback,
-        });
-        this.usageWriter?.write({
-          type: "turn-started",
-          threadId,
-          turnId,
-          model,
-          modelSource: "turn-request",
-          rolloutUsageFallback,
-          generationMetricsVersion: GENERATION_METRICS_VERSION,
-          networkLatencySupported,
-          networkConnectionId,
-          networkLatency,
-        });
-      }
-      return routeClaim;
-    } catch (error) {
-      this.#settleThreadRoute(routeClaim, false);
-      throw error;
-    }
-  }
-
-  #reserveThreadRoute({ threadId, target, model, requestId }) {
-    if (!threadId) return;
-    const routeKey = target.routeKey;
-    const previous = this.threadRoutes.get(threadId);
-    if (previous && previous.routeKey !== routeKey) {
-      throw httpError(
-        409,
-        `同一任务不能切换模型供应商（${previous.model} → ${model}）；请新建任务后再选择目标模型`,
-      );
-    }
-    const claim = { threadId, routeKey, model, requestId };
-    const route = previous ?? {
-      routeKey,
-      model,
-      confirmed: false,
-      pending: new Map(),
-      updatedAt: Date.now(),
-    };
-    route.pending.set(requestId, { model, updatedAt: Date.now() });
-    if (!route.confirmed) route.model = model;
-    route.updatedAt = Date.now();
-    this.threadRoutes.delete(threadId);
-    this.threadRoutes.set(threadId, route);
-    this.#pruneState();
-    return claim;
-  }
-
-  #settleThreadRoute(claim, accepted) {
-    if (!claim?.threadId) return;
-    const route = this.threadRoutes.get(claim.threadId);
-    if (!route || route.routeKey !== claim.routeKey ||
-      !route.pending.has(claim.requestId)) return;
-    route.pending.delete(claim.requestId);
-    if (accepted) {
-      route.confirmed = true;
-      route.model = claim.model;
-      route.updatedAt = Date.now();
-      this.threadRoutes.delete(claim.threadId);
-      this.threadRoutes.set(claim.threadId, route);
-      this.#pruneState();
-      return;
-    }
-    if (route.confirmed) return;
-    if (route.pending.size === 0) {
-      this.threadRoutes.delete(claim.threadId);
-      return;
-    }
-    route.model = [...route.pending.values()].at(-1).model;
-  }
-
-  #pruneState() {
-    const cutoff = Date.now() - THREAD_ROUTE_TTL_MS;
-    for (const [threadId, route] of this.threadRoutes) {
-      if (route.updatedAt >= cutoff && this.threadRoutes.size <= MAX_THREAD_ROUTES) break;
-      this.threadRoutes.delete(threadId);
-    }
-    while (this.turnUsage.size > MAX_TURN_USAGE) {
-      this.turnUsage.delete(this.turnUsage.keys().next().value);
-    }
-    for (const [key, batch] of this.pendingToolBatches) {
-      if (batch.readyAt >= cutoff &&
-        this.pendingToolBatches.size <= MAX_PENDING_TOOL_BATCHES) break;
-      this.#deletePendingToolBatch(key, batch);
-    }
-  }
-
   async #forwardResponse(request, response, targetUrl, payload, target, context) {
     return forwardModelResponse(request, response, targetUrl, payload, target, context, {
-      onUsage: (usage, responseId) => this.#recordUsage(context, usage, responseId),
-      onToolCall: call => this.#recordPendingToolCall(context, call),
-      onGeneration: generation => this.#recordGeneration(context, { ...generation, requestId: context.requestId }),
+      onUsage: (usage, responseId) => this.requestLedger.recordUsage(context, usage, responseId),
+      onToolCall: call => this.requestLedger.recordPendingToolCall(context, call),
+      onGeneration: generation => this.requestLedger.recordGeneration(context, { ...generation, requestId: context.requestId }),
     });
   }
 
-  #recordUsage(context, usage, responseId = null) {
-    if (!context.threadId || !context.turnId) return;
-    // Official Codex writes the same response usage to rollout. Keep that
-    // response-level ledger authoritative; TokenUsageManager pairs and ignores
-    // the legacy token_count summary that follows it.
-    if (context.rolloutUsageFallback) return;
-    const key = `${context.threadId}\u0000${context.turnId}`;
-    const total = this.turnUsage.get(key) ?? emptyUsage();
-    addUsage(total, usage);
-    this.turnUsage.delete(key);
-    this.turnUsage.set(key, total);
-    const usageResponseId = nonEmptyString(responseId) ??
-      `router-request:${context.requestId}`;
-    this.usageWriter?.write({
-      type: "usage",
-      threadId: context.threadId,
-      turnId: context.turnId,
-      model: context.model,
-      modelSource: "usage",
-      rolloutUsageFallback: context.rolloutUsageFallback,
-      responseId: usageResponseId,
-      tokenUsage: { last: usage, total },
-    });
-    this.#pruneState();
-  }
-
-  #recordGeneration(context, generation) {
-    if (!context.threadId || !context.turnId) return;
-    const networkLatency = context.networkLatencySupported
-      ? this.networkMonitor.nearestNetworkSample(context.networkConnectionId, context.requestStartedAt) ??
-        context.networkLatency
-      : null;
-    this.usageWriter?.write({
-      type: "generation",
-      threadId: context.threadId,
-      turnId: context.turnId,
-      model: context.model,
-      modelSource: "generation",
-      generationMetricsVersion: GENERATION_METRICS_VERSION,
-      generation: {
-        ...generation,
-        responseId: nonEmptyString(generation?.responseId) ??
-          `router-request:${context.requestId}`,
-        followsToolResult: context.followsToolResult,
-        networkLatency,
-      },
-    });
-  }
-
-  #recordPendingToolCall(context, call) {
-    if (!context.threadId || !context.turnId || !call?.referenceId) return;
-    const batchKey = pendingToolBatchKey(context.threadId, context.requestId);
-    const batch = this.pendingToolBatches.get(batchKey) ?? {
-      threadId: context.threadId,
-      turnId: context.turnId,
-      requestId: context.requestId,
-      requestStartedAt: context.requestStartedAt,
-      toolNames: new Set(),
-      calls: new Map(),
-      preparationStartedAt: Number(call.preparationStartedAt) || null,
-      readyAt: Number(call.readyAt) || Date.now(),
-      allReadyAt: Number(call.readyAt) || Date.now(),
-    };
-    const readyAt = Number(call.readyAt) || Date.now();
-    const preparationStartedAt = Number(call.preparationStartedAt) || null;
-    if (preparationStartedAt) {
-      batch.preparationStartedAt = batch.preparationStartedAt
-        ? Math.min(batch.preparationStartedAt, preparationStartedAt)
-        : preparationStartedAt;
-    }
-    batch.readyAt = Math.min(batch.readyAt, readyAt);
-    batch.allReadyAt = Math.max(batch.allReadyAt, readyAt);
-    const toolName = nonEmptyString(call.toolName);
-    if (toolName) batch.toolNames.add(toolName);
-    batch.calls.set(call.referenceId, {
-      referenceId: call.referenceId,
-      toolName,
-      preparationStartedAt,
-      readyAt,
-      completedAt: null,
-    });
-    this.pendingToolBatches.delete(batchKey);
-    this.pendingToolBatches.set(batchKey, batch);
-    this.toolCallBatchKeys.set(
-      pendingToolCallKey(context.threadId, call.referenceId),
-      batchKey,
-    );
-    this.#pruneState();
-  }
-
-  #recordCompletedToolCalls(input, threadId, completedAt) {
-    if (!threadId) return;
-    const completedBatchKeys = new Set();
-    for (const referenceId of collectCallReferenceIds(input)) {
-      const referenceKey = pendingToolCallKey(threadId, referenceId);
-      const batchKey = this.toolCallBatchKeys.get(referenceKey);
-      const batch = batchKey ? this.pendingToolBatches.get(batchKey) : null;
-      if (!batch) continue;
-      const call = batch.calls.get(referenceId);
-      if (call) call.completedAt = completedAt;
-      this.toolCallBatchKeys.delete(referenceKey);
-      if ([...batch.calls.values()].every((value) => value.completedAt != null)) {
-        completedBatchKeys.add(batchKey);
-      }
-    }
-    for (const batchKey of completedBatchKeys) {
-      const batch = this.pendingToolBatches.get(batchKey);
-      if (!batch) continue;
-      const calls = [...batch.calls.values()];
-      const batchCompletedAt = Math.max(...calls.map((call) => call.completedAt), completedAt);
-      this.usageWriter?.write({
-        type: "generation-tool-timing",
-        threadId: batch.threadId,
-        turnId: batch.turnId,
-        modelSource: "generation",
-        generationMetricsVersion: GENERATION_METRICS_VERSION,
-        requestId: batch.requestId,
-        toolTiming: {
-          toolNames: [...batch.toolNames],
-          toolCount: calls.length,
-          readyLatencyMs: Math.max(0, batch.allReadyAt - batch.requestStartedAt),
-          preparationStartLatencyMs: batch.preparationStartedAt
-            ? Math.max(0, batch.preparationStartedAt - batch.requestStartedAt)
-            : null,
-          preparationDurationMs: batch.preparationStartedAt
-            ? Math.max(0, batch.allReadyAt - batch.preparationStartedAt)
-            : null,
-          durationMs: Math.max(0, batchCompletedAt - batch.readyAt),
-          calls: calls.map((call) => ({
-            toolName: call.toolName,
-            preparationDurationMs: call.preparationStartedAt
-              ? Math.max(0, call.readyAt - call.preparationStartedAt)
-              : null,
-            durationMs: Math.max(0, call.completedAt - call.readyAt),
-          })),
-        },
-      });
-      this.#deletePendingToolBatch(batchKey, batch);
-    }
-  }
-
-  #deletePendingToolBatch(batchKey, batch) {
-    this.pendingToolBatches.delete(batchKey);
-    for (const referenceId of batch.calls.keys()) {
-      this.toolCallBatchKeys.delete(pendingToolCallKey(batch.threadId, referenceId));
-    }
-  }
 }
 
 export { MODEL_ROUTER_PROVIDER_ID, MODEL_ROUTER_TOKEN_ENV, MODEL_ROUTER_TOKEN_HEADER } from "./model-router/contract.mjs";

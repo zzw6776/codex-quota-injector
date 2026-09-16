@@ -10,7 +10,7 @@ import {
 import { browserLaunchDirectory, startBrowser } from "./support/browser.mjs";
 import { waitFor } from "../test/helpers.mjs";
 
-test("[A TOOL-06 UI-02 IO-03] 桌面宿主验收材料实际导航、输入、点击和下载产生独立证据", { timeout: 30_000 }, async t => {
+test("[TOOL-06 UI-02 IO-03] 桌面宿主验收材料实际导航、输入、点击和下载产生独立证据", { timeout: 30_000 }, async t => {
   const hosted = await startDesktopFixtureServer();
   t.after(() => hosted.close());
   const browser = await startBrowser(t);
@@ -45,7 +45,7 @@ test("[A TOOL-06 UI-02 IO-03] 桌面宿主验收材料实际导航、输入、�
   assert.equal(summary.artifactRequests, 1);
 });
 
-test("[A TOOL-06 NET-05] 桌面宿主材料仅在本机 HTTP 提供页面与可核对产物", async t => {
+test("[TOOL-06 NET-05] 桌面宿主材料仅在本机 HTTP 提供页面与可核对产物", async t => {
   const hosted = await startDesktopFixtureServer();
   t.after(() => hosted.close());
   const url = new URL(hosted.url);
@@ -76,7 +76,7 @@ test("[A TOOL-06 NET-05] 桌面宿主材料仅在本机 HTTP 提供页面与可�
   assert.equal((await fetch(new URL("missing", hosted.url))).status, 404);
 });
 
-test("[A HAR-04] 桌面宿主证据拒绝模型自述、错误值和重复操作", () => {
+test("[HAR-04] 桌面宿主证据拒绝模型自述、错误值和重复操作", () => {
   const marker = "DESKTOP_contract";
   assert.throws(() => verifyDesktopFixtureEvidence({
     marker,
@@ -92,7 +92,7 @@ test("[A HAR-04] 桌面宿主证据拒绝模型自述、错误值和重复操作
   }), /恰好一次产物请求/);
 });
 
-test("[A ENV-03] 桌面夹具按运行环境识别 WSL，不依赖盘符、用户目录或项目路径", () => {
+test("[ENV-03] 桌面夹具按运行环境识别 WSL，不依赖盘符、用户目录或项目路径", () => {
   assert.equal(isWslRuntime({
     platform: "linux",
     environment: { WSL_DISTRO_NAME: "Ubuntu" },
@@ -115,7 +115,7 @@ test("[A ENV-03] 桌面夹具按运行环境识别 WSL，不依赖盘符、用�
   }), false);
 });
 
-test("[A HAR-04 OBS-03] CDP 已断开时截图诊断不能阻止测试浏览器和目录回收", { timeout: 20_000 }, async t => {
+test("[HAR-04 OBS-03] CDP 已断开时截图诊断不能阻止测试浏览器和目录回收", { timeout: 20_000 }, async t => {
   let browser;
   await t.test("关闭本轮自己的 CDP 连接", async sub => {
     browser = await startBrowser(sub);

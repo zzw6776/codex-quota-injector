@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { requestThreadHistoryRebuild } from "../src/lifecycle-history-rebuild.mjs";
 import { useTempDir } from "./helpers.mjs";
 
-test("[C LCH-04] 历史重建客户端显式恢复每个任务且不启动回合", async (t) => {
+test("[LCH-04] 历史重建客户端显式恢复每个任务且不启动回合", async (t) => {
   const directory = await useTempDir(t, "codex-history-rebuild-");
   const fixturePath = join(directory, "fixture.mjs");
   const capturePath = join(directory, "capture.jsonl");

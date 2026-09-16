@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { testName } from "./test-labels.mjs";
 
 import { findOfficialAppServerUrl } from "../live-tests/web-search-contract.mjs";
 import {
@@ -10,11 +11,11 @@ import {
 import { defaultAccountDataDir } from "../src/platform.mjs";
 import { readCodexDelegationInput } from "../src/codex-delegation.mjs";
 
-export const DESKTOP_HOST_REPORT_VERSION = 11;
+export const DESKTOP_HOST_REPORT_VERSION = 13;
 
 export function desktopBatch(profile) {
-  if (profile === "official") return "B1-official";
-  if (profile === "deepseek") return "B2-deepseek";
+  if (profile === "official") return "model-official";
+  if (profile === "deepseek") return "model-deepseek";
   throw new Error(`桌面验收不支持供应商 ${profile}`);
 }
 
@@ -26,7 +27,7 @@ export function desktopComponentId(profile, runtimeTarget) {
   return `${desktopBatch(profile)}-desktop/${runtimeTarget}`;
 }
 
-export function combineBStatuses(backendStatus, desktopStatus) {
+export function combineModelStatuses(backendStatus, desktopStatus) {
   const values = [backendStatus, desktopStatus];
   if (values.includes("failed")) return "failed";
   if (values.includes("blocked")) return "blocked";
@@ -166,12 +167,30 @@ export function parseDesktopRollout(content, {
     : "";
   const webCalls = calls.filter(isWebCall);
   const webSearchCall = webCalls.find((call) => hasWebOperation(call.input, "search_query"));
-  const webOpenCall = webCalls.find((call) => hasWebOperation(call.input, "open") &&
+  const webOpenCalls = webCalls.filter((call) => isWebNavigation(call) &&
     (!webSearchCall || call.recordIndex > webSearchCall.recordIndex));
+  const webOpenCall = webOpenCalls[0];
   const webFindCall = webCalls.find((call) => hasWebOperation(call.input, "find") &&
     (!webOpenCall || call.recordIndex > webOpenCall.recordIndex));
-  const webResultOutputs = [webOpenCall, webFindCall]
-    .map((call) => call ? outputs.get(call.id)?.text ?? "" : "").join("\n");
+  // A first miss must not hide a later successful find in the same marked turn.
+  // Require a returned search and navigation before the actual find result;
+  // never assemble an official URL and matching text from unrelated outputs.
+  const webResult = webCalls.some((call) => {
+    if (!hasWebOperation(call.input, "find")) return false;
+    const result = outputs.get(call.id)?.text ?? "";
+    return successfulWebOutput(result) && !/No matching text found/i.test(result) &&
+      hasOfficialCodexSource(result) && /thread\/fork/i.test(result) &&
+      webOpenCalls.some((navigation) => {
+        const navigationOutput = outputs.get(navigation.id);
+        return navigationOutput?.recordIndex < call.recordIndex &&
+          successfulWebOutput(navigationOutput.text) && webCalls.some((search) => {
+            const searchOutput = outputs.get(search.id);
+            return hasWebOperation(search.input, "search_query") &&
+              searchOutput?.recordIndex < navigation.recordIndex &&
+              successfulWebOutput(searchOutput.text);
+          });
+      });
+  });
   const computerCalls = calls.filter(isComputerUseCall);
   const successfulComputerCalls = computerCalls.filter((call) =>
     isSuccessfulComputerUseOutput(outputs.get(call.id)?.text));
@@ -209,7 +228,7 @@ export function parseDesktopRollout(content, {
       codexAppGetUsageLimits: codexAppGetUsageLimitsCall?.id ?? null,
       webRun: webCalls.map((call) => call.id).filter(Boolean),
       webSearch: webCalls.filter((call) => hasWebOperation(call.input, "search_query")).map((call) => call.id),
-      webOpen: webCalls.filter((call) => hasWebOperation(call.input, "open")).map((call) => call.id),
+      webOpen: webCalls.filter(isWebNavigation).map((call) => call.id),
       webFind: webCalls.filter((call) => hasWebOperation(call.input, "find")).map((call) => call.id),
       computerUse: computerCalls.map((call) => call.id).filter(Boolean),
       computerInput: computerInputCalls.map((call) => call.id).filter(Boolean),
@@ -233,7 +252,7 @@ export function parseDesktopRollout(content, {
       webSearch: Boolean(webSearchCall),
       webOpen: Boolean(webSearchCall && webOpenCall),
       webFind: Boolean(webOpenCall && webFindCall),
-      webResult: hasOfficialCodexSource(webResultOutputs) && /thread\/fork/i.test(webResultOutputs),
+      webResult,
       computerUse: successfulComputerCalls.length > 0,
       computerInput: computerInputCalls.some((call) => successfulComputerCalls.includes(call)),
       computerSubmit: computerSubmitCalls.some((call) => successfulComputerCalls.includes(call)),
@@ -294,7 +313,7 @@ export function evaluateDesktopHostEvidence({
       : standaloneWebRun === false && hostedWebSearch === false
         ? false
         : null;
-  const webUnavailableStatus = profile === "deepseek" ? "unsupported" : "failed";
+  const webUnavailableStatus = "unsupported";
   const checks = [
     check("source", "源码摘要保持一致", sourceCurrent),
     check("runtime", "桌面版本、中继协议与运行环境", runtimeBinding?.status === "passed"),
@@ -315,7 +334,7 @@ export function evaluateDesktopHostEvidence({
       rollout?.checks?.codexAppGetUsageLimits === true),
     capabilityCheck("web-search", "web.run search", rollout?.checks?.webSearch === true,
       webOffered === false ? webUnavailableStatus : null),
-    capabilityCheck("web-open", "web.run open", rollout?.checks?.webOpen === true,
+    capabilityCheck("web-open", "web.run open/click 导航", rollout?.checks?.webOpen === true,
       webOffered === false ? webUnavailableStatus : null),
     capabilityCheck("web-find", "web.run find 及官方正文",
       rollout?.checks?.webFind === true && rollout?.checks?.webResult === true,
@@ -338,7 +357,7 @@ export function evaluateDesktopHostEvidence({
     checks.find((item) => item.id === "codex-app-read-thread").reason =
       "read_thread 的 JSON 返回被工具输出预算截断，无法核验内容；不等同于空回合或模型不支持";
   }
-  let status = checks.every((item) => item.status === "passed") ? "passed" : "incomplete";
+  let status = checks.every((item) => ["passed", "unsupported"].includes(item.status)) ? "passed" : "incomplete";
   const invalidComputerUse = computerUseKind === "windows-native"
     ? Number(nativeComputerUseEvidence?.launchCount ?? 0) > 1 || nativeSubmissions.length > 1 ||
       nativeSubmissions.some((submission) => submission?.value !== marker)
@@ -353,13 +372,13 @@ export function evaluateDesktopHostEvidence({
       item.status = checkWasAttempted(item.id, rollout) ? "failed" : "not-executed";
     }
     if (checks.some((item) => item.status === "failed")) status = "failed";
-    else if (checks.some((item) => ["blocked-upstream", "unsupported", "not-executed"].includes(item.status))) {
+    else if (checks.some((item) => ["blocked-upstream", "not-executed"].includes(item.status))) {
       status = "blocked";
     }
     else status = "passed";
   }
   const unavailable = checks.filter((item) =>
-    ["blocked-upstream", "unsupported", "not-executed"].includes(item.status));
+    ["blocked-upstream", "not-executed"].includes(item.status));
   return {
     status,
     checks,
@@ -491,18 +510,17 @@ export function desktopHostPrompt({
   root,
   triggerMode = "direct",
 }) {
-  const label = profile === "deepseek" ? "DeepSeek" : "Codex 官方模型";
   const execMarker = `EXEC_${marker}`;
   const failureMarker = `FAIL_${marker}`;
   return [
-    `这是 ${label} 的真实桌面入口验收，验收编号 ${runId}，标记 ${marker}。`,
+    `这是「${testName("desktop", profile)}」，验收编号 ${runId}，标记 ${marker}。`,
     `必须在当前这个桌面任务的同一回合中完成，不创建另一个模型任务，不复用历史回合的工具结果。每项调用分别留出真实返回；单项失败也继续其余独立步骤。结束前核对本回合实际调用，遗漏项先补做，不以文字声明代替。`,
     `1. 用 functions.exec 在项目 ${root} 执行 node -e "process.stdout.write('${execMarker}')"，并读取真实输出和退出码 0。`,
     nativeExecutablePath
       ? `2. 再用 functions.exec 在同一段 PowerShell 脚本中执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"，下一行紧接 exit $LASTEXITCODE；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`
       : `2. 再用 functions.exec 执行 node -e "process.stderr.write('${failureMarker}');process.exit(23)"；确认随机标记和退出码 23 返回当前任务，然后继续后续步骤。`,
     `3. 分别调用四个常用只读 codex_app 入口：先调用 list_threads 并确认正常返回；若发起者在本提示后附带当前任务 ID，必须用该 ID，否则从返回结果识别当前任务。再单独调用 read_thread，设置 turnLimit: 2、includeOutputs: true、maxOutputCharsPerItem: 20000，并确认返回的是当前任务；返回页中每个 completed 回合都必须含真实输入和 agentMessage。输入可以是 userMessage，或 codex_app.create_thread / send_message_to_thread 的 functionCallOutput，其中必须包含完整 codex_delegation、非空 source_thread_id 和 input 正文；只有工具名称或截断输出不能通过。当前 inProgress 回合可以为空。本轮标记由 rollout 独立绑定，不要求 read_thread 重复返回尚未完成的当前输入。随后分别调用 list_projects 和 get_usage_limits 并确认正常返回。不能读取本地 rollout 代替。`,
-    "4. 用实际 web.run 搜索 OpenAI 官方 Codex app-server 文档，open 命中页面，再 find `thread/fork`；不能用 shell 或普通 fetch 代替。",
+    "4. 用实际 web.run 搜索 OpenAI 官方 Codex app-server 文档，用 open 或 click 打开文档页面，再 find `thread/fork` 并确认正文实际命中；首次未命中时允许在同回合继续查找。不能用 shell 或普通 fetch 代替。",
     nativeExecutablePath
       ? `5. 用实际 computer use 启动 Windows 原生应用 ${nativeExecutablePath}。用本轮可执行文件路径和标题中可见的 ${marker} 前缀唯一定位窗口；Windows 可能截断标题，必须从辅助功能树读取并核对完整标记后才能输入。聚焦 Marker input，原样输入并只提交一次，同时对该窗口调用一次真实截图。正确提交后应用会自动关闭。不能使用浏览器、HTTP 页面、shell 输入或辅助驱动代替。`
       : `5. 用实际 computer use 打开 ${fixtureUrl}，读取页面标记，原样输入并只提交一次；随后截图并点击下载测试产物。`,
@@ -511,20 +529,37 @@ export function desktopHostPrompt({
   ].join("\n");
 }
 
+export function summarizeDesktopChecks(checks = []) {
+  return {
+    unit: "桌面验收项",
+    passed: checks.filter(item => item.status === "passed").length,
+    total: checks.length ? checks.filter(item => item.status !== "unsupported").length : null,
+    notApplicable: checks.filter(item => item.status === "unsupported").length,
+  };
+}
+
 export function desktopHostProgressHtml(report) {
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[char]);
-  const checks = (report.evaluation?.checks ?? []).map((item) =>
-    `<tr><td>${escape(item.label)}${item.reason ? `<br><small>${escape(item.reason)}</small>` : ""}</td><td class="${escape(item.status)}">${escape(item.status)}</td></tr>`).join("");
+  const items = report.evaluation?.checks ?? [];
+  const counts = summarizeDesktopChecks(items);
+  const summary = items.length
+    ? `桌面验收项：通过 ${counts.passed}/${counts.total}；不适用 ${counts.notApplicable}`
+    : "桌面验收项：尚未执行";
+  const reason = report.error || (report.runtimeBinding?.status === "failed"
+    ? "桌面运行版本、运行环境或中继状态未满足测试要求；详见运行时门禁报告。" : "");
+  const checks = items.map((item) =>
+    `<tr><td>${escape(item.label)}${item.reason ? `<br><small>${escape(item.reason)}</small>` : ""}</td><td class="${escape(item.status)}">${escape(item.status === "unsupported" ? "不适用（不支持）" : item.status)}</td></tr>`).join("");
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta http-equiv="refresh" content="2">
-  <title>${escape(report.batch)} 桌面入口验收</title><style>
+  <title>${escape(testName("desktop", report.profile))}</title><style>
   body{font:15px system-ui;max-width:980px;margin:34px auto;padding:0 22px;color:#202124;background:#f6f7fb}
   main{background:#fff;border:1px solid #ddd;border-radius:16px;padding:24px;box-shadow:0 8px 30px #0001}
   h1{margin-top:0}code,pre{background:#f0f2f7;border-radius:8px;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere}
-  table{width:100%;border-collapse:collapse}td{padding:9px;border-bottom:1px solid #eee}.passed{color:#17833d}.failed,.blocked,.stale{color:#c62828}.blocked-upstream,.unsupported,.not-executed,.not-run,.incomplete,.running{color:#9a6500}
+  table{width:100%;border-collapse:collapse}td{padding:9px;border-bottom:1px solid #eee}.passed{color:#17833d}.failed,.blocked,.stale{color:#c62828}.blocked-upstream,.not-executed,.not-run,.incomplete,.running{color:#9a6500}.unsupported{color:#666}
   .meta{color:#666}.status{font-size:20px;font-weight:700}.footer{margin-top:18px;color:#777}</style><main>
-  <h1>${escape(report.batch)} 桌面入口验收</h1><p class="status ${escape(report.status)}">${escape(report.status)}</p>
+  <h1>${escape(testName("desktop", report.profile))}</h1><p class="status ${escape(report.status)}">${escape(report.status)}</p>
+  <p>${escape(summary)}</p>${reason ? `<p class="blocked">原因：${escape(reason)}</p>` : ""}
   <p class="meta">${escape(report.platform)}/${escape(report.arch)} · ${escape(report.runtimeTarget)} · v${escape(report.projectVersion)} · ${escape(report.sourceSnapshot?.sha256)}</p>
   <p class="meta">后台组件：${escape(report.backend?.status ?? "待核对")} · 最后刷新：${escape(report.updatedAt ?? report.startedAt ?? "尚未开始")}</p>
   <table>${checks || '<tr><td>等待初始化</td><td class="not-run">not-run</td></tr>'}</table>
@@ -715,7 +750,7 @@ function isComputerUseCall(call) {
 }
 
 function isComputerInputCall(call) {
-  return /(?:\bsky\.(?:type_text|set_value)\s*\(|\.typeText\s*\(|\.setValue\s*\()/i.test(call.input);
+  return /(?:\bsky\.(?:type_text|set_value)\s*\(|\.(?:typeText|setValue|fill)\s*\()/i.test(call.input);
 }
 
 function isComputerSubmitCall(call) {
@@ -745,6 +780,15 @@ function classifyComputerUseFailure(output) {
 
 function hasWebOperation(input, operation) {
   return new RegExp(`(?:["']${operation}["']|\\b${operation}\\s*:)`).test(input);
+}
+
+function isWebNavigation(call) {
+  return hasWebOperation(call.input, "open") || hasWebOperation(call.input, "click");
+}
+
+function successfulWebOutput(output) {
+  const value = String(output ?? "").trim();
+  return Boolean(value) && !/"isError"\s*:\s*true|tool call (?:failed|error)|Script (?:failed|error)|Internal Error/i.test(value);
 }
 
 function hasOfficialCodexSource(output) {

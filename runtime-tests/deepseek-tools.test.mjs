@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { call, message, ROOT, startRuntime } from "./support/offline-runtime.mjs";
 
-test("[A MOD-03 TOOL-03 INT-02] 模型配置平台的 DeepSeek Flash 原生执行 MCP 命名空间", { timeout: 30_000 }, async t => {
+test("[MOD-03 TOOL-03 INT-02] 模型配置平台的 DeepSeek Flash 原生执行 MCP 命名空间", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, {
     profile: "deepseek",
     prepare: async ({ directory, env }) => {

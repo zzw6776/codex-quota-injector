@@ -20,7 +20,7 @@ const profiles = approved ? selectLiveProfiles(await liveProfiles()) : [];
 let failed = false;
 
 if (!approved) test("真实工具定向测试未获授权，不读取当前账号或发送模型请求", { skip: true }, () => {});
-for (const profile of profiles) test(`[B MOD-03 TOOL-01 TOOL-03 TOOL-07] ${profile.id} 真实工作区与 MCP 工具`, { timeout: 180_000 }, async t => {
+for (const profile of profiles) test(`[MOD-03 TOOL-01 TOOL-03 TOOL-07] ${profile.id} 真实工作区与 MCP 工具`, { timeout: 180_000 }, async t => {
   if (failed) { t.skip("前一配置失败；停止付费用例，保留尚未执行状态"); return; }
   const budget = liveBudget();
   let r;

@@ -1,13 +1,13 @@
-# B1/B2：真实桌面入口验收
+# 官方模型与 DeepSeek Flash 测试：真实桌面入口验收
 
-B1 和 B2 各自由两个必须分开保存的组件组成：
+官方模型测试和 DeepSeek Flash 测试各自由两个必须分开保存的组件组成：
 
 | 组件 | 运行位置 | 固定验证范围 |
 | --- | --- | --- |
-| `B1-official-backend/<runtime>` / `B2-deepseek-backend/<runtime>` | 隔离的官方 app-server | 真实模型路由、文件/命令/MCP、历史、分叉、压缩及 app-server 回调 |
-| `B1-official-desktop/<runtime>` / `B2-deepseek-desktop/<runtime>` | 当前 Codex 桌面任务 | 实际模型、codex_app 会话读取、functions.exec、web.run、computer use、当前 Widget/中继/运行环境 |
+| `model-official-backend/<runtime>` / `model-deepseek-backend/<runtime>` | 隔离的官方 app-server | 真实模型路由、文件/命令/MCP、历史、分叉、压缩及 app-server 回调 |
+| `model-official-desktop/<runtime>` / `model-deepseek-desktop/<runtime>` | 当前 Codex 桌面任务 | 实际模型、codex_app 会话读取、functions.exec、web.run、computer use、当前 Widget/中继/运行环境 |
 
-只有同一源码摘要、平台、运行环境和供应商的两个组件都为 `passed`，对应 B1 或 B2 才是 `passed`。后台通过而桌面组件未运行时，总状态是 `incomplete`；不再使用容易被误解为整批通过的后台结果代替桌面结论。
+只有同一源码摘要、平台、运行环境和供应商的两个组件都为 `passed`，对应官方模型测试或 DeepSeek Flash 测试才是 `passed`。后台通过而桌面组件未运行时，总状态是 `incomplete`；不再使用容易被误解为整批通过的后台结果代替桌面结论。
 
 ## 执行顺序
 
@@ -21,7 +21,7 @@ npm run test:live:deepseek -- --plan
 npm run test:desktop -- --profile=deepseek --plan
 ```
 
-取得对应 B 批的本次明确同意后，先运行后台组件：
+用户要求该模型的整体验收后，按项目的长期用量授权直接运行后台组件：
 
 ```sh
 npm run test:live:official -- --confirm-token-use
@@ -47,9 +47,22 @@ npm run test:desktop -- --profile=deepseek --confirm-token-use
 npm run test:desktop -- --status=<run-id>
 ```
 
-验收任务应使用短历史：先让已获授权的专用任务完成一轮简短输入与回复，再发送完整验收提示。`read_thread` 固定读取两轮，保留 `includeOutputs: true` 和 `maxOutputCharsPerItem: 20000`，以覆盖前一完成回合与当前活动回合。不要反复复用已积累大量浏览器、命令和嵌套读取输出的失败任务；过大的工具返回仍可能受宿主总输出预算截断。若尚未获得新建任务授权，先取得授权。
+验收任务应使用短历史：先让已获授权的专用任务完成一轮简短输入与回复，再发送完整验收提示。`read_thread` 固定读取两轮，保留 `includeOutputs: true` 和 `maxOutputCharsPerItem: 20000`，以覆盖前一完成回合与当前活动回合。不要反复复用已积累大量浏览器、命令和嵌套读取输出的失败任务；过大的工具返回仍可能受宿主总输出预算截断。按项目规则自动创建所需的专用测试任务，不再询问新建任务授权。
 
 所有必需工具必须在随机标记绑定的同一回合内实际执行。失败后允许在该回合重试，成功命令必须同时返回标记和退出码 0；后续回合的补做不能拼入原报告。模型文字称“完成”不改变缺项判定。连续出现执行遗漏时停止重复付费尝试，记录缺项，不靠增加提示次数保证通过。
+
+## 并行调度
+
+已纳入用户测试请求范围、前置条件满足且使用独立隔离运行时的官方模型与 DeepSeek Flash 后台测试默认并行。各模型的桌面测试在自己的后台通过后即可启动，不以另一模型整批完成为条件；同一模型内部已有阶段顺序和失败停止条件保持有效。
+
+桌面测试按资源安排并发：
+
+- 命令、只读任务工具、网页工具等互不干扰的步骤并行；每个模型使用独立任务、随机标记、材料服务和报告，不共用可写测试材料。
+- 浏览器分别绑定自己的标签页，Windows 原生交互分别绑定自己的材料窗口。只有确认操作不争用全局焦点、键鼠或可变配置时才并行；独立标签页本身不能证明焦点隔离。
+- 需要共享焦点或键鼠的交互只在该步骤排队，完成后立即释放；其他独立步骤继续运行。不得默认让一个模型等待另一个模型整批结束。串行前说明具体冲突资源及串行范围。
+- 步骤排队仍在本次标记绑定的同一回合内完成，不拆到后续回合拼证据。计划并发前确认实际工具的隔离方式；若无法在同回合内安全协调，说明限制和必要的串行范围。
+
+并行不增加模型、平台或场景范围；用户请求范围内的真实用量和测试任务创建按项目长期授权执行，预算、停止阈值和结果独立保存要求保持不变。用户只要求补测指定项时，仅安排这些项。
 
 ## 固定判据
 
@@ -57,11 +70,11 @@ npm run test:desktop -- --status=<run-id>
 
 1. `package.json` 源码摘要在测试期间未变化；实际 Widget 显示当前项目版本，实际中继协议与源码一致；接管 app-server 时，`codex_app` 健康状态必须为 `ready`。
 2. 当前桌面运行环境与报告一致。macOS、Windows 原生 Relay、WSL 原生 Relay 的结果不能互相继承。
-3. rollout 中任务实际使用 B1 的官方模型或 B2 的 `deepseek-flash`，并记录任务 ID、轮次 ID 和各工具调用 ID。
+3. rollout 中任务实际使用官方模型测试的官方模型或 DeepSeek Flash 测试的 `deepseek-flash`，并记录任务 ID、轮次 ID 和各工具调用 ID。
 4. `functions.exec` 的成功命令返回随机标记；另一命令返回随机标记和退出码 23，且同一任务随后继续调用其他工具。
 5. 实际 `codex_app.list_threads` 返回当前任务，再以该任务 ID 调用 `codex_app.read_thread`。调用时设置 `includeOutputs: true`、`maxOutputCharsPerItem: 20000`，因为默认返回会隐藏委托正文。返回页中的每个 `completed` 回合都必须同时包含真实输入和 `agentMessage`：输入允许 `userMessage`，或 `namespace: codex_app`、`name: create_thread|send_message_to_thread` 的 `functionCallOutput`，后者必须有完整 `codex_delegation`、非空 `source_thread_id` 和 `input` 正文。官方输出包装 `{text, truncated}` 与完整字符串都可识别，截断或仅有工具名称不能通过。只检查匹配任务中的回合，不能跨任务或跨回合拼凑输入与回复；任一完成回合的 `items` 为空或缺失都不能通过；当前 `inProgress` 回合可以为空，`interrupted` 按官方单独行为留证。当前活动输入在回合完成前不会进入 read_thread 投影，因此随机标记只由 rollout 独立绑定，不要求 read_thread 重复回显。随后实际调用 `codex_app.list_projects` 与 `codex_app.get_usage_limits` 并正常返回。四个调用分别记录调用 ID，本地读取 rollout 不能代替。
 6. 目标模型回合必须正常结束；`task_complete.error`（包括 `usage_limit_exceeded`）单独写入报告并判定失败，不能被后续 Relay 恢复掩盖。桌面或 app-server 在回合终态附近轮换时，运行时检查会等待同代 Relay 有界恢复后再判定，避免把瞬时切换误报为 Relay 根因。
-7. 执行器从中继收到的真实模型请求记录脱敏工具清单，只保留工具类型、名称、命名空间和 MCP server label，不保存提示词、参数、Schema、工具输出或凭据。实际 `web.run` 完成 `search_query`、`open`、`find`，结果来自 OpenAI 官方 Codex 文档或 `openai/codex` 仓库并包含 `thread/fork`。B1 可使用独立 `web.run` 或官方 Hosted Search；B2 只有独立 `web.run` 才视为可调用，DeepSeek Responses 请求中存在但供应商忽略的 Hosted `web_search` 描述单独记录并判为 `unsupported`，阻断完整桌面组件且不继续无效重试。已支持但任务结束仍未调用记为 `not-executed`，调用后返回错误记为 `failed`。
+7. 执行器从中继收到的真实模型请求记录脱敏工具清单，只保留工具类型、名称、命名空间和 MCP server label，不保存提示词、参数、Schema、工具输出或凭据。实际 `web.run` 完成 `search_query`、`open` 或 `click` 导航、`find`，结果来自 OpenAI 官方 Codex 文档或 `openai/codex` 仓库并包含 `thread/fork`。官方模型测试可使用独立 `web.run` 或官方 Hosted Search；DeepSeek Flash 测试只有独立 `web.run` 才视为可调用，DeepSeek Responses 请求中存在但供应商忽略的 Hosted `web_search` 描述单独记录为 `unsupported`（不适用），不影响支持范围内的整体验收通过，不继续无效重试。已支持但任务结束仍未调用记为 `not-executed`，调用后返回错误记为 `failed`。
 8. Windows 上实际 computer use 启动本轮动态生成的 WinForms 原生应用，通过辅助功能读取随机标记、输入并只提交一次，同时调用一次截图；原生清单独立记录启动次数和提交值。macOS 使用本机 HTTP 材料并额外核对下载事件。调用发生但返回错误不能算通过；模型文字说明不参与判定。
 
 `file://` 会在 Browser Use 页面加载前被 URL 安全策略拒绝，这是正常边界。桌面材料固定使用本机 HTTP；如果当前宿主仍拒绝回环地址，报告保留原始结果并标记未通过，不修改系统网络策略或加入防火墙规则。
@@ -86,11 +99,11 @@ npm run test:desktop -- --profile=official --runtime=windows-native --plan
 npm run test:desktop -- --profile=official --runtime=wsl-native --plan
 ```
 
-付费执行拒绝 `--runtime=all`。Windows 桌面若当前使用 WSL，执行器会从 WSL 的 Codex 会话目录读取本次随机标记所在的 rollout；Windows 和 WSL 的 Node.js、依赖、CLI、Relay、`codex_app` 健康状态及报告仍各自独立。测试脚本不会为了 B 批自动切换桌面运行方式，自动切换和逐字节恢复只属于最后执行的 C 批。
+付费执行拒绝 `--runtime=all`。Windows 桌面若当前使用 WSL，执行器会从 WSL 的 Codex 会话目录读取本次随机标记所在的 rollout；Windows 和 WSL 的 Node.js、依赖、CLI、Relay、`codex_app` 健康状态及报告仍各自独立。测试脚本不会为了真实模型测试批自动切换桌面运行方式，自动切换和逐字节恢复只属于最后执行的启停恢复测试批。
 
 ## 报告与其他桌面能力
 
-每次结果写入 `.runtime/test-results/desktop-host/<run-id>/report.json`，相邻 `progress.html` 只显示脱敏步骤和状态，不驱动测试，也不参与断言。后台报告同步记录桌面报告路径、两个组件状态和 B 总状态。固定检查逐项使用 `passed`、`unsupported`、`not-executed`、`failed` 或执行中的 `not-run`；存在 `unsupported` 或 `not-executed` 时桌面组件为 `blocked`。报告不保存提示正文之外的真实业务内容、工具输出正文或凭据。
+每次结果写入 `.runtime/test-results/desktop-host/<run-id>/report.json`，相邻 `progress.html` 只显示脱敏步骤和状态，不驱动测试，也不参与断言。后台报告同步记录桌面报告路径、两个组件状态和真实模型测试总状态。固定检查逐项使用 `passed`、`unsupported`、`not-executed`、`failed` 或执行中的 `not-run`；明确不支持的 `unsupported` 项作为“不适用”单列，并从适用项总数中排除；其余适用项全部通过时桌面组件为 `passed`。`not-executed` 和已确认上游故障仍阻断，实际调用失败仍失败；不能将证据不足或未完成配置当作不支持。报告不保存提示正文之外的真实业务内容、工具输出正文或凭据。
 
 `read_thread` 或其他官方宿主工具异常不能根据单次桌面结果直接归因。先检查已知问题并核对 rollout/SQLite。`read_thread` 的正确任务中出现 completed 回合空 items 时，第一排查方向是 `codex-desktop-read-thread-pagination-cursor`，按[证据复用说明](read-thread-pagination-investigation.md#再次出现时先做什么)核对适用条件；匹配时引用既有对照并注明本任务未重复对照，不因供应商或任务变化重复完整定位。首次出现或证据不匹配时，再以实际运行的同版本官方 app-server、同一数据分别运行无 Relay 直连和正式 Relay 对照。两个底层结果一致且桌面封装异常的证据齐全时才标记 `blocked-upstream`；对照不一致仍保持 `failed` 并继续定位。当前 read_thread 归因只匹配“正确任务已成功返回，完成回合全部为显式空 items”的现场形态；缺失 items 字段、委托正文不完整或其他读取错误不能套用这个阻断标签。
 
@@ -100,6 +113,16 @@ npm run test:desktop -- --profile=official --runtime=wsl-native --plan
 
 Windows Computer Use 截图失败也遵循同一规则。桌面执行器只读取 `.runtime/test-results/desktop-host/upstream-attributions-<runtime>.json` 中经过结构核验的归因；当前 rollout 必须出现对应失败，并且文件必须同时记录同运行环境的生产 Relay 失败与已移除 Relay 的官方对照失败，才允许将截图标记为 `blocked-upstream`。
 
-兼容入口 `node scripts/test-desktop-host.mjs --serve` 仍可只启动免费材料服务，但它不选择模型、不读取 rollout，也不能生成 B 桌面组件通过结论。
+兼容入口 `node scripts/test-desktop-host.mjs --serve` 仍可只启动免费材料服务，但它不选择模型、不读取 rollout，也不能生成真实模型测试桌面组件通过结论。
 
-Apps、插件独特能力、媒体生成、自动化、远程环境和实时语音取决于当次桌面实际开放与配置，继续按[场景矩阵](codex-compatibility-test-plan.md)逐项记录 `PASS`、`FAIL`、`BLOCKED`、`NOT_RUN` 或有依据的 `OUT_OF_SCOPE`。固定桌面组件通过不会把这些条件场景自动标绿。关闭/重启、接管、单实例、断线恢复、正式包更新和真实账号往返以 C 批 `.runtime/test-results/lifecycle/<run-id>/report.json` 为准。
+Apps、插件独特能力、媒体生成、自动化、远程环境和实时语音取决于当次桌面实际开放与配置，继续按[场景矩阵](codex-compatibility-test-plan.md)逐项记录 `PASS`、`FAIL`、`BLOCKED`、`NOT_RUN` 或有依据的 `OUT_OF_SCOPE`。固定桌面组件通过不会把这些条件场景自动标绿。关闭/重启、接管、单实例、断线恢复、正式包更新和真实账号往返以启停恢复测试批 `.runtime/test-results/lifecycle/<run-id>/report.json` 为准。
+
+## 两项验收器修复与定向补测（报告版本 12）
+
+网页检查采纳标记所在同一回合中的后续成功查找，要求真实搜索返回、导航返回及带官方文档来源和 `thread/fork` 正文的 find 返回依次存在；`open` 与 `click` 均可用于导航。首次未命中不阻止同回合后续成功，空返回、工具错误和 `No matching text found` 不能通过，也不能跨回合拼接。浏览器输入识别包含 computer use 的 Playwright `fill()`，仍要求真实成功返回及材料服务恰好一次正确提交。两项共用解析逻辑适用于 macOS 和 Windows，Windows 原生材料约束保持不变。
+
+用户只授权补测指定项时，单独保存定向补测报告，列出源码摘要、任务/回合、调用 ID、独立材料证据和本次检查项；不能将其写成新源码的完整桌面或全量回归通过报告，也不覆盖历史报告。对应回归命令为 `node --test test/desktop-host-targeted.test.mjs`。DeepSeek 当前缺少独立 `web.run` 的三项保留 `unsupported`，按报告版本 13 计为不适用，不要求为通过测试补造该能力。
+
+## 报告版本 13：按适用能力验收
+
+通过比例只统计适用项，不适用数量单独展示，例如 DeepSeek 桌面 13/13 通过、3 项不适用；不支持的项目本身不标为 passed。基于旧执行证据重新应用此口径时，另存复核报告并记录原报告路径、原测试源码摘要、复核规则版本和时间，不覆盖原始执行报告，也不声明当前源码已重新完成全量测试。

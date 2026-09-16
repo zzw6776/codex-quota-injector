@@ -1,8 +1,6 @@
-function createTooltipPosition(dependencies) {
-  const { CONVERSATION_TOOLTIP_DELAY_MS, state } = dependencies;
-  const showConversationTokenTooltip = (...args) => dependencies.showConversationTokenTooltip(...args);
-
-function scheduleConversationTokenTooltip(line, event) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createTooltipPosition({ CONVERSATION_TOOLTIP_DELAY_MS, state, showConversationTokenTooltip }) {
+  function scheduleConversationTokenTooltip(line, event) {
     clearConversationTooltipTimer();
     if (!line?.__codexTokenUsage) return;
     state.conversationTooltipPendingLine = line;
@@ -19,7 +17,7 @@ function scheduleConversationTokenTooltip(line, event) {
     }, CONVERSATION_TOOLTIP_DELAY_MS);
   }
 
-function moveConversationTokenTooltip(line, event) {
+  function moveConversationTokenTooltip(line, event) {
     if (state.conversationTooltipPendingLine === line) {
       state.conversationTooltipPendingPointer = conversationTooltipPointer(event, line);
       return;
@@ -29,7 +27,7 @@ function moveConversationTokenTooltip(line, event) {
     positionConversationTokenTooltip(line);
   }
 
-function conversationTooltipPointer(event, line) {
+  function conversationTooltipPointer(event, line) {
     if (Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) {
       return { x: event.clientX, y: event.clientY };
     }
@@ -37,7 +35,7 @@ function conversationTooltipPointer(event, line) {
     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   }
 
-function ensureConversationTokenTooltip() {
+  function ensureConversationTokenTooltip() {
     if (state.conversationTooltip?.isConnected) return state.conversationTooltip;
     const tooltip = document.createElement("div");
     tooltip.id = "codex-token-usage-tooltip";
@@ -91,7 +89,7 @@ function ensureConversationTokenTooltip() {
     return tooltip;
   }
 
-function positionConversationTokenTooltip(line, tooltip = state.conversationTooltip) {
+  function positionConversationTokenTooltip(line, tooltip = state.conversationTooltip) {
     if (!line?.isConnected || !tooltip?.isConnected || tooltip.hidden) return;
     const lineRect = line.getBoundingClientRect();
     const tooltipRect = tooltip.getBoundingClientRect();
@@ -116,7 +114,7 @@ function positionConversationTokenTooltip(line, tooltip = state.conversationTool
     positionConversationTooltipBridge(lineRect, tooltipRect, left, top, gap);
   }
 
-function positionConversationTooltipBridge(lineRect, tooltipRect, tooltipLeft, tooltipTop, gap) {
+  function positionConversationTooltipBridge(lineRect, tooltipRect, tooltipLeft, tooltipTop, gap) {
     const bridge = state.conversationTooltipBridge;
     if (!bridge?.isConnected) return;
     const tooltipRight = tooltipLeft + tooltipRect.width;
@@ -139,26 +137,26 @@ function positionConversationTooltipBridge(lineRect, tooltipRect, tooltipLeft, t
     bridge.hidden = false;
   }
 
-function isConversationTooltipTarget(value) {
+  function isConversationTooltipTarget(value) {
     return Boolean(value && state.conversationTooltip &&
       (value === state.conversationTooltip || state.conversationTooltip.contains(value)));
   }
 
-function isConversationBridgeTarget(value) {
+  function isConversationBridgeTarget(value) {
     return Boolean(value && state.conversationTooltipBridge &&
       (value === state.conversationTooltipBridge || state.conversationTooltipBridge.contains(value)));
   }
 
-function isConversationTooltipArea(value) {
+  function isConversationTooltipArea(value) {
     return isConversationTooltipTarget(value) || isConversationBridgeTarget(value);
   }
 
-function isConversationLineTarget(value) {
+  function isConversationLineTarget(value) {
     const line = state.conversationTooltipTarget;
     return Boolean(value && line && (value === line || line.contains(value)));
   }
 
-function hideConversationTokenTooltip(line = null) {
+  function hideConversationTokenTooltip(line = null) {
     if (line && state.conversationTooltipTarget !== line && state.conversationTooltipPendingLine !== line) return;
     clearConversationTooltipTimer();
     if (state.conversationTooltip) state.conversationTooltip.hidden = true;
@@ -167,7 +165,7 @@ function hideConversationTokenTooltip(line = null) {
     state.conversationTooltipPointer = null;
   }
 
-function clearConversationTooltipTimer() {
+  function clearConversationTooltipTimer() {
     if (state.conversationTooltipTimer != null) {
       window.clearTimeout(state.conversationTooltipTimer);
       state.conversationTooltipTimer = null;
@@ -176,7 +174,7 @@ function clearConversationTooltipTimer() {
     state.conversationTooltipPendingPointer = null;
   }
 
-  return { scheduleConversationTokenTooltip, moveConversationTokenTooltip, conversationTooltipPointer, ensureConversationTokenTooltip, positionConversationTokenTooltip, positionConversationTooltipBridge, isConversationTooltipTarget, isConversationBridgeTarget, isConversationTooltipArea, isConversationLineTarget, hideConversationTokenTooltip, clearConversationTooltipTimer };
+  return { scheduleConversationTokenTooltip, moveConversationTokenTooltip, conversationTooltipPointer, ensureConversationTokenTooltip, positionConversationTokenTooltip, isConversationTooltipArea, hideConversationTokenTooltip, clearConversationTooltipTimer };
 }
 
 export { createTooltipPosition };

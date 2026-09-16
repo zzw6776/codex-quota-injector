@@ -4,7 +4,7 @@ import { ExtraModelManager } from "../src/extra-model-manager.mjs";
 import { fixtureData, startBrowser, SHADOW } from "./support/browser.mjs";
 import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
 
-test("[A UI-02 MOD-03] 平台设置和新增平台逐层返回模型列表，再返回首页", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-03] 平台设置和新增平台逐层返回模型列表，再返回首页", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const manager = new ExtraModelManager({ dataDir: b.directory });
   const view = await manager.initialize();
@@ -34,7 +34,7 @@ test("[A UI-02 MOD-03] 平台设置和新增平台逐层返回模型列表，再
 });
 
 for (const destination of ["home", "other-platform"]) {
-  test(`[A UI-02 MOD-03] 检测退出到 ${destination} 后结果仍回填对应草稿，保存保留检测参数`, { timeout: 30_000 }, async t => {
+  test(`[UI-02 MOD-03] 检测退出到 ${destination} 后结果仍回填对应草稿，保存保留检测参数`, { timeout: 30_000 }, async t => {
     const b = await startBrowser(t);
     let finishProbe;
     const manager = new ExtraModelManager({ dataDir: b.directory,

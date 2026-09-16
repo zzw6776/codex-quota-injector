@@ -90,6 +90,10 @@ function installQuotaWidget(
     extraModelDetectionRequests: new Map(),
     extraPlatformSaveRequest: null,
     panelScrollPosition: null,
+    renderedPanelKey: null,
+    renderedPanelCommon: null,
+    renderedPage: null,
+    panelRefreshPending: false,
     extraModelOperationDraft: null,
     detailPanelBaseSize: null,
     detailPanelSize: null,
@@ -114,200 +118,156 @@ function installQuotaWidget(
 
   const conversationTurnSelector = "[data-content-search-turn-key]";
 
-  const { currentDeepSeekBalanceView, renderPanelBalance, patchPanelBalance } = features.balance({
-    get state() { return state; },
-    get escapeHtml() { return escapeHtml; },
+  const { formatContextTier, formatUnitPrice, isLightTheme, formatReset, formatExpiry, formatUpdatedAt, formatPlan, levelClass, formatContextValue, contextTokensToK, contextKToTokens, formatTokenCount, formatGenerationRate, formatFirstTokenLatency, formatMetricDuration, formatCny, formatTooltipPercent, formatExchangeRate, number, escapeHtml } = features.formatting();
+
+  const { renderPanelBalance, patchPanelBalance } = features.balance({
+    state,
+    escapeHtml,
   });
 
-  const { renderHostHealthBanner, renderPanelControls, renderHostHealthStatus, hostToolLabel } = features.host_health({
-    get state() { return state; },
-    get formatUpdatedAt() { return formatUpdatedAt; },
-    get escapeHtml() { return escapeHtml; },
+  const { renderHostHealthBanner, renderPanelControls } = features.host_health({
+    state,
+    formatUpdatedAt,
+    escapeHtml,
   });
 
-  const { scheduleConversationTokenUsageRender, placeConversationTokenUsageLine, renderConversationTokenUsage, conversationSubagentLabel } = features.usage_lines({
-    get usageSummaryText() { return usageSummaryText; },
-    get selectNetworkLatency() { return selectNetworkLatency; },
-    get MAX_CONVERSATION_USAGE_CACHE() { return MAX_CONVERSATION_USAGE_CACHE; },
-    get state() { return state; },
-    get showConversationTokenTooltip() { return showConversationTokenTooltip; },
-    get scheduleConversationTokenTooltip() { return scheduleConversationTokenTooltip; },
-    get moveConversationTokenTooltip() { return moveConversationTokenTooltip; },
-    get isConversationTooltipArea() { return isConversationTooltipArea; },
-    get hideConversationTokenTooltip() { return hideConversationTokenTooltip; },
-    get formatTokenCount() { return formatTokenCount; },
-    get bindConversationObserver() { return bindConversationObserver; },
-  });
-
-  const { showConversationTokenTooltip, appendConversationTooltipRow, appendConversationTooltipSummaryRow, appendConversationTooltipMetricRow, summarizeConversationTooltipInput, getConversationTooltipTiers, normalizeTooltipUsage } = features.usage_tooltip({
-    get state() { return state; },
-    get conversationTooltipPointer() { return conversationTooltipPointer; },
-    get appendGenerationDetails() { return appendGenerationDetails; },
-    get syncConversationScrollbarPadding() { return syncConversationScrollbarPadding; },
-    get conversationSubagentLabel() { return conversationSubagentLabel; },
-    get formatContextTier() { return formatContextTier; },
-    get formatUnitPrice() { return formatUnitPrice; },
-    get ensureConversationTokenTooltip() { return ensureConversationTokenTooltip; },
-    get positionConversationTokenTooltip() { return positionConversationTokenTooltip; },
-    get clearConversationTooltipTimer() { return clearConversationTooltipTimer; },
-    get isLightTheme() { return isLightTheme; },
-    get formatTokenCount() { return formatTokenCount; },
-    get formatCny() { return formatCny; },
-    get formatTooltipPercent() { return formatTooltipPercent; },
-    get formatExchangeRate() { return formatExchangeRate; },
-  });
-
-  const { scheduleConversationTokenTooltip, moveConversationTokenTooltip, conversationTooltipPointer, ensureConversationTokenTooltip, positionConversationTokenTooltip, positionConversationTooltipBridge, isConversationTooltipTarget, isConversationBridgeTarget, isConversationTooltipArea, isConversationLineTarget, hideConversationTokenTooltip, clearConversationTooltipTimer } = features.tooltip_position({
-    get CONVERSATION_TOOLTIP_DELAY_MS() { return CONVERSATION_TOOLTIP_DELAY_MS; },
-    get state() { return state; },
-    get showConversationTokenTooltip() { return showConversationTokenTooltip; },
+  const { positionPopover, captureDetailPanelBaseSize, resetDetailPanelSize, cancelDetailPanelResize, dismissPanel, bindGeneralEvents, bindPanelEvents, hideAccountTooltip, preservePanelInputs } = features.panel({
+    calculateMaxHeight,
+    state,
+    render,
+    enqueue,
+    ACCOUNT_TOOLTIP_DELAY_MS,
   });
 
   const { appendGenerationDetails, syncConversationScrollbarPadding } = features.usage_details({
-    get paginateDetails() { return paginateDetails; },
-    get detailTitle() { return detailTitle; },
-    get phaseText() { return phaseText; },
-    get primaryText() { return primaryText; },
-    get networkLatencyText() { return networkLatencyText; },
-    get averageNetworkLatency() { return averageNetworkLatency; },
-    get toolRows() { return toolRows; },
-    get toolRowElement() { return toolRowElement; },
-    get executionRemainder() { return executionRemainder; },
-    get scrollbarEndPadding() { return scrollbarEndPadding; },
-    get formatGenerationRate() { return formatGenerationRate; },
-    get formatFirstTokenLatency() { return formatFirstTokenLatency; },
-    get formatMetricDuration() { return formatMetricDuration; },
+    paginateDetails,
+    detailTitle,
+    phaseText,
+    primaryText,
+    networkLatencyText,
+    averageNetworkLatency,
+    toolRows,
+    toolRowElement,
+    executionRemainder,
+    scrollbarEndPadding,
+    formatGenerationRate,
+    formatFirstTokenLatency,
+    formatMetricDuration,
   });
 
-  const { formatContextTier, formatUnitPrice, isLightTheme, formatReset, formatExpiry, formatUpdatedAt, formatPlan, levelClass, formatContextValue, contextTokensToK, contextKToTokens, formatTokenCount, formatGenerationRate, formatFirstTokenLatency, formatMetricDuration, formatCny, formatTooltipPercent, formatExchangeRate, number, escapeHtml } = features.formatting({
-
-  });
-
-  const { renderContextPage, renderContextModel, renderContextEditForm, bindContextEvents, setContextEditorOpen } = features.context({
-    get state() { return state; },
-    get renderPanelControls() { return renderPanelControls; },
-    get enqueue() { return enqueue; },
-    get formatContextValue() { return formatContextValue; },
-    get escapeHtml() { return escapeHtml; },
-  });
-
-  const { renderManagedDeepSeekBalance, renderExtraModelsPage, renderExtraModelFeedback, renderExtraModelProgress, extraModelStatus, renderExtraModelCardStatus, renderExtraModelStatusBadge, renderExtraModelCompatibility, renderExtraModelConfiguration } = features.model_views({
-    get CUSTOM_REASONING_EFFORTS() { return CUSTOM_REASONING_EFFORTS; },
-    get state() { return state; },
-    get renderPanelControls() { return renderPanelControls; },
-    get extraPlatformDisplayModels() { return extraPlatformDisplayModels; },
-    get modelDetectionOperation() { return modelDetectionOperation; },
-    get renderPlatformDetectionProgress() { return renderPlatformDetectionProgress; },
-    get renderExtraPlatformForm() { return renderExtraPlatformForm; },
-    get formatUpdatedAt() { return formatUpdatedAt; },
-    get escapeHtml() { return escapeHtml; },
-  });
-
-  const { setExtraPlatformDraft, extraPlatformDisplayModels, applyExtraModelDiscovery, patchExtraModelsDom, applyExtraModelDetection, forgetModelDetection, bindExtraModelDetectButtons, showExtraModelOperation, bindManagedDeepSeekBalanceButtons, modelDetectionOperation, renderPlatformDetectionProgress, renderModelDetectionProgress } = features.model_state({
-    get patchPanelBalance() { return patchPanelBalance; },
-    get state() { return state; },
-    get renderManagedDeepSeekBalance() { return renderManagedDeepSeekBalance; },
-    get renderExtraModelFeedback() { return renderExtraModelFeedback; },
-    get renderExtraModelProgress() { return renderExtraModelProgress; },
-    get renderDeepSeekModelPicker() { return renderDeepSeekModelPicker; },
-    get renderExtraModelCardStatus() { return renderExtraModelCardStatus; },
-    get renderExtraModelCompatibility() { return renderExtraModelCompatibility; },
-    get renderExtraModelReasoning() { return renderExtraModelReasoning; },
-    get readExtraPlatformForm() { return readExtraPlatformForm; },
-    get enqueue() { return enqueue; },
-  });
-
-  const { renderExtraPlatformForm, renderDeepSeekPresetForm, renderDeepSeekModelPicker, renderExtraModelReasoning, readExtraModelSettings, blankExtraModel, readExtraPlatformForm } = features.model_forms({
-    get state() { return state; },
-    get renderModelDetectionProgress() { return renderModelDetectionProgress; },
-    get renderExtraModelCompatibility() { return renderExtraModelCompatibility; },
-    get formatUpdatedAt() { return formatUpdatedAt; },
-    get contextTokensToK() { return contextTokensToK; },
-    get contextKToTokens() { return contextKToTokens; },
-    get escapeHtml() { return escapeHtml; },
-  });
-
-  const { positionPopover, captureDetailPanelBaseSize, resetDetailPanelSize, cancelDetailPanelResize, detailPanelBounds, applyDetailPanelSize, bindDetailPanelResize, dismissPanel } = features.panel_layout({
-    get calculateMaxHeight() { return calculateMaxHeight; },
-    get state() { return state; },
-    get hideAccountTooltip() { return hideAccountTooltip; },
+  const { renderContextPage, bindContextEvents } = features.context({
+    state,
+    renderPanelControls,
+    enqueue,
+    formatContextValue,
+    escapeHtml,
   });
 
   const { renderMigrationPage, bindMigrationEvents } = features.migration({
-    get state() { return state; },
-    get render() { return render; },
-    get renderPanelControls() { return renderPanelControls; },
-    get captureDetailPanelBaseSize() { return captureDetailPanelBaseSize; },
-    get resetDetailPanelSize() { return resetDetailPanelSize; },
-    get enqueue() { return enqueue; },
-    get formatPlan() { return formatPlan; },
-    get escapeHtml() { return escapeHtml; },
+    state,
+    render,
+    renderPanelControls,
+    captureDetailPanelBaseSize,
+    resetDetailPanelSize,
+    enqueue,
+    formatPlan,
+    escapeHtml,
   });
 
-  const { renderWakeupPage, renderWakeupAccount, renderWakeupStatus, readWakeupForm, bindWakeupNavigation, bindWakeupFormEvents } = features.wakeup({
-    get state() { return state; },
-    get render() { return render; },
-    get renderPanelControls() { return renderPanelControls; },
-    get captureDetailPanelBaseSize() { return captureDetailPanelBaseSize; },
-    get resetDetailPanelSize() { return resetDetailPanelSize; },
-    get enqueue() { return enqueue; },
-    get formatUpdatedAt() { return formatUpdatedAt; },
-    get escapeHtml() { return escapeHtml; },
+  const { renderWakeupPage, renderWakeupStatus, bindWakeupNavigation, bindWakeupFormEvents } = features.wakeup({
+    state,
+    render,
+    renderPanelControls,
+    captureDetailPanelBaseSize,
+    resetDetailPanelSize,
+    enqueue,
+    formatUpdatedAt,
+    escapeHtml,
   });
 
-  const { renderAccount, renderWindow, bindAccountEvents } = features.accounts({
-    get state() { return state; },
-    get renderWakeupStatus() { return renderWakeupStatus; },
-    get enqueue() { return enqueue; },
-    get formatReset() { return formatReset; },
-    get formatExpiry() { return formatExpiry; },
-    get formatUpdatedAt() { return formatUpdatedAt; },
-    get formatPlan() { return formatPlan; },
-    get levelClass() { return levelClass; },
-    get number() { return number; },
-    get escapeHtml() { return escapeHtml; },
+  const { renderAccount, bindAccountEvents } = features.accounts({
+    state,
+    renderWakeupStatus,
+    enqueue,
+    formatReset,
+    formatExpiry,
+    formatUpdatedAt,
+    formatPlan,
+    levelClass,
+    number,
+    escapeHtml,
   });
 
-  const { hideAccountTooltip, scheduleAccountTooltip } = features.account_tooltip({
-    get ACCOUNT_TOOLTIP_DELAY_MS() { return ACCOUNT_TOOLTIP_DELAY_MS; },
-    get state() { return state; },
+  const { scheduleConversationTokenTooltip, moveConversationTokenTooltip, conversationTooltipPointer, ensureConversationTokenTooltip, positionConversationTokenTooltip, isConversationTooltipArea, hideConversationTokenTooltip, clearConversationTooltipTimer } = features.tooltip_position({
+    CONVERSATION_TOOLTIP_DELAY_MS,
+    state,
+    showConversationTokenTooltip: (...args) => showConversationTokenTooltip(...args),
   });
 
-  const { bindGeneralEvents, bindPanelEvents } = features.panel_events({
-    get state() { return state; },
-    get positionPopover() { return positionPopover; },
-    get hideAccountTooltip() { return hideAccountTooltip; },
-    get scheduleAccountTooltip() { return scheduleAccountTooltip; },
-    get bindDetailPanelResize() { return bindDetailPanelResize; },
-    get enqueue() { return enqueue; },
-    get dismissPanel() { return dismissPanel; },
+  const { scheduleConversationTokenUsageRender, conversationSubagentLabel, mutationTouchesConversation } = features.conversation_usage({
+    usageSummaryText,
+    selectNetworkLatency,
+    MAX_CONVERSATION_USAGE_CACHE,
+    state,
+    showConversationTokenTooltip: (...args) => showConversationTokenTooltip(...args),
+    scheduleConversationTokenTooltip,
+    moveConversationTokenTooltip,
+    isConversationTooltipArea,
+    hideConversationTokenTooltip,
+    formatTokenCount,
+    conversationTurnSelector,
   });
 
-  const { bindModelNavigation } = features.navigation_events({
-    get state() { return state; },
-    get render() { return render; },
-    get setExtraPlatformDraft() { return setExtraPlatformDraft; },
-    get captureDetailPanelBaseSize() { return captureDetailPanelBaseSize; },
-    get resetDetailPanelSize() { return resetDetailPanelSize; },
+  const { showConversationTokenTooltip } = features.usage_tooltip({
+    state,
+    conversationTooltipPointer,
+    appendGenerationDetails,
+    syncConversationScrollbarPadding,
+    conversationSubagentLabel,
+    formatContextTier,
+    formatUnitPrice,
+    ensureConversationTokenTooltip,
+    positionConversationTokenTooltip,
+    clearConversationTooltipTimer,
+    isLightTheme,
+    formatTokenCount,
+    formatCny,
+    formatTooltipPercent,
+    formatExchangeRate,
   });
 
-  const { bindModelFormEvents } = features.model_events({
-    get state() { return state; },
-    get render() { return render; },
-    get setExtraPlatformDraft() { return setExtraPlatformDraft; },
-    get forgetModelDetection() { return forgetModelDetection; },
-    get bindExtraModelDetectButtons() { return bindExtraModelDetectButtons; },
-    get showExtraModelOperation() { return showExtraModelOperation; },
-    get bindManagedDeepSeekBalanceButtons() { return bindManagedDeepSeekBalanceButtons; },
-    get renderExtraModelCompatibility() { return renderExtraModelCompatibility; },
-    get blankExtraModel() { return blankExtraModel; },
-    get readExtraPlatformForm() { return readExtraPlatformForm; },
-    get enqueue() { return enqueue; },
+  const { renderExtraModelsPage, renderExtraModelCompatibility, setExtraPlatformDraft, patchExtraModelsDom, forgetModelDetection, bindExtraModelDetectButtons, showExtraModelOperation, bindManagedDeepSeekBalanceButtons, renderModelDetectionProgress, bindModelNavigation } = features.models_page({
+    CUSTOM_REASONING_EFFORTS,
+    state,
+    renderPanelControls,
+    renderExtraPlatformForm: (...args) => renderExtraPlatformForm(...args),
+    formatUpdatedAt,
+    escapeHtml,
+    patchPanelBalance,
+    renderDeepSeekModelPicker: (...args) => renderDeepSeekModelPicker(...args),
+    renderExtraModelReasoning: (...args) => renderExtraModelReasoning(...args),
+    readExtraPlatformForm: (...args) => readExtraPlatformForm(...args),
+    enqueue,
+    render,
+    captureDetailPanelBaseSize,
+    resetDetailPanelSize,
   });
 
-  const { findConversationObserverRoot, bindConversationObserver, mutationTouchesConversation } = features.conversation_observer({
-    get state() { return state; },
-    get conversationTurnSelector() { return conversationTurnSelector; },
+  const { renderExtraPlatformForm, renderDeepSeekModelPicker, renderExtraModelReasoning, readExtraPlatformForm, bindModelFormEvents } = features.model_editor({
+    state,
+    renderModelDetectionProgress,
+    renderExtraModelCompatibility,
+    formatUpdatedAt,
+    contextTokensToK,
+    contextKToTokens,
+    escapeHtml,
+    render,
+    setExtraPlatformDraft,
+    forgetModelDetection,
+    bindExtraModelDetectButtons,
+    showExtraModelOperation,
+    bindManagedDeepSeekBalanceButtons,
+    enqueue,
   });
 
   const styleText = styles.styleText;
@@ -366,11 +326,9 @@ function installQuotaWidget(
     state.shadow = null;
   }
 
-  function render() {
+  function render({ background = false } = {}) {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (!wrap) return;
-    cancelDetailPanelResize();
-    hideAccountTooltip();
     const previousScroller = wrap.querySelector(".panel-scroll");
     const retainedScroll = state.panelScrollPosition?.page === state.page ? state.panelScrollPosition : null;
     const previousScrollTop = state.dismissed ? retainedScroll?.top ?? 0 : previousScroller?.scrollTop ?? retainedScroll?.top ?? 0;
@@ -412,8 +370,58 @@ function installQuotaWidget(
         ? '<span class="host-health-dot" aria-hidden="true"></span>'
         : "";
     const chip = `${healthIndicator}${chipItems.join('<span class="quota-divider">·</span>')}`;
+    const chipLabel = hostHealth.status === "degraded" ? "Codex 任务工具异常；查看账号额度与诊断" : "查看账号额度";
+    const chipButton = wrap.querySelector(".quota-chip");
+    if (chipButton) {
+      if (chipButton.innerHTML !== chip) chipButton.innerHTML = chip;
+      if (chipButton.getAttribute("aria-label") !== chipLabel) chipButton.setAttribute("aria-label", chipLabel);
+    }
+    // A detail page does not display quota timestamps or live network samples.
+    // Compare its actual inputs, not the complete app view or editable DOM.
+    const common = JSON.stringify([state.page, state.data.version, state.data.injectionMode,
+      hostHealth, state.data.operation]);
+    const pageData = state.page === "context" ? state.data.context
+      : state.page === "wakeup" ? accounts.map(({ id, email, current, authMode, authStatus, wakeup }) =>
+        ({ id, email, current, authMode, authStatus, wakeup }))
+      : accounts;
+    const panelKey = JSON.stringify([common, pageData]);
+    if (background && wrap.querySelector(".quota-popover")) {
+      if (state.detailPanelResize) {
+        state.panelRefreshPending = true;
+        scheduleConversationTokenUsageRender();
+        return;
+      }
+      patchPanelBalance(wrap);
+      if (panelKey === state.renderedPanelKey) {
+        state.panelRefreshPending = false;
+        scheduleConversationTokenUsageRender();
+        return;
+      }
+      if (state.page === "accounts" && common === state.renderedPanelCommon) {
+        const list = wrap.querySelector(".account-list");
+        hideAccountTooltip();
+        list.innerHTML = accounts.length ? accounts.map(renderAccount).join("")
+          : '<div class="empty">暂无账号，点击下方按钮添加</div>';
+        bindAccountEvents(list);
+        bindWakeupNavigation(wrap, list);
+        bindGeneralEvents(list);
+        wrap.querySelector(".panel-count").textContent = `${accounts.length} 个账号`;
+        wrap.querySelector(".migration-open").disabled = Boolean(state.data.operation?.state === "loading" || !accounts.length);
+        state.renderedPanelKey = panelKey;
+        state.panelRefreshPending = false;
+        scheduleConversationTokenUsageRender();
+        return;
+      }
+    }
+    const restoreInputs = state.renderedPage === state.page ? preservePanelInputs(wrap) : () => {};
+    cancelDetailPanelResize();
+    hideAccountTooltip();
+    state.renderedPanelKey = panelKey;
+    state.renderedPanelCommon = common;
+    state.renderedPage = state.page;
+    state.panelRefreshPending = false;
     const hostHealthBanner = renderHostHealthBanner(hostHealth);
-    const accountHtml = accounts.length
+    const accountHtml = state.page !== "accounts" ? "" : accounts.length
       ? accounts.map(renderAccount).join("")
       : '<div class="empty">暂无账号，点击下方按钮添加</div>';
     const oauthCancellable =
@@ -480,7 +488,7 @@ function installQuotaWidget(
       ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text"${footerTitle}>${footerMeta}</span></div>`
       : "";
     wrap.innerHTML = `
-      <button class="quota-chip" type="button" aria-label="${hostHealth.status === "degraded" ? "Codex 任务工具异常；查看账号额度与诊断" : "查看账号额度"}">${chip}</button>
+      <button class="quota-chip" type="button" aria-label="${chipLabel}">${chip}</button>
       <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${versionFooter}</div></section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
@@ -488,12 +496,15 @@ function installQuotaWidget(
       const header = nextScroller.querySelector(".panel-head");
       if (header) nextPopover.prepend(header);
       nextPopover.showPopover();
+      positionPopover(wrap);
+      restoreInputs();
+      // Native time inputs may scroll their internal editor even with
+      // preventScroll. Restore the user's scroll after restoring focus.
+      if (wakeupFocus) state.shadow.getElementById(wakeupFocus)?.focus({ preventScroll: true });
       nextScroller.scrollTop = previousScrollTop;
       nextScroller.scrollLeft = previousScrollLeft;
     }
-    positionPopover(wrap);
     bindEvents(wrap);
-    if (wakeupFocus) state.shadow.getElementById(wakeupFocus)?.focus({ preventScroll: true });
     scheduleConversationTokenUsageRender();
   }
 
@@ -583,15 +594,21 @@ function installQuotaWidget(
         Boolean(state.shadow?.querySelector(".extra-models-popover"));
       state.dataJson = json;
       state.dataRevision = revision;
-      state.tokenUsageRevision = revision;
-      state.data = data ?? state.data;
+      if (data && Object.prototype.hasOwnProperty.call(data, "tokenUsage")) state.tokenUsageRevision = revision;
+      state.data = { ...state.data, ...data };
       ensureMounted();
-      patchExtraModelsDom(data?.extraModels, { clearDraftOperation: true });
+      if (data && Object.prototype.hasOwnProperty.call(data, "extraModels")) {
+        patchExtraModelsDom(data.extraModels, { clearDraftOperation: true });
+      }
       if (patchOpenExtraModelsPage) {
         scheduleConversationTokenUsageRender();
         return;
       }
-      render();
+      render({ background: true });
+    },
+    updateNetwork(network) {
+      state.data = { ...state.data, network };
+      scheduleConversationTokenUsageRender();
     },
     updateExtraModels(extraModels, revision = null) {
       if (revision != null && revision === state.dataRevision) return;

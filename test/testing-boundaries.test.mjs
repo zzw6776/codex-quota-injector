@@ -63,7 +63,7 @@ function verifiedCompatibility({ protocol = "responses", supportsImage = false }
   };
 }
 
-test("[A HAR-01 HAR-04] 桌面付费计划在无支持运行环境的平台只报告 unsupported", async () => {
+test("[HAR-01 HAR-04] 桌面付费计划在无支持运行环境的平台只报告 unsupported", async () => {
   assert.equal(await selectedRuntime("current", {
     platform: "linux",
     allowUnsupportedCurrent: true,
@@ -76,7 +76,7 @@ test("[A HAR-01 HAR-04] 桌面付费计划在无支持运行环境的平台只�
   }), /没有完整测试运行环境/);
 });
 
-test("[platform:windows-native] [A HAR-04] Windows 原生真实测试显式启用可写的受限令牌沙箱", () => {
+test("[platform:windows-native] [HAR-04] Windows 原生真实测试显式启用可写的受限令牌沙箱", () => {
   assert.deepEqual(liveSandboxConfigLines("windows-native"), [
     'sandbox_mode="workspace-write"',
     'approval_policy="never"',
@@ -90,7 +90,7 @@ test("[platform:windows-native] [A HAR-04] Windows 原生真实测试显式启�
   }
 });
 
-test("[A RPC-02 HAR-04] 完整场景清单绑定证据文件，未执行与真实宿主不能自动变成通过", async () => {
+test("[RPC-02 HAR-04] 完整场景清单绑定证据文件，未执行与真实宿主不能自动变成通过", async () => {
   const coverage = await scenarioCoverage();
   assert.equal(new Set(coverage.map(s => s.id)).size, coverage.length);
   assert.ok(coverage.every(s => s.status !== "free-evidence-passed"));
@@ -99,7 +99,7 @@ test("[A RPC-02 HAR-04] 完整场景清单绑定证据文件，未执行与真�
   assert.equal(coverage.find(s => s.id === "ACC-04").liveRequired, "lifecycle");
 });
 
-test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，不要求当前账号或启动官方程序", async t => {
+test("[HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，不要求当前账号或启动官方程序", async t => {
   const directory = await useTempDir(t);
   const providerData = join(directory, "provider-data");
   await mkdir(providerData);
@@ -142,19 +142,20 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
     CODEX_QUOTA_DATA_DIR: providerData,
   }), timeout: 10000 };
   const plan = JSON.parse((await exec(process.execPath, ["scripts/test-live.mjs", "--plan"], options)).stdout);
-  assert.equal(plan.batch, "B-overview");
+  assert.equal(plan.batch, "model-overview");
   assert.deepEqual(plan.profiles.map(p => p.id), ["official", "deepseek"]);
   const selectedPlan = JSON.parse((await exec(process.execPath,
     ["scripts/test-live.mjs", "--plan", "--profile=official"], options)).stdout);
   assert.equal(selectedPlan.profileFilter, "official");
-  assert.equal(selectedPlan.batch, "B1-official");
+  assert.equal(selectedPlan.batch, "model-official");
+  assert.equal(selectedPlan.name, "后台功能测试 - Codex 官方模型");
   assert.equal(selectedPlan.runtimeTarget, process.platform === "darwin"
     ? "macos-native"
     : process.platform === "win32"
       ? selectedPlan.currentRuntime
       : "unsupported");
   assert.equal(selectedPlan.changesDesktopRuntime, false);
-  assert.equal(selectedPlan.component, `B1-official-backend/${selectedPlan.runtimeTarget}`);
+  assert.equal(selectedPlan.component, `model-official-backend/${selectedPlan.runtimeTarget}`);
   assert.deepEqual(selectedPlan.components.map(component => [component.kind, component.status]), [
     ["backend", "planned"],
     ["desktop-entry", "not-run"],
@@ -197,8 +198,10 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
   ]);
   const desktopPlan = JSON.parse((await exec(process.execPath,
     ["scripts/test-desktop-host.mjs", "--plan", "--profile=deepseek"], options)).stdout);
-  assert.equal(desktopPlan.batch, "B2-deepseek");
-  assert.equal(desktopPlan.component, `B2-deepseek-desktop/${desktopPlan.runtimeTarget}`);
+  assert.equal(desktopPlan.batch, "model-deepseek");
+  assert.equal(deepseekPlan.name, "后台功能测试 - DeepSeek Flash");
+  assert.equal(desktopPlan.name, "桌面集成测试 - DeepSeek Flash");
+  assert.equal(desktopPlan.component, `model-deepseek-desktop/${desktopPlan.runtimeTarget}`);
   assert.equal(desktopPlan.expectedModel, DEEPSEEK_CANONICAL_MODEL_ID);
   await assert.rejects(exec(process.execPath,
     ["scripts/test-desktop-host.mjs", "--profile=official"], options), error => {
@@ -236,7 +239,7 @@ test("[A HAR-01 HAR-04] 实测付费测试未授权时只列计划或跳过，�
   await assert.rejects(readFile(join(options.env.CODEX_HOME, "auth.json")), { code: "ENOENT" });
 });
 
-test("[A HAR-04 OBS-03] 真实失败证据保留阶段、用量和工具类型但不复制正文", () => {
+test("[HAR-04 OBS-03] 真实失败证据保留阶段、用量和工具类型但不复制正文", () => {
   const evidence = summarizeLiveEvidence({ profile: "fixture", model: "model-a", stage: "模型驱动 MCP 调用",
     budget: { tokens: 321, turns: 2 }, sanitize: text => text.replaceAll("PRIVATE", "[隐藏]"), events: [
       { method: "item/completed", params: { item: { type: "agentMessage", status: "completed", text: "PRIVATE" } } },
@@ -260,7 +263,7 @@ test("[A HAR-04 OBS-03] 真实失败证据保留阶段、用量和工具类型�
   assert.ok(!JSON.stringify(mcp).includes("PRIVATE"));
 });
 
-test("[A HAR-04 MOD-03] B1/B2 从模型配置平台隔离官方与 DeepSeek Flash，排除 Pro 和 TokenHub", async (t) => {
+test("[HAR-04 MOD-03] 官方模型与 DeepSeek Flash 测试 从模型配置平台隔离官方与 DeepSeek Flash，排除 Pro 和 TokenHub", async (t) => {
   const extraModelManager = {
     settings: {
       generation: 9,
@@ -301,7 +304,7 @@ test("[A HAR-04 MOD-03] B1/B2 从模型配置平台隔离官方与 DeepSeek Flas
   const profiles = await liveProfiles({ extraModelManager });
   assert.deepEqual(profiles.map((value) => value.id), ["official", "deepseek"]);
   assert.deepEqual(profiles[0].extraModels.platforms, [],
-    "B1 不能把任何第三方平台带入隔离运行时");
+    "官方模型测试 不能把任何第三方平台带入隔离运行时");
   const [profile] = selectLiveProfiles(
     profiles,
     "deepseek",
@@ -333,7 +336,7 @@ test("[A HAR-04 MOD-03] B1/B2 从模型配置平台隔离官方与 DeepSeek Flas
   assert.equal(liveRouterConfiguration(route).tokenHeader, "x-codex-quota-router-token");
 });
 
-test("[A HAR-04 MOD-03] B2 在 DeepSeek Flash 检测结果过期时于发送 Token 前停止", async () => {
+test("[HAR-04 MOD-03] DeepSeek Flash 测试 在 DeepSeek Flash 检测结果过期时于发送 Token 前停止", async () => {
   const extraModelManager = {
     settings: {
       generation: 3,

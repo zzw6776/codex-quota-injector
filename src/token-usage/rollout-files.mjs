@@ -1,6 +1,6 @@
 import { open, stat, readdir } from "node:fs/promises";
 import { join, basename } from "node:path";
-import { READ_CHUNK_BYTES, MAX_ROLLOUT_METADATA_BYTES, positiveInteger, nonEmptyString } from "./contract.mjs";
+import { RECENT_ROLLOUT_ACTIVITY_MS, MAX_TRACKED_ROLLOUT_STATES, READ_CHUNK_BYTES, MAX_ROLLOUT_METADATA_BYTES, positiveInteger, nonEmptyString } from "./contract.mjs";
 
 async function readAppendedChunks(path, state, onLine) {
   const info = await stat(path);
@@ -107,3 +107,57 @@ function threadIdFromRolloutPath(path) {
 }
 
 export { readAppendedChunks, collectRolloutFiles, readRolloutSessionMetadata, threadIdFromRolloutPath };
+
+// File discovery and grouping are independent of turn accounting and cache scheduling.
+export async function refreshRolloutCatalogFiles(codexHome, { rolloutPathsByThread, rolloutMetadataByPath, rolloutMetadataByThread, recentRolloutThreads }) {
+  const paths = await collectRolloutFiles(join(codexHome, "sessions"), 4);
+  rolloutPathsByThread.clear();
+  rolloutMetadataByThread.clear();
+  recentRolloutThreads.clear();
+  const discoveredPaths = new Set(paths);
+  for (const path of rolloutMetadataByPath.keys()) {
+    if (!discoveredPaths.has(path)) rolloutMetadataByPath.delete(path);
+  }
+  const catalogEntries = (await Promise.all(paths.map(async (path) => {
+    let metadata = rolloutMetadataByPath.get(path);
+    if (!metadata) {
+      metadata = await readRolloutSessionMetadata(path);
+      if (metadata) rolloutMetadataByPath.set(path, metadata);
+    }
+    let modifiedAt;
+    try {
+      modifiedAt = (await stat(path)).mtimeMs;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    }
+    const threadId = metadata?.threadId ?? threadIdFromRolloutPath(path);
+    return threadId ? { path, metadata, threadId, modifiedAt } : null;
+  }))).filter(Boolean);
+  const entriesByThread = new Map();
+  for (const entry of catalogEntries) {
+    const entries = entriesByThread.get(entry.threadId) ?? [];
+    entries.push(entry);
+    entriesByThread.set(entry.threadId, entries);
+  }
+  const latestEntries = [];
+  for (const [threadId, entries] of entriesByThread) {
+    entries.sort((left, right) => left.modifiedAt - right.modifiedAt ||
+      basename(left.path).localeCompare(basename(right.path)));
+    rolloutPathsByThread.set(threadId, entries.map((entry) => entry.path));
+    const latestEntry = entries.at(-1);
+    latestEntries.push(latestEntry);
+    if (latestEntry.metadata) {
+      rolloutMetadataByThread.set(threadId, latestEntry.metadata);
+    }
+  }
+  const recentCutoff = Date.now() - RECENT_ROLLOUT_ACTIVITY_MS;
+  const recentEntries = latestEntries
+    .filter((entry) => entry.modifiedAt >= recentCutoff)
+    .sort((left, right) => right.modifiedAt - left.modifiedAt)
+    .slice(0, MAX_TRACKED_ROLLOUT_STATES);
+  for (const entry of recentEntries) {
+    recentRolloutThreads.add(entry.threadId);
+  }
+  return { paths, discoveredPaths, entriesByThread, latestEntries };
+}

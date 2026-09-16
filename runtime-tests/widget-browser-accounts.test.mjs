@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fixtureData, startBrowser } from "./support/browser.mjs";
 
-test("[A UI-02 ACC-01 ACC-02 ACC-05] 页面刷新、迁移、恢复、导入和授权取消产生唯一且完整的动作", { timeout: 30_000 }, async t => {
+test("[UI-02 ACC-01 ACC-02 ACC-05] 页面刷新、迁移、恢复、导入和授权取消产生唯一且完整的动作", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   await b.click(".quota-chip");
   for (const [selector, type] of [[".refresh-all", "refresh-all"], [".local-import", "local-import"], [".oauth-add", "oauth-add"]]) {

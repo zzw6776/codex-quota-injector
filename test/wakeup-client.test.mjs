@@ -44,7 +44,7 @@ async function fixture(t, scenario) {
   };
 }
 
-test("[A WK-02 ACC-03] 唤醒遍历模型分页选择最低已知价格、最低推理档，并完成一次刷新回调", async t => {
+test("[WK-02 ACC-03] 唤醒遍历模型分页选择最低已知价格、最低推理档，并完成一次刷新回调", async t => {
   const f = await fixture(t, "refresh");
   const result = await f.run();
   assert.deepEqual(result, { model: "gpt-5.4-mini", reply: "OK" });
@@ -56,7 +56,7 @@ test("[A WK-02 ACC-03] 唤醒遍历模型分页选择最低已知价格、最低
   assert.equal(turns.length, 1); assert.equal(turns[0].params.effort, "low");
 });
 
-test("[A WK-02 HAR-04 OBS-02] 唤醒无已知模型、协议错误、宿主交互、超时和凭据错误均停止并清理", async t => {
+test("[WK-02 HAR-04 OBS-02] 唤醒无已知模型、协议错误、宿主交互、超时和凭据错误均停止并清理", async t => {
   const cases = { "unknown-model": /缺少价格/, malformed: /解析/, exit: /退出|通信中断/, interaction: /额外交互/, hang: /超时.*结果未知/, "secret-error": /\[已隐藏凭据\]/ };
   for (const [scenario, pattern] of Object.entries(cases)) await t.test(scenario, async t => {
     const f = await fixture(t, scenario);

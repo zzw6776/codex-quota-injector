@@ -49,7 +49,7 @@ import { open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { useTempDir } from "./helpers.mjs";
 
-test("[A LCH-01 LCH-03] 生命周期就绪必须同时满足 Codex、单实例、同代中继和目标协议", () => {
+test("[LCH-01 LCH-03] 生命周期就绪必须同时满足 Codex、单实例、同代中继和目标协议", () => {
   const base = {
     relayConfig: { generation: "catalog:usage-events-v52:router" },
     relayState: { generation: "catalog:usage-events-v52:router", pid: 44 },
@@ -75,7 +75,7 @@ test("[A LCH-01 LCH-03] 生命周期就绪必须同时满足 Codex、单实例�
     "回滚到未知旧协议时仍可只验证宿主基础就绪");
 });
 
-test("[A LCH-03 LCH-04] 接管 app-server 后 codex_app 健康状态是生命周期硬门禁", () => {
+test("[LCH-03 LCH-04] 接管 app-server 后 codex_app 健康状态是生命周期硬门禁", () => {
   const now = 1_800_000_000_000;
   const generation = `catalog:usage-events-v${RELAY_PROTOCOL_VERSION}:router`;
   const base = {
@@ -108,18 +108,18 @@ test("[A LCH-03 LCH-04] 接管 app-server 后 codex_app 健康状态是生命周
   assert.equal(evaluateLifecycleReadiness({ ...base, healthState: null }).ready, false);
 });
 
-test("[A LCH-05 LCH-06] 中继协议只从独立 generation 段读取，不能被相似文本误判", () => {
+test("[LCH-05 LCH-06] 中继协议只从独立 generation 段读取，不能被相似文本误判", () => {
   assert.equal(relayProtocolFromGeneration("a:usage-events-v52:b"), 52);
   assert.equal(relayProtocolFromGeneration("a:prefix-usage-events-v52:b"), null);
   assert.equal(relayProtocolFromGeneration("a:usage-events-v52x:b"), null);
   assert.equal(relayProtocolFromGeneration(null), null);
 });
 
-test("[platform:windows-native] [A LCH-03] Windows 监听 PID 输出会去重并过滤无效进程", () => {
+test("[platform:windows-native] [LCH-03] Windows 监听 PID 输出会去重并过滤无效进程", () => {
   assert.deepEqual(parsePidLines("42\r\ninvalid\r\n42\r\n73\r\n-1\r\n"), [42, 73]);
 });
 
-test("[platform:windows-native] [A LCH-03] Windows 桌面 PID 探针排除独立轮换的 app-server", async () => {
+test("[platform:windows-native] [LCH-03] Windows 桌面 PID 探针排除独立轮换的 app-server", async () => {
   let command;
   const pids = await listCodexDesktopProcessIds({
     platform: "win32",
@@ -135,7 +135,7 @@ test("[platform:windows-native] [A LCH-03] Windows 桌面 PID 探针排除独立
   assert.doesNotMatch(command, /codex-upstream\.exe/);
 });
 
-test("[platform:windows-native] [A LCH-06] Windows 已安装版本使用完整卸载注册表路径读取", async () => {
+test("[platform:windows-native] [LCH-06] Windows 已安装版本使用完整卸载注册表路径读取", async () => {
   let invocation;
   const version = await readWindowsInstalledVersion({
     platform: "win32",
@@ -155,7 +155,7 @@ test("[platform:windows-native] [A LCH-06] Windows 已安装版本使用完整�
   }), null);
 });
 
-test("[A ACC-04] 账号往返只选择当前 OAuth 与另一个 OAuth，公开材料只保留不可逆指纹", () => {
+test("[ACC-04] 账号往返只选择当前 OAuth 与另一个 OAuth，公开材料只保留不可逆指纹", () => {
   const pair = selectLifecycleAccountPair({ currentAccountId: "account-a", accounts: [
     { id: "account-a", authMode: "oauth" },
     { id: "api-key", authMode: "apiKey" },
@@ -180,7 +180,7 @@ test("[A ACC-04] 账号往返只选择当前 OAuth 与另一个 OAuth，公开�
   ] }).available, false);
 });
 
-test("[platform:macos-native] [A HAR-02 LCH-06] macOS launchd 监督器使用参数数组且正确转义路径，不经过页面或 shell", () => {
+test("[platform:macos-native] [HAR-02 LCH-06] macOS launchd 监督器使用参数数组且正确转义路径，不经过页面或 shell", () => {
   const plist = launchdPlist({
     label: "com.example.lifecycle",
     nodeExecutable: "/path with space/node",
@@ -198,7 +198,7 @@ test("[platform:macos-native] [A HAR-02 LCH-06] macOS launchd 监督器使用参
   assert.doesNotMatch(plist, /sh -c/);
 });
 
-test("[platform:windows-native] [A HAR-02 LCH-06] Windows 监督器由计划任务托管并保留带空格参数", () => {
+test("[platform:windows-native] [HAR-02 LCH-06] Windows 监督器由计划任务托管并保留带空格参数", () => {
   const script = windowsScheduledTaskScript({
     taskName: "CodexQuotaInjector-Lifecycle-1",
     nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
@@ -225,7 +225,7 @@ test("[platform:windows-native] [A HAR-02 LCH-06] Windows 监督器由计划任�
   assert.match(recoveryScript, /"C:\\repo path\\scripts\\lifecycle-supervisor\.mjs" --recover --control "C:\\private path\\control\.json"/);
 });
 
-test("[platform:windows-native] [A HAR-04 LCH-06] Windows 回滚必须使用调度前记录的启动入口", () => {
+test("[platform:windows-native] [HAR-04 LCH-06] Windows 回滚必须使用调度前记录的启动入口", () => {
   assert.equal(selectWindowsRecoveryEntry({ recoveryEntry: "current-source" }), "current-source");
   assert.equal(selectWindowsRecoveryEntry({ recoveryEntry: "installed-package" }), "installed-package");
   assert.throws(() => selectWindowsRecoveryEntry({}), /拒绝猜测恢复方式/);
@@ -243,7 +243,7 @@ test("[platform:windows-native] [A HAR-04 LCH-06] Windows 回滚必须使用调�
   }), "installed-package");
 });
 
-test("[platform:windows-native] [A HAR-03 LCH-02] Windows 运行方式恢复保留 Codex 启动期间写入的其他配置", async (t) => {
+test("[platform:windows-native] [HAR-03 LCH-02] Windows 运行方式恢复保留 Codex 启动期间写入的其他配置", async (t) => {
   const directory = await useTempDir(t, "codex-runtime-switch-");
   const configPath = join(directory, "config.toml");
   const original = "model = \"gpt-5\"\n[desktop]\nrunCodexInWindowsSubsystemForLinux = false # original\n";
@@ -326,7 +326,7 @@ test("[platform:windows-native] Windows 多次切换后恢复仍保留已经合�
   }
 });
 
-test("[platform:windows-native] [A LCH-03] Windows 首次初始化切换 PID 后达到稳定状态才建立重复启动基线", async () => {
+test("[platform:windows-native] [LCH-03] Windows 首次初始化切换 PID 后达到稳定状态才建立重复启动基线", async () => {
   const first = readyHost({ injectorPid: 101, codexPids: [201], relayPid: 301 });
   const initialized = readyHost({ injectorPid: 101, codexPids: [202], relayPid: 301 });
   const snapshots = [first, initialized, initialized, initialized, initialized];
@@ -344,7 +344,7 @@ test("[platform:windows-native] [A LCH-03] Windows 首次初始化切换 PID 后
   assert.deepEqual(result.codexPids, [202]);
 });
 
-test("[platform:windows-native] [A LCH-03] Windows 重复启动只比较桌面主进程，允许 app-server 独立轮换", async () => {
+test("[platform:windows-native] [LCH-03] Windows 重复启动只比较桌面主进程，允许 app-server 独立轮换", async () => {
   const baseline = readyHost({ injectorPid: 101, codexPids: [201], relayPid: 301 });
   baseline.appServerPids = [401];
   const rotated = structuredClone(baseline);
@@ -359,7 +359,7 @@ test("[platform:windows-native] [A LCH-03] Windows 重复启动只比较桌面�
   assert.deepEqual(result.appServerPids, [402]);
 });
 
-test("[platform:windows-native] [C LCH-05] Windows Codex 关闭后等待旧注入器释放单实例端口再允许重开", async () => {
+test("[platform:windows-native] [LCH-05] Windows Codex 关闭后等待旧注入器释放单实例端口再允许重开", async () => {
   const observations = [[101], [101], []];
   const waits = [];
   const result = await waitForWindowsInjectorOwnersExit([101], {
@@ -372,7 +372,7 @@ test("[platform:windows-native] [C LCH-05] Windows Codex 关闭后等待旧注�
   assert.deepEqual(waits, [78, 78]);
 });
 
-test("[platform:windows-native] [A LCH-02 LCH-03] Windows 生命周期等待目标 Relay 类型，不能继承另一环境结果", async () => {
+test("[platform:windows-native] [LCH-02 LCH-03] Windows 生命周期等待目标 Relay 类型，不能继承另一环境结果", async () => {
   const wrong = readyHost({ injectorPid: 101, wslNative: true });
   const expected = readyHost({ injectorPid: 101, wslNative: false });
   const snapshots = [wrong, expected];
@@ -388,7 +388,7 @@ test("[platform:windows-native] [A LCH-02 LCH-03] Windows 生命周期等待目�
   assert.equal(result.relay.wslNative, false);
 });
 
-test("[platform:wsl-native] [A LCH-02] C 批在改配置前确认 WSL 官方 CLI 与进程身份接口可用", async () => {
+test("[platform:wsl-native] [LCH-02] 启停恢复测试在改配置前确认 WSL 官方 CLI 与进程身份接口可用", async () => {
   let invocation;
   assert.deepEqual(await inspectWslLifecyclePrerequisites({
     platform: "win32",
@@ -409,7 +409,7 @@ test("[platform:wsl-native] [A LCH-02] C 批在改配置前确认 WSL 官方 CLI
   })).status, "blocked");
 });
 
-test("[platform:windows-native] [C HAR-04 LCH-04] Windows C 自动备份并重建停滞任务的两套派生投影", async () => {
+test("[platform:windows-native] [HAR-04 LCH-04] Windows C 自动备份并重建停滞任务的两套派生投影", async () => {
   const events = [];
   let saved;
   const evidence = await safeguardWindowsDesktopHistory({
@@ -465,7 +465,7 @@ test("[platform:windows-native] [C HAR-04 LCH-04] Windows C 自动备份并重�
   assert.deepEqual(saved.desktopHistory, evidence);
 });
 
-test("[platform:windows-native] [C HAR-04 LCH-04] Windows 未知分页异常在停止桌面前保持阻塞", async () => {
+test("[platform:windows-native] [HAR-04 LCH-04] Windows 未知分页异常在停止桌面前保持阻塞", async () => {
   let stopped = false;
   await assert.rejects(safeguardWindowsDesktopHistory({
     reportPath: "C:\\report\\report.json",
@@ -487,7 +487,7 @@ test("[platform:windows-native] [C HAR-04 LCH-04] Windows 未知分页异常在�
   assert.equal(stopped, false);
 });
 
-test("[platform:windows-native] [C LCH-04] Windows C 只在桌面启动前主动恢复落后的投影", async () => {
+test("[platform:windows-native] [LCH-04] Windows C 只在桌面启动前主动恢复落后的投影", async () => {
   const threadId = "01a0966e-380a-7692-a939-0a3beeb054a5";
   const events = [];
   let rebuilt = false;
@@ -541,7 +541,7 @@ test("[platform:windows-native] [C LCH-04] Windows C 只在桌面启动前主动
   assert.equal(result.rebuild.status, "requested");
 });
 
-test("[platform:windows-native] [C LCH-04] Windows 桌面运行时拒绝启动第二个 app-server 重建历史", async () => {
+test("[platform:windows-native] [LCH-04] Windows 桌面运行时拒绝启动第二个 app-server 重建历史", async () => {
   const threadId = "01a0966e-380a-7692-a939-0a3beeb054a5";
   let attempts = 0;
   await assert.rejects(prepareWindowsHistoryBeforeLaunch({
@@ -565,7 +565,7 @@ test("[platform:windows-native] [C LCH-04] Windows 桌面运行时拒绝启动�
   assert.equal(attempts, 0);
 });
 
-test("[platform:windows-native] [C LCH-04] Windows 桌面已退出但旧 app-server 残留时也拒绝历史重建", async () => {
+test("[platform:windows-native] [LCH-04] Windows 桌面已退出但旧 app-server 残留时也拒绝历史重建", async () => {
   const threadId = "01a0966e-380a-7692-a939-0a3beeb054a5";
   let attempts = 0;
   await assert.rejects(prepareWindowsHistoryBeforeLaunch({
@@ -589,7 +589,7 @@ test("[platform:windows-native] [C LCH-04] Windows 桌面已退出但旧 app-ser
   assert.equal(attempts, 0);
 });
 
-test("[platform:windows-native] [C LCH-04] Windows 桌面启动后的历史门禁只读等待且不主动重建", async () => {
+test("[platform:windows-native] [LCH-04] Windows 桌面启动后的历史门禁只读等待且不主动重建", async () => {
   const threadId = "01a0966e-380a-7692-a939-0a3beeb054a5";
   let inspections = 0;
   const result = await waitForWindowsHistoryDurable({
@@ -616,7 +616,7 @@ test("[platform:windows-native] [C LCH-04] Windows 桌面启动后的历史门�
   assert.equal(result.rebuild, null);
 });
 
-test("[platform:windows-native] [C LCH-04] Windows 历史恢复使用正式 Relay 和独立状态文件", async (t) => {
+test("[platform:windows-native] [LCH-04] Windows 历史恢复使用正式 Relay 和独立状态文件", async (t) => {
   const directory = await useTempDir(t, "codex-windows-history-rebuild-");
   const dataDir = join(directory, "data");
   const reportPath = join(directory, "run", "report.json");
@@ -654,7 +654,7 @@ test("[platform:windows-native] [C LCH-04] Windows 历史恢复使用正式 Rela
   assert.equal(result.relayRuntime, "windows-native");
 });
 
-test("[platform:windows-native][platform:wsl-native] [A LCH-06] Windows/WSL 首次安装的源码恢复入口必须是当前运行环境的有效原生产物", async () => {
+test("[platform:windows-native][platform:wsl-native] [LCH-06] Windows/WSL 首次安装的源码恢复入口必须是当前运行环境的有效原生产物", async () => {
   const checked = [];
   const validators = {
     assertWindowsExecutable: async (path) => { checked.push(["windows", path]); },
@@ -692,7 +692,7 @@ test("[platform:windows-native][platform:wsl-native] [A LCH-06] Windows/WSL 首�
   }), { status: "ready", reason: null });
 });
 
-test("[platform:windows-native] [A LCH-06] Windows Setup 和安装目录必须与同一个版本化中继集合对应", async (t) => {
+test("[platform:windows-native] [LCH-06] Windows Setup 和安装目录必须与同一个版本化中继集合对应", async (t) => {
   const directory = await useTempDir(t, "codex-windows-lifecycle-");
   const installer = join(directory, "Codex-Quota-Injector-1.2.3-windows-x64-Setup.exe");
   const file = await open(installer, "w");
@@ -739,7 +739,7 @@ test("[platform:windows-native] [A LCH-06] Windows Setup 和安装目录必须�
   );
 });
 
-test("[platform:macos-native] [A LCH-06] macOS 正式包 Node 运行时只接受清单中与归档名精确对应的 SHA-256", () => {
+test("[platform:macos-native] [LCH-06] macOS 正式包 Node 运行时只接受清单中与归档名精确对应的 SHA-256", () => {
   const checksum = "a".repeat(64);
   assert.equal(checksumForArchive(
     `${"b".repeat(64)}  node-other.tar.gz\n${checksum}  node-v22.23.1-darwin-arm64.tar.gz\n`,
@@ -755,7 +755,7 @@ test("[platform:macos-native] [A LCH-06] macOS 正式包 Node 运行时只接受
   ), /校验清单中缺少/);
 });
 
-test("[platform:macos-native] [A LCH-03 LCH-04] macOS 已就绪的旧监听者不能让正式包接管检查提前成功", async () => {
+test("[platform:macos-native] [LCH-03 LCH-04] macOS 已就绪的旧监听者不能让正式包接管检查提前成功", async () => {
   const oldSource = readyHost({ injectorPid: 101 });
   const installedPackage = readyHost({ injectorPid: 202 });
   const snapshots = [oldSource, installedPackage];
@@ -779,7 +779,7 @@ test("[platform:macos-native] [A LCH-03 LCH-04] macOS 已就绪的旧监听者�
   assert.deepEqual(result.injectorPids, [202]);
 });
 
-test("[platform:macos-native] [A LCH-03 LCH-04] macOS 接管超时必须明确报告目标进程归属未满足", async () => {
+test("[platform:macos-native] [LCH-03 LCH-04] macOS 接管超时必须明确报告目标进程归属未满足", async () => {
   const oldSource = readyHost({ injectorPid: 101 });
   await assert.rejects(waitForTargetHost({
     installedApp: "/Applications/Codex Quota Injector.app",
@@ -793,7 +793,7 @@ test("[platform:macos-native] [A LCH-03 LCH-04] macOS 接管超时必须明确�
   }), /installed-package-owner/);
 });
 
-test("[platform:macos-native] [C LCH-03] 新监听者仍在启动或复用请求未完成时不得用旧就绪状态通过", async () => {
+test("[platform:macos-native] [LCH-03] 新监听者仍在启动或复用请求未完成时不得用旧就绪状态通过", async () => {
   const host = readyHost({injectorPid:202});
   const control = {projectVersion:"1.2.3"};
   const states = [
@@ -814,7 +814,7 @@ test("[platform:macos-native] [C LCH-03] 新监听者仍在启动或复用请求
     inspectHost:async()=>structuredClone(host),readLauncherStatus:async()=>states[0]}),/launcher-not-ready/);
 });
 
-test("[platform:macos-native] [A LCH-03 LCH-06] macOS 安装路径被替换后必须按文件实体识别 Worker", () => {
+test("[platform:macos-native] [LCH-03 LCH-06] macOS 安装路径被替换后必须按文件实体识别 Worker", () => {
   const reusedPath = [
     "p123",
     "ftxt",
@@ -832,7 +832,7 @@ test("[platform:macos-native] [A LCH-03 LCH-06] macOS 安装路径被替换后�
   }), true);
 });
 
-test("[platform:macos-native] [A LCH-06 HAR-04] macOS 安装未改写目标包时回滚保留原包，未知状态先报错再停止进程", () => {
+test("[platform:macos-native] [LCH-06 HAR-04] macOS 安装未改写目标包时回滚保留原包，未知状态先报错再停止进程", () => {
   assert.equal(selectInstallRollbackAction({
     backupExists: false,
     initialInstalledVersion: "0.1.202",
@@ -860,7 +860,7 @@ test("[platform:macos-native] [A LCH-06 HAR-04] macOS 安装未改写目标包�
   }), /备份不存在/);
 });
 
-test("[platform:windows-native] [A LCH-06 HAR-04] Windows 回滚按安装前状态恢复旧包、移除新增包或拒绝未知状态", () => {
+test("[platform:windows-native] [LCH-06 HAR-04] Windows 回滚按安装前状态恢复旧包、移除新增包或拒绝未知状态", () => {
   assert.equal(selectWindowsInstallRollbackAction({
     backupExists: true,
     initialInstalledPresent: true,

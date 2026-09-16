@@ -1,14 +1,6 @@
-function createUsageLines(dependencies) {
-  const { usageSummaryText, selectNetworkLatency, MAX_CONVERSATION_USAGE_CACHE, state } = dependencies;
-  const showConversationTokenTooltip = (...args) => dependencies.showConversationTokenTooltip(...args);
-  const scheduleConversationTokenTooltip = (...args) => dependencies.scheduleConversationTokenTooltip(...args);
-  const moveConversationTokenTooltip = (...args) => dependencies.moveConversationTokenTooltip(...args);
-  const isConversationTooltipArea = (...args) => dependencies.isConversationTooltipArea(...args);
-  const hideConversationTokenTooltip = (...args) => dependencies.hideConversationTokenTooltip(...args);
-  const formatTokenCount = (...args) => dependencies.formatTokenCount(...args);
-  const bindConversationObserver = (...args) => dependencies.bindConversationObserver(...args);
-
-function scheduleConversationTokenUsageRender() {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createConversationUsage({ usageSummaryText, selectNetworkLatency, MAX_CONVERSATION_USAGE_CACHE, state, showConversationTokenTooltip, scheduleConversationTokenTooltip, moveConversationTokenTooltip, isConversationTooltipArea, hideConversationTokenTooltip, formatTokenCount, conversationTurnSelector }) {
+  function scheduleConversationTokenUsageRender() {
     if (state.conversationRenderFrame != null) return;
     state.conversationRenderFrame = window.requestAnimationFrame(() => {
       state.conversationRenderFrame = null;
@@ -16,7 +8,7 @@ function scheduleConversationTokenUsageRender() {
     });
   }
 
-function placeConversationTokenUsageLine(line, host) {
+  function placeConversationTokenUsageLine(line, host) {
     if (!line || !host) return;
     let footer = [...host.children].find((child) =>
       child.matches?.("[data-codex-token-usage-footer]"));
@@ -29,7 +21,7 @@ function placeConversationTokenUsageLine(line, host) {
     if (line.parentElement !== footer) footer.append(line);
   }
 
-function renderConversationTokenUsage() {
+  function renderConversationTokenUsage() {
     const incomingUsageItems = Array.isArray(state.data.tokenUsage?.turns)
       ? state.data.tokenUsage.turns
       : [];
@@ -153,7 +145,7 @@ function renderConversationTokenUsage() {
     }
   }
 
-function conversationSubagentLabel(usage) {
+  function conversationSubagentLabel(usage) {
     if (!usage?.isSubagent) return "";
     const nickname = String(usage.agentNickname ?? "").trim();
     const path = String(usage.agentPath ?? "").trim();
@@ -163,7 +155,57 @@ function conversationSubagentLabel(usage) {
     return `${depth > 1 ? `子智能体 L${depth}` : "子智能体"}${identity ? ` ${identity}` : ""}`;
   }
 
-  return { scheduleConversationTokenUsageRender, placeConversationTokenUsageLine, renderConversationTokenUsage, conversationSubagentLabel };
+  function findConversationObserverRoot() {
+    const firstTurn = document.querySelector(conversationTurnSelector);
+    if (!firstTurn) return null;
+    let candidate = firstTurn.parentElement;
+    while (candidate && candidate !== document.body) {
+      if (candidate.querySelectorAll(conversationTurnSelector).length > 1) return candidate;
+      candidate = candidate.parentElement;
+    }
+    return firstTurn.parentElement;
+  }
+
+  function bindConversationObserver() {
+    if (state.conversationObserverRoot?.isConnected) return;
+    const root = findConversationObserverRoot();
+    if (root === state.conversationObserverRoot) return;
+    state.observer?.disconnect();
+    state.conversationObserverRoot = root;
+    if (root) {
+      state.observer?.observe(root, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-content-search-turn-key"],
+      });
+    }
+  }
+
+  function mutationTouchesConversation(mutations) {
+    return mutations.some((mutation) => {
+      if (mutation.type === "attributes" &&
+        mutation.attributeName === "data-content-search-turn-key") return true;
+      const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes]
+        .filter((node) => node.nodeType === Node.ELEMENT_NODE);
+      if (changedNodes.length > 0 && changedNodes.every((node) =>
+        node.matches?.("[data-codex-token-usage], [data-codex-token-usage-footer]"))) {
+        return false;
+      }
+      const target = mutation.target;
+      if (target?.closest?.("[data-codex-token-usage], [data-codex-token-usage-footer]")) return false;
+      const turnTarget = target?.closest?.(conversationTurnSelector);
+      if (turnTarget) {
+        const turnId = turnTarget.getAttribute("data-content-search-turn-key");
+        return !state.conversationUsageLines.get(turnId)?.isConnected;
+      }
+      return changedNodes.some((node) =>
+        node.matches?.(conversationTurnSelector) ||
+        node.querySelector?.(conversationTurnSelector));
+    });
+  }
+
+  return { scheduleConversationTokenUsageRender, conversationSubagentLabel, mutationTouchesConversation };
 }
 
-export { createUsageLines };
+export { createConversationUsage };

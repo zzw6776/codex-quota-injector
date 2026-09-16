@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { testName, testCountsText } from "./test-labels.mjs";
 
 import {
   activateOfflineNetworkIsolation,
@@ -58,9 +59,10 @@ const selectedTargets = resolveRuntimeSelection(runtimeArgument?.slice("--runtim
   allowAll: true,
 });
 const report = {
+  name: testName("free"),
   version: 2,
   status: "running",
-  batch: "A-free",
+  batch: "free-regression",
   modelRequests: "scripted loopback service only",
   platform: process.platform,
   arch: process.arch,
@@ -139,7 +141,7 @@ try {
         runtimeTarget,
         label: runtimeTargetLabel(runtimeTarget),
         status: "not-run",
-        reason: "A-common 未通过",
+        reason: "免费回归公共组件未通过",
         stages: [],
       });
     }
@@ -202,12 +204,13 @@ await writeFile(join(RESULTS, "offline-events.jsonl"), allEvents
   .map((event) => `${JSON.stringify(event)}\n`).join(""));
 report.finishedAt = new Date().toISOString();
 await writeReport(reportPath, report);
-console.log(`\n免费测试：本次选择 ${report.selectedStatus ?? report.status}；当前环境 ${report.currentRuntimeStatus}；全部支持环境 ${report.allSupportedStatus}；报告：${reportPath}`);
+console.log(`\n${report.name}｜${testCountsText(report.summary?.counts)}｜状态：${report.selectedStatus ?? report.status}`);
+console.log(`当前环境 ${report.currentRuntimeStatus}；全部支持环境 ${report.allSupportedStatus}；报告：${reportPath}`);
 for (const component of report.components) {
-  console.log(`- ${component.id}: ${component.status}${component.reason ? ` (${component.reason})` : ""}`);
+  console.log(`- ${component.label ?? "公共组件"}: ${component.status}${component.reason ? ` (${component.reason})` : ""}`);
 }
 if (report.currentRuntimeStatus === "passed") {
-  console.log("当前环境 A 批已通过。下一步应主动向用户分别确认 B1 官方模型、B2 DeepSeek 和 C 生命周期；不得自动执行。");
+  console.log("免费回归已通过。下一步分别展示官方模型、DeepSeek Flash 的后台功能测试与桌面集成测试，以及启停恢复测试计划；没有当次授权时不得执行。");
   console.log("计划命令：npm run test:live:official -- --plan；npm run test:live:deepseek -- --plan；npm run test:lifecycle -- --plan");
 }
 if (report.status !== "passed") {

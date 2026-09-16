@@ -29,7 +29,7 @@ function identity() {
   };
 }
 
-test("[A LCH-04] codex_app 启动失败会持久化为可见降级状态并脱敏诊断", async (t) => {
+test("[LCH-04] codex_app 启动失败会持久化为可见降级状态并脱敏诊断", async (t) => {
   const directory = await useTempDir(t, "host-health-");
   const path = join(directory, "health.json");
   const tracker = await createHostHealthTracker({
@@ -61,7 +61,7 @@ test("[A LCH-04] codex_app 启动失败会持久化为可见降级状态并脱�
     "missing-code-signing-identity", "断开时必须保留更具体的启动根因");
 });
 
-test("[A LCH-04 TOOL-04] 状态列表必须包含常用只读入口才能确认完整", () => {
+test("[LCH-04 TOOL-04] 状态列表必须包含常用只读入口才能确认完整", () => {
   const ready = classifyCodexAppStatus({
     name: "codex_app",
     runtimeStatus: "connected",
@@ -104,7 +104,7 @@ test("[A LCH-04 TOOL-04] 状态列表必须包含常用只读入口才能确认�
     ["list_threads", "read_thread", "list_projects", "get_usage_limits"]);
 });
 
-test("[A LCH-04 TOOL-04] ready 通知不能替代必需工具目录证据", async (t) => {
+test("[LCH-04 TOOL-04] ready 通知不能替代必需工具目录证据", async (t) => {
   const directory = await useTempDir(t, "host-health-tool-proof-");
   const path = join(directory, "health.json");
   let timeoutHandler = null;
@@ -149,7 +149,7 @@ test("[A LCH-04 TOOL-04] ready 通知不能替代必需工具目录证据", asyn
   await tracker.close({ disconnected: false });
 });
 
-test("[A LCH-04] 未收到 codex_app 启动终态会在宽限期后失败", async (t) => {
+test("[LCH-04] 未收到 codex_app 启动终态会在宽限期后失败", async (t) => {
   const directory = await useTempDir(t, "host-health-timeout-");
   const path = join(directory, "health.json");
   let timeoutHandler = null;
@@ -175,7 +175,7 @@ test("[A LCH-04] 未收到 codex_app 启动终态会在宽限期后失败", asyn
   await tracker.close({ disconnected: false });
 });
 
-test("[A LCH-04 RPC-03] 旧 sidecar 不能覆盖新会话的健康状态", async (t) => {
+test("[LCH-04 RPC-03] 旧 sidecar 不能覆盖新会话的健康状态", async (t) => {
   const directory = await useTempDir(t, "host-health-owner-");
   const path = join(directory, "health.json");
   const first = await createHostHealthTracker({
@@ -212,7 +212,7 @@ test("[A LCH-04 RPC-03] 旧 sidecar 不能覆盖新会话的健康状态", async
   await second.close({ disconnected: false });
 });
 
-test("[A LCH-03 LCH-04] 生命周期视图拒绝错误 PID、旧 generation 和降级状态", () => {
+test("[LCH-03 LCH-04] 生命周期视图拒绝错误 PID、旧 generation 和降级状态", () => {
   const now = 1_800_000_000_000;
   const binding = {
     hostToolsRequired: true,
@@ -263,7 +263,7 @@ test("[A LCH-03 LCH-04] 生命周期视图拒绝错误 PID、旧 generation 和�
   assert.equal(directHostHealth().status, "direct");
 });
 
-test("[A LCH-04 UI-02] 健康轮询时间变化不制造页面状态更新", () => {
+test("[LCH-04 UI-02] 健康轮询时间变化不制造页面状态更新", () => {
   const now = 1_800_000_000_000;
   const binding = { hostToolsRequired: true, generation: "stable-generation" };
   const relayState = { pid: 42, generation: binding.generation, startedAt: now - 40_000 };
@@ -288,7 +288,7 @@ test("[A LCH-04 UI-02] 健康轮询时间变化不制造页面状态更新", () 
     "仅轮询发生时间变化时 Widget 视图模型必须保持相同，避免周期性重绘");
 });
 
-test("[A LCH-04] 健康检查按状态使用低频兜底并在异常时快速自愈", () => {
+test("[LCH-04] 健康检查按状态使用低频兜底并在异常时快速自愈", () => {
   assert.equal(hostHealthPollInterval("ready"), HOST_HEALTH_READY_POLL_MS);
   assert.equal(hostHealthPollInterval("direct"), HOST_HEALTH_READY_POLL_MS);
   assert.equal(hostHealthPollInterval("starting"), HOST_HEALTH_ACTIVE_POLL_MS);
@@ -297,7 +297,7 @@ test("[A LCH-04] 健康检查按状态使用低频兜底并在异常时快速自
   assert.ok(HOST_HEALTH_READY_POLL_MS > HOST_HEALTH_ACTIVE_POLL_MS);
 });
 
-test("[A LCH-04] 健康文件监听兼容原子替换、防抖并在错误时关闭回退", async (t) => {
+test("[LCH-04] 健康文件监听兼容原子替换、防抖并在错误时关闭回退", async (t) => {
   const directory = await useTempDir(t, "host-health-watch-");
   const listeners = [];
   const watchers = [];
@@ -355,7 +355,7 @@ test("[A LCH-04] 健康文件监听兼容原子替换、防抖并在错误时关
   assert.equal(watchers[0].closed, true);
 });
 
-test("[platform:windows-native] [A LCH-01 UI-02] Windows 原生提示脚本只包含通用错误和明确日志路径", () => {
+test("[platform:windows-native] [LCH-01 UI-02] Windows 原生提示脚本只包含通用错误和明确日志路径", () => {
   const path = "C:\\Users\\Fixture O'Brien\\injector.log";
   const openScript = windowsOpenLogScript(path);
   const alertScript = windowsStartupFailureScript(path);
@@ -366,7 +366,7 @@ test("[platform:windows-native] [A LCH-01 UI-02] Windows 原生提示脚本只�
   assert.doesNotMatch(alertScript, /Bearer|api[_-]?key/i);
 });
 
-test("[A LCH-04] 无任务目录的空运行状态不得覆盖启动证据，也不能单凭缓存目录判就绪", async t => {
+test("[LCH-04] 无任务目录的空运行状态不得覆盖启动证据，也不能单凭缓存目录判就绪", async t => {
   const directory = await useTempDir(t, "host-health-unscoped-");
   const tracker = await createHostHealthTracker({path: join(directory, "health.json")});
   try {

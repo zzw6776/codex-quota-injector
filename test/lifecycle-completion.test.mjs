@@ -10,7 +10,7 @@ import {
 } from "../src/lifecycle-runner.mjs";
 import { useTempDir } from "./helpers.mjs";
 
-test("[A HAR-02 LCH-01] C 终态重试置前 Codex 并记录发起任务且不改写测试结论", async (t) => {
+test("[HAR-02 LCH-01] 启停恢复测试终态重试置前 Codex 并记录发起任务且不改写测试结论", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({
@@ -49,7 +49,7 @@ test("[A HAR-02 LCH-01] C 终态重试置前 Codex 并记录发起任务且不�
   assert.deepEqual(stored.completionNotification, notification);
 });
 
-test("[A HAR-02 LCH-01] 结束唤起失败只记录通知失败，不覆盖 C 失败与回滚结果", async (t) => {
+test("[HAR-02 LCH-01] 结束唤起失败只记录通知失败，不覆盖 C 失败与回滚结果", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({
@@ -79,7 +79,7 @@ test("[A HAR-02 LCH-01] 结束唤起失败只记录通知失败，不覆盖 C �
   assert.equal(stored.steps[0].rollback.status, "passed");
 });
 
-test("[A HAR-02 LCH-01] 尚未形成 C 终态时不提前唤起或写入通知", async (t) => {
+test("[HAR-02 LCH-01] 尚未形成 启停恢复测试终态时不提前唤起或写入通知", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({

@@ -53,7 +53,7 @@ import {
 } from "../src/widget.mjs";
 import { json, startHttpServer, useTempDir } from "./helpers.mjs";
 
-test("[A HAR-04 LCH-04] 测试进程回收等待 sidecar 释放继承的 stdio", async () => {
+test("[HAR-04 LCH-04] 测试进程回收等待 sidecar 释放继承的 stdio", async () => {
   const child = spawn(process.execPath, ["-e", `
     const { spawn } = require("node:child_process");
     spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 150)"], {
@@ -69,13 +69,13 @@ test("[A HAR-04 LCH-04] 测试进程回收等待 sidecar 释放继承的 stdio",
   assert.equal(closed, true, "父进程退出但 sidecar 仍持有 stdio 时不能提前回收目录");
 });
 
-test("[A LCH-05] 开发版拒绝从 Codex 内部工具进程接管生命周期", () => {
+test("[LCH-05] 开发版拒绝从 Codex 内部工具进程接管生命周期", () => {
   assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "/tmp/codex-app-tools" }), true);
   assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "  " }), false);
   assert.equal(isCodexHostedDevLaunch({}), false);
 });
 
-test("[platform:macos-native] [A LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送终止信号", async () => {
+test("[platform:macos-native] [LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送终止信号", async () => {
   let invocation = null;
   await requestMacCodexQuit({
     execFileImpl: async (command, args, options) => {
@@ -89,7 +89,7 @@ test("[platform:macos-native] [A LCH-05] macOS 关闭 Codex 使用标准退出�
   });
 });
 
-test("[platform:macos-native] [A LCH-05] macOS 生命周期只识别目标 Bundle 的已知辅助进程", () => {
+test("[platform:macos-native] [LCH-05] macOS 生命周期只识别目标 Bundle 的已知辅助进程", () => {
   const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
   const bareModifier = "/Applications/Codex.app/Contents/Resources/native/bare-modifier-monitor";
   const crashpad = "/Applications/Codex.app/Contents/Frameworks/Codex Framework.framework/Versions/1/Helpers/browser_crashpad_handler";
@@ -108,7 +108,7 @@ test("[platform:macos-native] [A LCH-05] macOS 生命周期只识别目标 Bundl
   ]);
 });
 
-test("[platform:macos-native] [A LCH-05] macOS 主进程退出后定向回收旧辅助进程并避开已复用 PID", async () => {
+test("[platform:macos-native] [LCH-05] macOS 主进程退出后定向回收旧辅助进程并避开已复用 PID", async () => {
   const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
   const bareModifier = "/Applications/Codex.app/Contents/Resources/native/bare-modifier-monitor";
   const crashpad = "/Applications/Codex.app/Contents/Frameworks/Codex Framework.framework/Versions/1/Helpers/browser_crashpad_handler";
@@ -153,7 +153,7 @@ test("[platform:macos-native] [A LCH-05] macOS 主进程退出后定向回收旧
   assert.equal(processes.some((entry) => entry.pid === 104), true);
 });
 
-test("[platform:macos-native] [A LCH-05] macOS 只剩历史辅助进程时不调用 AppleScript", async () => {
+test("[platform:macos-native] [LCH-05] macOS 只剩历史辅助进程时不调用 AppleScript", async () => {
   const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
   let processes = [{
     pid: 102,
@@ -179,7 +179,7 @@ test("[platform:macos-native] [A LCH-05] macOS 只剩历史辅助进程时不调
   assert.deepEqual(signals, [[102, "SIGTERM"]]);
 });
 
-test("[platform:windows-native] [A LCH-05] Windows 关闭 Codex 先请求主窗口正常退出", async () => {
+test("[platform:windows-native] [LCH-05] Windows 关闭 Codex 先请求主窗口正常退出", async () => {
   let invocation = null;
   const requested = await requestWindowsCodexQuit({
     processIds: [42, 42, -1, 73],
@@ -202,7 +202,7 @@ test("[platform:windows-native] [A LCH-05] Windows 关闭 Codex 先请求主窗�
   });
 });
 
-test("[platform:windows-native] [A LCH-02 TOOL-04] Windows 启动新桌面不会继承旧任务的 app-tools 管道", () => {
+test("[platform:windows-native] [LCH-02 TOOL-04] Windows 启动新桌面不会继承旧任务的 app-tools 管道", () => {
   assert.deepEqual(codexLaunchEnvironment({
     Path: "C:\\Windows",
     CODEX_APP_TOOLS_PIPE_PATH: "\\\\.\\pipe\\stale",
@@ -215,7 +215,7 @@ test("[platform:windows-native] [A LCH-02 TOOL-04] Windows 启动新桌面不会
   });
 });
 
-test("[platform:windows-native][platform:wsl-native] [A LCH-02 LCH-06] Windows relay 模式只读取 desktop 段的 WSL 设置", () => {
+test("[platform:windows-native][platform:wsl-native] [LCH-02 LCH-06] Windows relay 模式只读取 desktop 段的 WSL 设置", () => {
   assert.equal(parseWindowsSubsystemSetting(`
 runCodexInWindowsSubsystemForLinux = true
 [desktop]
@@ -233,7 +233,7 @@ runCodexInWindowsSubsystemForLinux = true
 `), false);
 });
 
-test("[platform:windows-native][platform:wsl-native] [A LCH-02 LCH-06] Windows 生命周期只修改 desktop 运行方式并保留其余配置", () => {
+test("[platform:windows-native][platform:wsl-native] [LCH-02 LCH-06] Windows 生命周期只修改 desktop 运行方式并保留其余配置", () => {
   const original = [
     'model = "gpt-5"',
     "[desktop]",

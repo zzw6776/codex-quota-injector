@@ -1,11 +1,6 @@
-function createContext(dependencies) {
-  const { state } = dependencies;
-  const renderPanelControls = (...args) => dependencies.renderPanelControls(...args);
-  const enqueue = (...args) => dependencies.enqueue(...args);
-  const formatContextValue = (...args) => dependencies.formatContextValue(...args);
-  const escapeHtml = (...args) => dependencies.escapeHtml(...args);
-
-function renderContextPage(busy) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createContext({ state, renderPanelControls, enqueue, formatContextValue, escapeHtml }) {
+  function renderContextPage(busy) {
     const context = state.data.context ?? {};
     const models = Array.isArray(context.models) ? context.models : [];
     const orphanedCount = Number(context.orphanedCount) || 0;
@@ -34,7 +29,7 @@ function renderContextPage(busy) {
       ${statusMessage}`;
   }
 
-function renderContextModel(model) {
+  function renderContextModel(model) {
     const editing = state.contextEditingSlug === model.slug;
     return `<article class="model-card ${model.overridden ? "overridden" : ""}">
       <div class="model-head"><div class="model-name-wrap"><div class="model-name" title="${escapeHtml(model.displayName)}">${escapeHtml(model.displayName)}</div><div class="model-slug">${escapeHtml(model.slug)}</div></div><div class="model-actions"><span class="badge ${model.overridden ? "current" : ""}">${model.overridden ? "已覆盖" : "系统默认"}</span><button class="btn context-edit-open" type="button" data-slug="${escapeHtml(model.slug)}">${editing ? "收起" : "修改"}</button></div></div>
@@ -44,7 +39,7 @@ function renderContextModel(model) {
     </article>`;
   }
 
-function renderContextEditForm(model, hidden) {
+  function renderContextEditForm(model, hidden) {
     const contextValue = model.effectiveContextWindow ?? "";
     const maxContextValue = model.effectiveMaxContextWindow ?? "";
     return `<form class="context-edit-form" data-slug="${escapeHtml(model.slug)}" data-max-context-window="${escapeHtml(maxContextValue)}"${hidden ? " hidden" : ""}>
@@ -54,7 +49,7 @@ function renderContextEditForm(model, hidden) {
     </form>`;
   }
 
-function bindContextEvents(wrap) {
+  function bindContextEvents(wrap) {
 wrap.querySelector(".context-refresh")?.addEventListener("click", () => enqueue({ type: "context-refresh" }));
 wrap.querySelector(".context-reset-all")?.addEventListener("click", () => {
       state.contextEditingSlug = null;
@@ -98,14 +93,14 @@ wrap.querySelectorAll(".context-edit-form").forEach((form) => form.addEventListe
     }));
 }
 
-function setContextEditorOpen(form, open) {
+  function setContextEditorOpen(form, open) {
     if (!form) return;
     form.hidden = !open;
     const button = form.closest(".model-card")?.querySelector(".context-edit-open");
     if (button) button.textContent = open ? "收起" : "修改";
   }
 
-  return { renderContextPage, renderContextModel, renderContextEditForm, bindContextEvents, setContextEditorOpen };
+  return { renderContextPage, bindContextEvents };
 }
 
 export { createContext };

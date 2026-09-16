@@ -1,13 +1,6 @@
-function createModelForms(dependencies) {
-  const { state } = dependencies;
-  const renderModelDetectionProgress = (...args) => dependencies.renderModelDetectionProgress(...args);
-  const renderExtraModelCompatibility = (...args) => dependencies.renderExtraModelCompatibility(...args);
-  const formatUpdatedAt = (...args) => dependencies.formatUpdatedAt(...args);
-  const contextTokensToK = (...args) => dependencies.contextTokensToK(...args);
-  const contextKToTokens = (...args) => dependencies.contextKToTokens(...args);
-  const escapeHtml = (...args) => dependencies.escapeHtml(...args);
-
-function renderExtraPlatformForm(platform, editable) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createModelEditor({ state, renderModelDetectionProgress, renderExtraModelCompatibility, formatUpdatedAt, contextTokensToK, contextKToTokens, escapeHtml, render, setExtraPlatformDraft, forgetModelDetection, bindExtraModelDetectButtons, showExtraModelOperation, bindManagedDeepSeekBalanceButtons, enqueue }) {
+  function renderExtraPlatformForm(platform, editable) {
     if (platform.preset === "deepseek") return renderDeepSeekPresetForm(platform, editable);
     const models = Array.isArray(platform.models) && platform.models.length
       ? platform.models
@@ -32,7 +25,7 @@ function renderExtraPlatformForm(platform, editable) {
     </form>`;
   }
 
-function renderDeepSeekPresetForm(platform, editable) {
+  function renderDeepSeekPresetForm(platform, editable) {
     const models = Array.isArray(platform.models) ? platform.models : [];
     const refreshed = platform.modelsUpdatedAt
       ? `最近读取：${escapeHtml(formatUpdatedAt(platform.modelsUpdatedAt))}`
@@ -47,12 +40,12 @@ function renderDeepSeekPresetForm(platform, editable) {
     </form>`;
   }
 
-function renderDeepSeekModelPicker(models, editable) {
+  function renderDeepSeekModelPicker(models, editable) {
     const selectedCount = models.filter((model) => model.selected !== false).length;
     return `<details class="preset-model-picker" ${models.length <= 3 ? "open" : ""}><summary><span>可用模型</span><span class="badge current preset-model-count">已选 ${selectedCount} / ${models.length}</span></summary><div class="preset-model-options">${models.map((model, index) => `<div class="preset-model-option" data-model-index="${index}"><label class="preset-model-option-select"><input name="presetModel" type="checkbox" value="${escapeHtml(model.id)}" ${model.selected !== false ? "checked" : ""} ${editable ? "" : "disabled"}><div class="preset-model-option-main"><div class="preset-model-option-name">${escapeHtml(model.displayName || model.id)}</div><div class="preset-model-option-id">${escapeHtml(model.id)}</div>${renderExtraModelCompatibility(model)}</div></label><label class="preset-model-context"><span>上下文</span><input name="presetContextWindow" data-model-id="${escapeHtml(model.id)}" type="number" min="1" step="0.001" value="${escapeHtml(contextTokensToK(model.contextWindow ?? 128000))}" required ${editable ? "" : "disabled"}><span>K</span></label><button class="btn extra-model-detect" type="button" ${editable ? "" : "disabled"}>检测此模型（消耗 Token）</button>${renderModelDetectionProgress(model)}${renderExtraModelReasoning(model, editable)}</div>`).join("")}</div></details>`;
   }
 
-function renderExtraModelReasoning(model, editable) {
+  function renderExtraModelReasoning(model, editable) {
     const c = model.compatibility ?? {};
     const caps = c.capabilities ?? {};
     const select = (name, label, value, options) => `<div class="provider-field"><label>${label}</label><select name="${name}" ${editable ? "" : "disabled"}>${options.map(([id, text]) => `<option value="${id}" ${id === value ? "selected" : ""}>${text}</option>`).join("")}</select></div>`;
@@ -73,7 +66,7 @@ function renderExtraModelReasoning(model, editable) {
     </div></details>`;
   }
 
-function readExtraModelSettings(row, model, forSave = false) {
+  function readExtraModelSettings(row, model, forSave = false) {
     const settings = row?.querySelector(".extra-model-settings");
     if (!settings || !settings.dataset.changed &&
       (!forSave || ["verified", "manual", "legacy"].includes(model?.compatibility?.status))) return model;
@@ -98,7 +91,7 @@ function readExtraModelSettings(row, model, forSave = false) {
           toolChoice: value("toolChoice"), reasoningToolChoice: value("reasoningToolChoice") } } };
   }
 
-function blankExtraModel() {
+  function blankExtraModel() {
     return {
       id: "",
       displayName: "",
@@ -109,7 +102,7 @@ function blankExtraModel() {
     };
   }
 
-function readExtraPlatformForm(form, forSave = false) {
+  function readExtraPlatformForm(form, forSave = false) {
     if (!form) return state.extraPlatformDraft;
     if (form.dataset.platformPreset === "deepseek") {
       const selected = new Set([...form.querySelectorAll('[name="presetModel"]:checked')]
@@ -147,7 +140,121 @@ function readExtraPlatformForm(form, forSave = false) {
     };
   }
 
-  return { renderExtraPlatformForm, renderDeepSeekPresetForm, renderDeepSeekModelPicker, renderExtraModelReasoning, readExtraModelSettings, blankExtraModel, readExtraPlatformForm };
+  function bindModelFormEvents(wrap) {
+bindManagedDeepSeekBalanceButtons(wrap);
+wrap.querySelector(".extra-platform-add")?.addEventListener("click", () => {
+      setExtraPlatformDraft(state.extraPlatformDrafts.get("") ?? {
+        id: "",
+        name: "",
+        baseUrl: "",
+        apiKey: "",
+        enabled: true,
+        models: [blankExtraModel()],
+      });
+      render();
+    });
+wrap.querySelectorAll(".extra-platform-edit").forEach((button) => button.addEventListener("click", () => {
+      const platform = state.data.extraModels?.platforms?.find((item) => item.id === button.dataset.platformId);
+      if (!platform) return;
+      setExtraPlatformDraft(state.extraPlatformDrafts.get(platform.id) ?? structuredClone(platform));
+      render();
+    }));
+bindExtraModelDetectButtons(wrap);
+const extraPlatformForm = wrap.querySelector(".extra-platform-form");
+wrap.querySelector(".preset-model-refresh")?.addEventListener("click", (event) => {
+      const platform = readExtraPlatformForm(extraPlatformForm);
+      setExtraPlatformDraft(platform);
+      event.currentTarget.disabled = true;
+      enqueue({ type: "extra-platform-models-refresh", platform });
+      showExtraModelOperation({
+        message: "正在读取 DeepSeek 可用模型",
+        platformId: platform.id,
+        phase: "models",
+      });
+    });
+extraPlatformForm?.addEventListener("input", (event) => {
+      const settings = event.target.closest(".extra-model-settings");
+      if (settings) settings.dataset.changed = "true";
+      const draft = readExtraPlatformForm(extraPlatformForm);
+      if (settings || event.target.name === "modelId") {
+        const index = Number(event.target.closest("[data-model-index]")?.dataset.modelIndex);
+        forgetModelDetection(draft.id, state.extraPlatformDraft?.models[index]?.id);
+      } else if (["apiKey", "baseUrl"].includes(event.target.name)) {
+        forgetModelDetection(draft.id);
+      }
+      if (settings) delete settings.dataset.changed;
+      if (["apiKey", "baseUrl", "modelId"].includes(event.target.name)) {
+        const changedIndex = event.target.name === "modelId"
+          ? Number(event.target.closest("[data-model-index]")?.dataset.modelIndex) : null;
+        draft.models = draft.models.map((model, index) => changedIndex != null && index !== changedIndex ? model : {
+          ...model, configurationUnsaved: true, lastDetection: null,
+          compatibility: model.compatibility?.status === "verified" ? { ...model.compatibility,
+            status: "manual", checkedAt: null, probeVersion: 0, targetFingerprint: null, codexConformance: "inconclusive" }
+            : model.compatibility,
+        });
+      }
+      setExtraPlatformDraft(draft);
+      for (const row of extraPlatformForm.querySelectorAll("[data-model-index]")) {
+        const status = row.querySelector(".extra-model-status");
+        if (status) status.outerHTML = renderExtraModelCompatibility(draft.models[Number(row.dataset.modelIndex)]);
+      }
+    });
+extraPlatformForm?.addEventListener("change", (event) => {
+      const draft = readExtraPlatformForm(extraPlatformForm);
+      if (event.target?.name === "presetModel") {
+        setExtraPlatformDraft(draft);
+        const selectedCount = draft.models.filter((model) => model.selected !== false).length;
+        const count = extraPlatformForm.querySelector(".preset-model-count");
+        if (count) count.textContent = `已选 ${selectedCount} / ${draft.models.length}`;
+        return;
+      }
+      setExtraPlatformDraft(draft);
+    });
+wrap.querySelector(".extra-model-add")?.addEventListener("click", () => {
+      const draft = readExtraPlatformForm(extraPlatformForm);
+      draft.models.push(blankExtraModel());
+      setExtraPlatformDraft(draft);
+      render();
+    });
+wrap.querySelectorAll(".extra-model-remove").forEach((button) => button.addEventListener("click", () => {
+      const draft = readExtraPlatformForm(extraPlatformForm);
+      const index = Number(button.closest(".extra-model-row")?.dataset.modelIndex);
+      if (Number.isInteger(index) && draft.models.length > 1) {
+        forgetModelDetection(draft.id, draft.models[index]?.id);
+        draft.models.splice(index, 1);
+      }
+      setExtraPlatformDraft(draft);
+      render();
+    }));
+wrap.querySelector(".extra-platform-cancel")?.addEventListener("click", () => {
+      forgetModelDetection(state.extraPlatformDraft?.id);
+      state.extraPlatformDrafts.delete(state.extraPlatformDraft?.id);
+      state.extraModelOperationDraft = null;
+      setExtraPlatformDraft(null);
+      render();
+    });
+extraPlatformForm?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const platform = readExtraPlatformForm(event.currentTarget, true);
+      setExtraPlatformDraft(platform);
+      const requestId = crypto.randomUUID();
+      state.extraPlatformSaveRequest = { requestId, draft: platform, snapshot: JSON.stringify(platform.models) };
+      enqueue({ type: "extra-platform-save", platform, requestId });
+      event.currentTarget.querySelector('button[type="submit"]')?.setAttribute("disabled", "");
+      showExtraModelOperation({
+        message: "正在保存配置（不执行检测）",
+        platformId: platform.id,
+        phase: "saving",
+      });
+    });
+wrap.querySelector(".extra-platform-remove")?.addEventListener("click", () => {
+      const platform = readExtraPlatformForm(extraPlatformForm);
+      if (!window.confirm(`确定删除 ${platform.name || "该平台"}、其全部模型和本地 API Key？删除结果将在重启 Codex 后生效。`)) return;
+      enqueue({ type: "extra-platform-remove", platformId: platform.id });
+    });
 }
 
-export { createModelForms };
+  return { renderExtraPlatformForm, renderDeepSeekModelPicker, renderExtraModelReasoning, readExtraPlatformForm, bindModelFormEvents };
+}
+
+export { createModelEditor };

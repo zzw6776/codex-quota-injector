@@ -18,7 +18,7 @@ async function fixture(t, handler, model = {}) {
 }
 const declaration = { type: "namespace", name: "functions", tools: [{ type: "custom", name: "exec", description: "Run raw JavaScript" }] };
 
-test("[A TOOL-04 NET-04] Responses Lite 命名空间和原始文本工具声明、结果、续接保持可执行格式", async t => {
+test("[TOOL-04 NET-04] Responses Lite 命名空间和原始文本工具声明、结果、续接保持可执行格式", async t => {
   const rawInput = 'text("中文\\nwith escapes");';
   const f = await fixture(t, (body, response) => {
     if (body.messages.some(m => m.role === "tool")) return json(response, { id: "last", choices: [{ message: { content: "continued" }, finish_reason: "stop" }] });
@@ -45,7 +45,7 @@ test("[A TOOL-04 NET-04] Responses Lite 命名空间和原始文本工具声明�
   assert.equal(f.seen.length, 2);
 });
 
-test("[A TOOL-04 NET-02 NET-05] 分片的原始文本工具参数还原一次；无效包装不能产生成功终态", async t => {
+test("[TOOL-04 NET-02 NET-05] 分片的原始文本工具参数还原一次；无效包装不能产生成功终态", async t => {
   let invalid = false;
   const f = await fixture(t, (body, response) => {
     const input = invalid ? '{"wrong":true}' : JSON.stringify({ input: "line 1\n第二行\"引用\"" });
@@ -68,7 +68,7 @@ test("[A TOOL-04 NET-02 NET-05] 分片的原始文本工具参数还原一次；
   assert.equal(failed.filter(e => e.type === "response.completed").length, 0);
 });
 
-test("[A MOD-04 TOOL-04] Chat 不支持的原生工具能力明确拒绝，不静默删除工具后发送模型请求", async t => {
+test("[MOD-04 TOOL-04] Chat 不支持的原生工具能力明确拒绝，不静默删除工具后发送模型请求", async t => {
   const f = await fixture(t, () => assert.fail("不应访问模型"));
   const response = await f.post({ tools: [{ type: "web_search" }], input: "fixture" });
   assert.equal(response.status, 502);
@@ -76,7 +76,7 @@ test("[A MOD-04 TOOL-04] Chat 不支持的原生工具能力明确拒绝，不�
   assert.equal(f.seen.length, 0);
 });
 
-test("[A MOD-04 TOOL-04] 能力探针确认不支持的可选 Hosted 工具会被过滤，其他 Codex 工具继续执行", async t => {
+test("[MOD-04 TOOL-04] 能力探针确认不支持的可选 Hosted 工具会被过滤，其他 Codex 工具继续执行", async t => {
   const f = await fixture(t, (body, response) => {
     assert.deepEqual(body.tools.map((tool) => tool.function.name), ["lookup"]);
     json(response, { id: "filtered", choices: [{ message: { content: "continued" }, finish_reason: "stop" }] });
@@ -100,7 +100,7 @@ test("[A MOD-04 TOOL-04] 能力探针确认不支持的可选 Hosted 工具会�
   assert.equal(f.seen.length, 1);
 });
 
-test("[A MOD-04 TOOL-04] 明确选择不支持的 Hosted 工具仍返回清晰错误", async t => {
+test("[MOD-04 TOOL-04] 明确选择不支持的 Hosted 工具仍返回清晰错误", async t => {
   const f = await fixture(t, () => assert.fail("不应访问模型"), {
     displayName: "Capability Model",
     capabilities: {
@@ -119,7 +119,7 @@ test("[A MOD-04 TOOL-04] 明确选择不支持的 Hosted 工具仍返回清晰�
   assert.equal(f.seen.length, 0);
 });
 
-test("[A NET-03 TOOL-04 MOD-03] 本地预热的目录和历史保留到增量请求，响应 ID 不能跨路由引用", () => {
+test("[NET-03 TOOL-04 MOD-03] 本地预热的目录和历史保留到增量请求，响应 ID 不能跨路由引用", () => {
   const history = new ResponsesHistory();
   const declarationItem = { id: "tools", type: "additional_tools", tools: [declaration] };
   const prewarm = { model: "custom", instructions: "original", generate: false, input: [declarationItem] };
@@ -138,7 +138,7 @@ test("[A NET-03 TOOL-04 MOD-03] 本地预热的目录和历史保留到增量请
   assert.throws(() => new ResponsesHistory().expand({ previous_response_id: "response" }, "provider-a"), /无法恢复/);
 });
 
-test("[A OBS-03 NET-05] 有界历史淘汰后拒绝残缺续接；完整请求仍可用，失败响应不进入成功历史", () => {
+test("[OBS-03 NET-05] 有界历史淘汰后拒绝残缺续接；完整请求仍可用，失败响应不进入成功历史", () => {
   const history = new ResponsesHistory({ maxEntries: 1, maxBytes: 1024 });
   history.remember({ input: "first" }, { id: "old", status: "completed", output: [] }, "route");
   history.remember({ input: "second" }, { id: "new", status: "completed", output: [] }, "route");

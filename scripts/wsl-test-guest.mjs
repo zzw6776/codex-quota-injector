@@ -35,11 +35,11 @@ try {
   const cli = options.cli || await commandPath("codex");
   const cliSha256 = await hashFile(cli);
   if (options.expectedCliSha256 && options.expectedCliSha256 !== cliSha256) {
-    throw new Error("WSL 官方 CLI 已变化；请重新运行完整 A 批");
+    throw new Error("WSL 官方 CLI 已变化；请重新运行完整免费回归");
   }
   const browserSha256 = options.browser ? await hashFile(options.browser) : null;
   if (options.expectedBrowserSha256 && options.expectedBrowserSha256 !== browserSha256) {
-    throw new Error("Windows 测试浏览器已变化；请重新运行完整 A 批");
+    throw new Error("Windows 测试浏览器已变化；请重新运行完整免费回归");
   }
   workspace = await mkdtemp(join(tmpdir(), "codex-quota-wsl-suite-"));
   await copyProject(options.sourceRoot, workspace);
@@ -55,7 +55,7 @@ try {
   ));
   const copiedSnapshot = await sourceSnapshot();
   if (copiedSnapshot.sha256 !== options.sourceSha256) {
-    throw new Error("复制到 WSL 的源码与 A/B 计划绑定的源码不一致");
+    throw new Error("复制到 WSL 的源码与测试计划绑定的源码不一致");
   }
 
   const accountCodexHome = options.codexHome ?? join(workspace, ".offline-account", "codex");
@@ -79,7 +79,7 @@ try {
   }
   const relaySha256 = await hashFile(relay);
   if (options.expectedRelaySha256 && options.expectedRelaySha256 !== relaySha256) {
-    throw new Error("WSL 原生 Relay 已变化；请重新运行完整 A 批");
+    throw new Error("WSL 原生 Relay 已变化；请重新运行完整免费回归");
   }
 
   manifest.runtimeSnapshot = {

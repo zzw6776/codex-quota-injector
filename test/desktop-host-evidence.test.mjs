@@ -5,7 +5,7 @@ import test from "node:test";
 
 import {
   backendComponentId,
-  combineBStatuses,
+  combineModelStatuses,
   desktopComponentId,
   desktopHostProgressHtml,
   desktopHostPrompt,
@@ -14,6 +14,7 @@ import {
   isDesktopSessionTerminal,
   parseDesktopRollout,
   parseRequestToolInventory,
+  summarizeDesktopChecks,
 } from "../scripts/desktop-host-evidence.mjs";
 import {
   desktopRuntimeInfrastructureReady,
@@ -24,7 +25,7 @@ import { useTempDir } from "./helpers.mjs";
 
 const marker = "BHOST_0123456789abcdef";
 
-test("[A HAR-04 UI-01] 桌面版本门禁从 Widget 的 Shadow DOM 读取实际版本", () => {
+test("[HAR-04 UI-01] 桌面版本门禁从 Widget 的 Shadow DOM 读取实际版本", () => {
   const lightDomVersion = { textContent: "v0.0.1" };
   const shadowDomVersion = { textContent: "  WSL · v1.2.3.dev  " };
   const root = {
@@ -41,7 +42,7 @@ test("[A HAR-04 UI-01] 桌面版本门禁从 Widget 的 Shadow DOM 读取实际�
   });
 });
 
-test("[A HAR-04 ENV-03] 桌面运行时轮换期间等待同代 Relay 恢复后再判定", async () => {
+test("[HAR-04 ENV-03] 桌面运行时轮换期间等待同代 Relay 恢复后再判定", async () => {
   const results = [
     { status: "failed", actual: { host: { readiness: { ready: false } } } },
     { status: "failed", actual: { host: { readiness: { ready: false } } } },
@@ -56,7 +57,7 @@ test("[A HAR-04 ENV-03] 桌面运行时轮换期间等待同代 Relay 恢复后�
   assert.equal(calls, 3);
 });
 
-test("[A HAR-04 ENV-03 TOOL-05] 桌面启动前检查不绑定发起任务的 codex_app 会话", () => {
+test("[HAR-04 ENV-03 TOOL-05] 桌面启动前检查不绑定发起任务的 codex_app 会话", () => {
   const readiness = {
     ready: false,
     codexRunning: true,
@@ -70,7 +71,7 @@ test("[A HAR-04 ENV-03 TOOL-05] 桌面启动前检查不绑定发起任务的 co
   assert.equal(desktopRuntimeInfrastructureReady({ ...readiness, relayReady: false }), false);
 });
 
-test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独立 HTTP 证据判定供应商及工具链", () => {
+test("[HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独立 HTTP 证据判定供应商及工具链", () => {
   const rollout = parseDesktopRollout(fixtureRollout("deepseek-flash"), {
     marker,
     profile: "deepseek",
@@ -118,7 +119,7 @@ test("[A HAR-04 TOOL-04 TOOL-05 TOOL-06] 桌面报告从真实任务记录和独
   assert.ok(result.checks.every(check => check.status === "passed"));
 });
 
-test("[platform:windows-native] [A HAR-04 TOOL-06] Windows 桌面报告只接受原生应用的独立启动与提交证据", () => {
+test("[platform:windows-native] [HAR-04 TOOL-06] Windows 桌面报告只接受原生应用的独立启动与提交证据", () => {
   const rollout = parseDesktopRollout(fixtureRollout("gpt-6-astra"), {
     marker,
     profile: "official",
@@ -152,7 +153,7 @@ test("[platform:windows-native] [A HAR-04 TOOL-06] Windows 桌面报告只接受
   assert.equal(repeated.checks.find((item) => item.id === "computer-use").status, "not-run");
 });
 
-test("[A HAR-04 MOD-03] B1/B2 桌面证据不能继承其他模型、旧源码或另一组件结果", () => {
+test("[HAR-04 MOD-03] 官方模型与 DeepSeek Flash 测试 桌面证据不能继承其他模型、旧源码或另一组件结果", () => {
   const deepseek = parseDesktopRollout(fixtureRollout("deepseek-flash"), {
     marker,
     profile: "official",
@@ -168,14 +169,14 @@ test("[A HAR-04 MOD-03] B1/B2 桌面证据不能继承其他模型、旧源码�
     sourceCurrent: false,
   });
   assert.equal(result.status, "failed");
-  assert.equal(combineBStatuses("passed", "not-run"), "incomplete");
-  assert.equal(combineBStatuses("passed", "passed"), "passed");
-  assert.equal(combineBStatuses("passed", "failed"), "failed");
-  assert.equal(backendComponentId("official", "windows-native"), "B1-official-backend/windows-native");
-  assert.equal(desktopComponentId("deepseek", "wsl-native"), "B2-deepseek-desktop/wsl-native");
+  assert.equal(combineModelStatuses("passed", "not-run"), "incomplete");
+  assert.equal(combineModelStatuses("passed", "passed"), "passed");
+  assert.equal(combineModelStatuses("passed", "failed"), "failed");
+  assert.equal(backendComponentId("official", "windows-native"), "model-official-backend/windows-native");
+  assert.equal(desktopComponentId("deepseek", "wsl-native"), "model-deepseek-desktop/wsl-native");
 });
 
-test("[A HAR-04 TOOL-04] 失败命令之后没有真实工具调用时不得声称任务已续接", () => {
+test("[HAR-04 TOOL-04] 失败命令之后没有真实工具调用时不得声称任务已续接", () => {
   const content = fixtureRollout("gpt-6-astra").split("\n")
     .filter((line) => !line.includes('"call_id":"web-') && !line.includes('"call_id":"cua-') &&
       !line.includes('"call_id":"input-') && !line.includes('"call_id":"codex-'))
@@ -185,7 +186,7 @@ test("[A HAR-04 TOOL-04] 失败命令之后没有真实工具调用时不得声�
   assert.equal(rollout.checks.functionsExecFailure, false);
 });
 
-test("[A HAR-04 TOOL-04] 成功命令采信同回合真实重试，不把标记或其他数字当退出码", () => {
+test("[HAR-04 TOOL-04] 成功命令采信同回合真实重试，不把标记或其他数字当退出码", () => {
   const records = fixtureRollout("gpt-6-astra").trim().split("\n").map(JSON.parse);
   const index = records.findIndex((record) => record.payload?.call_id === "exec-1");
   records.splice(index, 0,
@@ -208,7 +209,7 @@ test("[A HAR-04 TOOL-04] 成功命令采信同回合真实重试，不把标记�
   assert.equal(parse().checks.functionsExecFailure, false);
 });
 
-test("[A HAR-04 TOOL-04] read_thread 预算截断单独解释，不伪装修复 JSON 或套用空回合", () => {
+test("[HAR-04 TOOL-04] read_thread 预算截断单独解释，不伪装修复 JSON 或套用空回合", () => {
   const truncated = readThreadOutput(marker).replace('"reply"', '"rep…9817 tokens truncated…ly');
   const content = fixtureRollout("deepseek-flash").replace(
     JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
@@ -234,7 +235,7 @@ test("[A HAR-04 TOOL-04] read_thread 预算截断单独解释，不伪装修复 
   ] }]).checks.codexAppReadOutputTruncated, false, "历史正文中有截断标记不表示本次 JSON 被截断");
 });
 
-test("[A HAR-04 TOOL-05] 只调用 find 时 search/open 保持未执行，不误报为调用失败", () => {
+test("[HAR-04 TOOL-05] 只调用 find 时 search/open 保持未执行，不误报为调用失败", () => {
   const content = fixtureRollout("gpt-6-astra").split("\n")
     .filter((line) => !line.includes('"call_id":"web-1"') && !line.includes('"call_id":"web-2"'))
     .join("\n");
@@ -248,7 +249,7 @@ test("[A HAR-04 TOOL-05] 只调用 find 时 search/open 保持未执行，不误
   assert.equal(result.checks.find((item) => item.id === "web-find").status, "failed");
 });
 
-test("[platform:windows-native] [A HAR-04 TOOL-04] Windows 失败命令重试后采信真实保留的退出码", () => {
+test("[platform:windows-native] [HAR-04 TOOL-04] Windows 失败命令重试后采信真实保留的退出码", () => {
   const records = fixtureRollout("gpt-6-astra").trim().split("\n").map(JSON.parse);
   const exactFailureIndex = records.findIndex((record) =>
     record.type === "response_item" && record.payload?.input?.includes(`FAIL_${marker}`));
@@ -260,7 +261,7 @@ test("[platform:windows-native] [A HAR-04 TOOL-04] Windows 失败命令重试后
   assert.equal(rollout.checks.functionsExecFailure, true);
 });
 
-test("[A HAR-04 TOOL-04] 常用只读入口返回工具错误时不得通过桌面验收", () => {
+test("[HAR-04 TOOL-04] 常用只读入口返回工具错误时不得通过桌面验收", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replace('"output":"rateLimits: available"',
       '"output":"{\\"isError\\":true,\\"message\\":\\"tool call failed\\"}"');
@@ -269,7 +270,7 @@ test("[A HAR-04 TOOL-04] 常用只读入口返回工具错误时不得通过桌�
   assert.equal(rollout.checks.codexAppGetUsageLimits, false);
 });
 
-test("[A HAR-04 TOOL-04] 委托任务按自身 ID 重试 read_thread，不要求 list_threads 立即列出它", () => {
+test("[HAR-04 TOOL-04] 委托任务按自身 ID 重试 read_thread，不要求 list_threads 立即列出它", () => {
   const records = fixtureRollout("gpt-6-astra").trim().split("\n").map(JSON.parse);
   const listOutput = records.find((record) => record.payload?.call_id === "codex-list" &&
     record.payload?.type === "function_call_output");
@@ -286,13 +287,13 @@ test("[A HAR-04 TOOL-04] 委托任务按自身 ID 重试 read_thread，不要求
   assert.equal(rollout.checks.codexAppReadThread, true);
 });
 
-test("[A HAR-04 TOOL-06] 当前 computer use 的 getScreenshot 调用会计入真实截图证据", () => {
+test("[HAR-04 TOOL-06] 当前 computer use 的 getScreenshot 调用会计入真实截图证据", () => {
   const content = fixtureRollout("gpt-6-astra").replace("await tab.screenshot();", "await tab.getScreenshot();");
   const rollout = parseDesktopRollout(content, { marker, profile: "official" });
   assert.equal(rollout.checks.computerScreenshot, true);
 });
 
-test("[A HAR-04 TOOL-06] Computer Use 截图调用失败不能因调用发生而通过", () => {
+test("[HAR-04 TOOL-06] Computer Use 截图调用失败不能因调用发生而通过", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replace('"output":"SECRET_RESULT_BODY"',
       '"output":"tool call error: SetIsBorderRequired failed: 0x80004002"');
@@ -302,7 +303,7 @@ test("[A HAR-04 TOOL-06] Computer Use 截图调用失败不能因调用发生而
   assert.equal(rollout.callIds.computerScreenshot.length, 1);
 });
 
-test("[platform:windows-native] [A HAR-04 TOOL-06] Windows 截图仅在官方无 Relay 对照一致时标记上游阻断", () => {
+test("[platform:windows-native] [HAR-04 TOOL-06] Windows 截图仅在官方无 Relay 对照一致时标记上游阻断", () => {
   const records = fixtureRollout("gpt-6-astra")
     .replace(" await tab.screenshot();", "")
     .trim().split("\n").map(JSON.parse);
@@ -367,7 +368,7 @@ test("[platform:windows-native] [A HAR-04 TOOL-06] Windows 截图仅在官方无
 
 });
 
-test("[platform:wsl-native] [A HAR-04 TOOL-06] WSL 官方 sandboxCwd 阻断单独标记为上游能力阻断", () => {
+test("[platform:wsl-native] [HAR-04 TOOL-06] WSL 官方 sandboxCwd 阻断单独标记为上游能力阻断", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replace('"output":"SECRET_RESULT_BODY"',
       '"output":"Mcp error: sandboxCwd is not a local file URI: file:///mnt/d/project"');
@@ -395,7 +396,7 @@ test("[platform:wsl-native] [A HAR-04 TOOL-06] WSL 官方 sandboxCwd 阻断单�
   assert.equal(windowsFailure.status, "failed");
 });
 
-test("[A HAR-04 TOOL-06] functions.exec 编排的官方 node_repl Computer Use 仍按真实结果留证", () => {
+test("[HAR-04 TOOL-06] functions.exec 编排的官方 node_repl Computer Use 仍按真实结果留证", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replace('"name":"js","arguments":"let tab=await cua.createBrowserTab(\'iab\',\'http://127.0.0.1\'); await tab.screenshot();"',
       '"name":"exec","input":"await tools.mcp__node_repl__js({code: \\"await sky.type_text({window,text: marker}); await sky.press_key({window,key: \\\'Return\\\'}); await sky.get_window_state({window,include_screenshot:true})\\"})"');
@@ -406,7 +407,7 @@ test("[A HAR-04 TOOL-06] functions.exec 编排的官方 node_repl Computer Use �
   assert.equal(rollout.checks.computerScreenshot, true);
 });
 
-test("[A HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定，不依赖活动输入回显", () => {
+test("[HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定，不依赖活动输入回显", () => {
   const content = fixtureRollout("deepseek-flash")
     .replace(
       JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
@@ -473,7 +474,7 @@ test("[A HAR-04 TOOL-04] read_thread 以正确任务和完整完成回合判定�
 });
 
 for (const delegationTool of ["create_thread", "send_message_to_thread"]) {
-test(`[A HAR-04 TOOL-04] read_thread 接受 ${delegationTool} 的真实委托输入，不依赖本轮触发方式`, () => {
+test(`[HAR-04 TOOL-04] read_thread 接受 ${delegationTool} 的真实委托输入，不依赖本轮触发方式`, () => {
   const delegated = delegatedReadInput();
   delegated.name = delegationTool;
   for (const output of [delegated.output, delegated.output.text]) {
@@ -503,7 +504,7 @@ test(`[A HAR-04 TOOL-04] read_thread 接受 ${delegationTool} 的真实委托输
 });
 }
 
-test("[A HAR-04 TOOL-04] read_thread 不把普通工具输出或不完整委托算作用户输入", () => {
+test("[HAR-04 TOOL-04] read_thread 不把普通工具输出或不完整委托算作用户输入", () => {
   const input = delegatedReadInput();
   const invalidInputs = [
     { ...input, type: "mcpToolCall" },
@@ -530,7 +531,7 @@ test("[A HAR-04 TOOL-04] read_thread 不把普通工具输出或不完整委托�
   assert.equal(splitTurns.checks.codexAppReadContent, false);
 });
 
-test("[A HAR-04 TOOL-04] read_thread 不跳过缺失 items 的完成回合，不借用其他任务内容", () => {
+test("[HAR-04 TOOL-04] read_thread 不跳过缺失 items 的完成回合，不借用其他任务内容", () => {
   const validTurn = { id: "valid", status: "completed", items: [
     delegatedReadInput(), { type: "agentMessage", text: "reply" },
   ] };
@@ -548,7 +549,7 @@ test("[A HAR-04 TOOL-04] read_thread 不跳过缺失 items 的完成回合，不
   assert.equal(rollout.checks.codexAppReadContent, false);
 });
 
-test("[A HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且桌面封装清空时标记上游阻断", () => {
+test("[HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且桌面封装清空时标记上游阻断", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replace(
       JSON.stringify(functionOutput("codex-read", readThreadOutput(marker))),
@@ -621,7 +622,7 @@ test("[A HAR-04 TOOL-04] read_thread 只在官方直连与 Relay 结果一致且
   }
 });
 
-test("[A HAR-04 NET-05] 目标模型用量失败必须保留官方错误并判定失败", () => {
+test("[HAR-04 NET-05] 目标模型用量失败必须保留官方错误并判定失败", () => {
   const content = fixtureRollout("gpt-6-astra").replace(
     '"type":"task_complete"',
     '"type":"task_complete","error":{"message":"usage exhausted","codex_error_info":"usage_limit_exceeded"}',
@@ -642,7 +643,7 @@ test("[A HAR-04 NET-05] 目标模型用量失败必须保留官方错误并判�
   assert.equal(result.checks.find((item) => item.id === "model-turn").status, "not-run");
 });
 
-test("[A HAR-04 OBS-04] 请求工具清单只保留脱敏标识并能确认 web 能力是否下发", () => {
+test("[HAR-04 OBS-04] 请求工具清单只保留脱敏标识并能确认 web 能力是否下发", () => {
   const content = [
     { type: "request-tool-inventory", threadId: "other", model: "deepseek-flash", recordedAt: 2000,
       tools: [{ type: "custom", name: "web.run" }] },
@@ -667,7 +668,7 @@ test("[A HAR-04 OBS-04] 请求工具清单只保留脱敏标识并能确认 web 
   assert.doesNotMatch(JSON.stringify(inventory), /secret|schema|arguments/i);
 });
 
-test("[A HAR-04 TOOL-05] DeepSeek 的 Hosted web_search 描述不能冒充可调用的 web.run", () => {
+test("[HAR-04 TOOL-05] DeepSeek 的 Hosted web_search 描述不能冒充可调用的 web.run", () => {
   const inventory = parseRequestToolInventory(JSON.stringify({
     type: "request-tool-inventory",
     threadId: "thread-desktop",
@@ -692,11 +693,11 @@ test("[A HAR-04 TOOL-05] DeepSeek 的 Hosted web_search 描述不能冒充可调
     toolInventory: inventory,
     httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
   });
-  assert.equal(result.status, "blocked");
+  assert.equal(result.status, "passed");
   assert.equal(result.checks.find((item) => item.id === "web-search").status, "unsupported");
 });
 
-test("[A HAR-04 TOOL-05] 仿冒 URL 不能作为 OpenAI 官方 web.run 结果", () => {
+test("[HAR-04 TOOL-05] 仿冒 URL 不能作为 OpenAI 官方 web.run 结果", () => {
   const content = fixtureRollout("gpt-6-astra")
     .replaceAll("https://github.com/openai/codex", "https://example.test/?next=openai.com/openai/codex");
   const rollout = parseDesktopRollout(content, { marker, profile: "official" });
@@ -704,7 +705,7 @@ test("[A HAR-04 TOOL-05] 仿冒 URL 不能作为 OpenAI 官方 web.run 结果", 
   assert.equal(rollout.checks.webResult, false);
 });
 
-test("[A HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", () => {
+test("[HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", () => {
   const prompt = desktopHostPrompt({
     profile: "official",
     marker,
@@ -728,7 +729,7 @@ test("[A HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", ()
   assert.match(prompt, /computer use/);
   assert.doesNotMatch(prompt, /request_user_input|用户补充输入/);
   const html = desktopHostProgressHtml({
-    batch: "B1-official",
+    batch: "model-official",
     status: "incomplete",
     platform: "win32",
     arch: "x64",
@@ -739,7 +740,8 @@ test("[A HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", ()
     evaluation: { checks: [{ label: "model", status: "not-run" }] },
   });
   assert.match(html, /http-equiv="refresh"/);
-  assert.match(html, /B1-official/);
+  assert.match(html, /桌面集成测试 - Codex 官方模型/);
+  assert.match(html, /桌面验收项：通过 0\/1/);
   assert.doesNotMatch(html, /<unsafe>/);
   assert.match(html, /&lt;unsafe&gt;/);
 
@@ -756,7 +758,7 @@ test("[A HAR-04 OBS-03] 桌面引导页展示实时步骤但不参与判定", ()
   assert.doesNotMatch(windowsPrompt, /request_user_input|用户补充输入/);
 });
 
-test("[A HAR-04 ENV-03] 自动发现只读取本次标记所在的近期 rollout", async t => {
+test("[HAR-04 ENV-03] 自动发现只读取本次标记所在的近期 rollout", async t => {
   const codexHome = await useTempDir(t, "desktop-rollout-");
   const directory = join(codexHome, "sessions", "2026", "09", "13");
   await mkdir(directory, { recursive: true });
@@ -773,7 +775,7 @@ test("[A HAR-04 ENV-03] 自动发现只读取本次标记所在的近期 rollout
   assert.equal(rollout.modelMatches, true);
 });
 
-test("[A HAR-04 MOD-03] 自动发现忽略控制任务里同标记的错误供应商 rollout", async t => {
+test("[HAR-04 MOD-03] 自动发现忽略控制任务里同标记的错误供应商 rollout", async t => {
   const codexHome = await useTempDir(t, "desktop-rollout-profile-");
   const directory = join(codexHome, "sessions", "2026", "09", "13");
   await mkdir(directory, { recursive: true });
@@ -800,23 +802,41 @@ test("[A HAR-04 MOD-03] 自动发现忽略控制任务里同标记的错误供�
   assert.equal(target.modelMatches, true);
 });
 
-test("[A HAR-04 TOOL-05 TOOL-06] 目标模型任务结束但宿主工具缺失时标记 blocked 并停止监视", () => {
+test("[HAR-04 TOOL-05 TOOL-06] 已确认不支持的能力不阻断验收，支持范围内漏测或失败仍不能通过", () => {
   const content = fixtureRollout("deepseek-flash").split("\n")
     .filter((line) => !line.includes('"call_id":"web-'))
     .join("\n");
   const rollout = parseDesktopRollout(content, { marker, profile: "deepseek" });
-  const result = evaluateDesktopHostEvidence({
+  const input = {
     profile: "deepseek",
     marker,
     runtimeBinding: { status: "passed" },
     rollout,
     toolInventory: { offers: { webRun: false } },
     httpEvidence: { submissions: [{ value: marker }], artifactRequests: 1 },
-  });
+  };
+  const result = evaluateDesktopHostEvidence(input);
   assert.equal(rollout.turnCompleted, true);
-  assert.equal(result.status, "blocked");
-  assert.match(result.blockedReason, /web\.run/);
+  assert.equal(result.status, "passed");
+  assert.equal(result.blockedReason, null);
   assert.equal(result.checks.find((item) => item.id === "web-search").status, "unsupported");
+  assert.deepEqual(summarizeDesktopChecks(result.checks), {
+    unit: "桌面验收项", passed: 13, total: 13, notApplicable: 3,
+  });
+  const html = desktopHostProgressHtml({ profile: "deepseek", status: result.status, evaluation: result });
+  assert.match(html, /通过 13\/13；不适用 3/);
+  assert.match(html, /不适用（不支持）/);
+  for (const inventory of [null, { offers: { webRun: true } }]) {
+    const missing = evaluateDesktopHostEvidence({ ...input, toolInventory: inventory });
+    assert.equal(missing.status, "blocked", "没有证据证明不支持或已支持却漏测时不能豁免");
+    assert.equal(missing.checks.find(item => item.id === "web-search").status, "not-executed");
+    assert.equal(summarizeDesktopChecks(missing.checks).total, 16);
+  }
+  const failed = evaluateDesktopHostEvidence({ ...input,
+    rollout: { ...rollout, checks: { ...rollout.checks, functionsExec: false } },
+  });
+  assert.equal(failed.status, "failed", "不支持的网页能力不能掩盖已执行命令的失败");
+  assert.equal(failed.checks.find(item => item.id === "functions-exec").status, "failed");
   assert.equal(isDesktopSessionTerminal("blocked"), true);
   assert.equal(isDesktopSessionTerminal("incomplete"), false);
 });

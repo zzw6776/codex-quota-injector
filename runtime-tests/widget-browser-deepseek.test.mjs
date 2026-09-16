@@ -5,7 +5,7 @@ import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mj
 import { fixtureData, SHADOW, startBrowser } from "./support/browser.mjs";
 import { widgetExtraModelsUpdateExpressionJson } from "../src/widget.mjs";
 
-test("[A UI-02 MOD-05] DeepSeek 预设在窄布局只暴露开关、Key 和模型选择", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-05] DeepSeek 预设在窄布局只暴露开关、Key 和模型选择", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const manager = new ExtraModelManager({
     dataDir: b.directory,
@@ -84,7 +84,7 @@ test("[A UI-02 MOD-05] DeepSeek 预设在窄布局只暴露开关、Key 和模�
   assert.equal(action.platform.models.find((model) => model.id === "deepseek-flash").selected, true);
 });
 
-test("[A UI-02 MOD-03] 模型发现与其他状态一起更新时也必须更新下拉列表并保留表单", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-03] 模型发现与其他状态一起更新时也必须更新下拉列表并保留表单", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const manager = new ExtraModelManager({ dataDir: b.directory });
   const view = await manager.initialize();
@@ -112,7 +112,7 @@ test("[A UI-02 MOD-03] 模型发现与其他状态一起更新时也必须更新
   assert.ok(action.platform.models.every(model => model.selected));
 });
 
-test("[A UI-02 MOD-05] DeepSeek 余额位于模型卡片内且异步刷新不移动底部汇总栏", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-05] DeepSeek 余额位于模型卡片内且异步刷新不移动底部汇总栏", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const manager = new ExtraModelManager({ dataDir: b.directory });
   const initial = await manager.initialize();

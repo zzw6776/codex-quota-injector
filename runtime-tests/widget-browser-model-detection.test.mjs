@@ -4,7 +4,7 @@ import { ExtraModelManager } from "../src/extra-model-manager.mjs";
 import { fixtureData, SHADOW, startBrowser } from "./support/browser.mjs";
 import { widgetExtraModelsUpdateExpressionJson } from "../src/widget.mjs";
 
-test("[A UI-02 MOD-03] 逐模型检测失败显示在外层，保存不检测，收起保留编辑状态", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-03] 逐模型检测失败显示在外层，保存不检测，收起保留编辑状态", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const probed = [];
   const manager = new ExtraModelManager({ dataDir: b.directory,
@@ -60,7 +60,7 @@ test("[A UI-02 MOD-03] 逐模型检测失败显示在外层，保存不检测，
   assert.notEqual(await b.value(".extra-platform-card"), null, "重新打开必须仍在模型管理");
 });
 
-test("[A UI-02 MOD-03] 模型状态区分手动与部分可用，检测详情只在设置中显示", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-03] 模型状态区分手动与部分可用，检测详情只在设置中显示", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const manager = new ExtraModelManager({ dataDir: b.directory });
   const view = await manager.initialize();
@@ -110,7 +110,7 @@ test("[A UI-02 MOD-03] 模型状态区分手动与部分可用，检测详情只
   assert.equal(await b.value('[data-model-index="1"] .extra-model-unsaved'), null);
 });
 
-test("[A UI-02 MOD-03] 多模型并行进度独立，迟到结果不覆盖手动参数，保存确认不吞掉新结果", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-03] 多模型并行进度独立，迟到结果不覆盖手动参数，保存确认不吞掉新结果", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const manager = new ExtraModelManager({ dataDir: b.directory });
   await manager.initialize();

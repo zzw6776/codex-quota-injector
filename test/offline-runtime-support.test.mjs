@@ -16,7 +16,7 @@ import {
 import { stopChild } from "../runtime-tests/support/offline-runtime.mjs";
 import { waitFor } from "./helpers.mjs";
 
-test("[platform:windows-native] [A HAR-01] Windows 浏览器隔离保留真实用户目录并继续隔离浏览器数据", () => {
+test("[platform:windows-native] [HAR-01] Windows 浏览器隔离保留真实用户目录并继续隔离浏览器数据", () => {
   const directory = join(tmpdir(), "isolated-browser");
   const env = browserEnvironment(directory, "win32", { USERPROFILE: "C:\\Users\\fixture" }, "win32");
   assert.equal(env.USERPROFILE, "C:\\Users\\fixture");
@@ -24,7 +24,7 @@ test("[platform:windows-native] [A HAR-01] Windows 浏览器隔离保留真实�
   assert.equal(env.CODEX_HOME, join(directory, "codex-home"));
 });
 
-test("[platform:wsl-native] [A HAR-01] WSL 浏览器桥接保留互操作变量并把临时目录转换成 Windows 路径", async () => {
+test("[platform:wsl-native] [HAR-01] WSL 浏览器桥接保留互操作变量并把临时目录转换成 Windows 路径", async () => {
   const directory = "/mnt/c/Users/fixture/AppData/Local/Temp/quota-browser";
   const environment = {
     WSL_INTEROP: "/run/WSL/123_interop",
@@ -54,7 +54,7 @@ test("[platform:wsl-native] [A HAR-01] WSL 浏览器桥接保留互操作变量�
   ), "ws://172.31.128.1:50428/devtools/page/fixture");
 });
 
-test("[A HAR-01 OBS-03] 测试子进程停止后不会留下占用临时项目的进程", async t => {
+test("[HAR-01 OBS-03] 测试子进程停止后不会留下占用临时项目的进程", async t => {
   const directory = await mkdtemp(join(tmpdir(), "offline-process-tree-"));
   const marker = join(directory, "ready.txt");
   let child = null;
@@ -80,7 +80,7 @@ test("[A HAR-01 OBS-03] 测试子进程停止后不会留下占用临时项目�
   await rm(directory, { recursive: true, force: false });
 });
 
-if (process.platform === "win32") test("[platform:windows-native] [A HAR-01 OBS-03] 子进程自行退出与 taskkill 失败竞态不会中断后续清理", async t => {
+if (process.platform === "win32") test("[platform:windows-native] [HAR-01 OBS-03] 子进程自行退出与 taskkill 失败竞态不会中断后续清理", async t => {
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 40)"], { stdio: "ignore" });
   t.after(() => stopChild(child).catch(() => undefined));
   await stopChild(child, {
@@ -92,7 +92,7 @@ if (process.platform === "win32") test("[platform:windows-native] [A HAR-01 OBS-
   assert.notEqual(child.exitCode, null);
 });
 
-test("[A HAR-01 OBS-03] 已退出父进程的管道被孤儿后代占用时清理仍有界完成", async t => {
+test("[HAR-01 OBS-03] 已退出父进程的管道被孤儿后代占用时清理仍有界完成", async t => {
   const child = Object.assign(new EventEmitter(), {
     exitCode: 0,
     signalCode: null,

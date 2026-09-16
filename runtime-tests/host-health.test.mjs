@@ -6,7 +6,7 @@ import { ROOT, startRuntime } from "./support/offline-runtime.mjs";
 import { waitFor } from "../test/helpers.mjs";
 
 for (const profile of ["direct", "shim"]) {
-  test(`[A LCH-04 TOOL-04] 官方 ${profile} 启动后全局 MCP 目录空 runtimeStatus 不造成健康误报`, {timeout: 30_000}, async t => {
+  test(`[LCH-04 TOOL-04] 官方 ${profile} 启动后全局 MCP 目录空 runtimeStatus 不造成健康误报`, {timeout: 30_000}, async t => {
     const r = await startRuntime(t, {profile, prepare: async ({directory, env}) => {
       const fixture = join(directory, "mcp.mjs");
       await writeFile(fixture, (await readFile(join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), "utf8"))

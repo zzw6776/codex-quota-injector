@@ -253,10 +253,10 @@ export async function startLiveRuntime(t, profile, budget) {
     ], { timeout: 30000 });
   } else if (process.platform === "win32" && runtimeTarget === WINDOWS_NATIVE) {
     relayExecutable = String(process.env.CODEX_TEST_RELAY_EXECUTABLE ?? "").trim();
-    assert.ok(relayExecutable, "Windows 真实测试缺少 A 批验证过的原生 Relay");
+    assert.ok(relayExecutable, "Windows 真实测试缺少 免费回归验证过的原生 Relay");
   } else if (process.platform === "linux" && runtimeTarget === WSL_NATIVE) {
     relayExecutable = String(process.env.CODEX_TEST_RELAY_EXECUTABLE ?? "").trim();
-    assert.ok(relayExecutable, "WSL 真实测试缺少 A 批验证过的原生 Relay");
+    assert.ok(relayExecutable, "WSL 真实测试缺少 免费回归验证过的原生 Relay");
   } else {
     throw new Error(`当前环境 ${process.platform}/${process.arch}/${runtimeTarget ?? "unknown"} 没有真实中继测试适配器`);
   }

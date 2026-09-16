@@ -1,9 +1,6 @@
-function createHostHealth(dependencies) {
-  const { state } = dependencies;
-  const formatUpdatedAt = (...args) => dependencies.formatUpdatedAt(...args);
-  const escapeHtml = (...args) => dependencies.escapeHtml(...args);
-
-function renderHostHealthBanner(health) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
+  function renderHostHealthBanner(health) {
     if (!health?.required || !["starting", "degraded"].includes(health.status)) return "";
     const degraded = health.status === "degraded";
     const title = degraded ? "Codex 任务工具不可用" : "正在确认 Codex 任务工具";
@@ -26,11 +23,11 @@ function renderHostHealthBanner(health) {
     </aside>`;
   }
 
-function renderPanelControls(health = state.data.hostHealth) {
+  function renderPanelControls(health = state.data.hostHealth) {
     return `<div class="panel-controls">${renderHostHealthStatus(health)}<button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
   }
 
-function renderHostHealthStatus(health) {
+  function renderHostHealthStatus(health) {
     const status = String(health?.status ?? "unknown");
     const view = {
       ready: { className: "ready" },
@@ -70,7 +67,7 @@ function renderHostHealthStatus(health) {
     return `<button class="host-health-status status-${view.className}" type="button" data-account-tooltip="${tooltip}" aria-label="${escapeHtml(details.join("；"))}"><span class="host-health-dot ${view.className}" aria-hidden="true"></span></button>`;
   }
 
-function hostToolLabel(name) {
+  function hostToolLabel(name) {
     const value = String(name ?? "");
     return {
       list_threads: "查看任务列表",
@@ -80,7 +77,7 @@ function hostToolLabel(name) {
     }[value] ?? value;
   }
 
-  return { renderHostHealthBanner, renderPanelControls, renderHostHealthStatus, hostToolLabel };
+  return { renderHostHealthBanner, renderPanelControls };
 }
 
 export { createHostHealth };

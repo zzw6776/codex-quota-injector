@@ -15,7 +15,7 @@ import {
 } from "../src/lifecycle-progress.mjs";
 import { useTempDir } from "./helpers.mjs";
 
-test("[A HAR-02 LCH-01] 独立进度页显示当前步骤、完整时间线和回滚结果并自动刷新", () => {
+test("[HAR-02 LCH-01] 独立进度页显示当前步骤、完整时间线和回滚结果并自动刷新", () => {
   const report = createLifecycleReport({
     runId: "visible-progress",
     projectVersion: "1.2.3",
@@ -40,7 +40,7 @@ test("[A HAR-02 LCH-01] 独立进度页显示当前步骤、完整时间线和�
   assert.doesNotMatch(html, /用量不足 <secret>/);
 });
 
-test("[A HAR-02 LCH-01] 回滚尚未结束时持续刷新且不提前宣称恢复完成", () => {
+test("[HAR-02 LCH-01] 回滚尚未结束时持续刷新且不提前宣称恢复完成", () => {
   const report = createLifecycleReport({
     runId: "rollback-progress",
     projectVersion: "1.2.3",
@@ -67,7 +67,7 @@ test("[A HAR-02 LCH-01] 回滚尚未结束时持续刷新且不提前宣称恢�
   assert.match(html, /原 Codex PID 10 · Codex PID 20 · 注入器 PID 30 · 中继协议 53 · 中继 PID 40/);
 });
 
-test("[A HAR-02 LCH-05] 失败回滚重试时显示恢复中而不是再次宣称测试运行", () => {
+test("[HAR-02 LCH-05] 失败回滚重试时显示恢复中而不是再次宣称测试运行", () => {
   const report = createLifecycleReport({
     runId: "rollback-recovery",
     projectVersion: "1.2.3",
@@ -85,7 +85,7 @@ test("[A HAR-02 LCH-05] 失败回滚重试时显示恢复中而不是再次宣�
   assert.doesNotMatch(html, /测试失败，且有状态未能自动恢复/);
 });
 
-test("[A HAR-02 HAR-03] 报告更新后渲染器刷新页面，停止前写入最终状态", async (t) => {
+test("[HAR-02 HAR-03] 报告更新后渲染器刷新页面，停止前写入最终状态", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const progressPath = join(directory, "progress.html");
@@ -111,7 +111,7 @@ test("[A HAR-02 HAR-03] 报告更新后渲染器刷新页面，停止前写入�
   assert.match(await readFile(progressPath, "utf8"), /生命周期测试全部通过/);
 });
 
-test("[A HAR-02 LCH-01] 进度页未成功显示时不调度重启，并留下可读失败终态", async (t) => {
+test("[HAR-02 LCH-01] 进度页未成功显示时不调度重启，并留下可读失败终态", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const progressPath = join(directory, "progress.html");
@@ -139,7 +139,7 @@ test("[A HAR-02 LCH-01] 进度页未成功显示时不调度重启，并留下�
   assert.doesNotMatch(html, /http-equiv="refresh"/);
 });
 
-test("[A HAR-02 LCH-01] Safari 可见后才把生命周期任务交给外部监督器", async (t) => {
+test("[HAR-02 LCH-01] Safari 可见后才把生命周期任务交给外部监督器", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const progressPath = join(directory, "progress.html");
@@ -163,7 +163,7 @@ test("[A HAR-02 LCH-01] Safari 可见后才把生命周期任务交给外部监�
   assert.deepEqual(order, ["visible", "scheduled"]);
 });
 
-test("[platform:windows-native][platform:wsl-native] [A HAR-02 LCH-02] Windows 报告页分别显示原生、WSL 和自动恢复结果", () => {
+test("[platform:windows-native][platform:wsl-native] [HAR-02 LCH-02] Windows 报告页分别显示原生、WSL 和自动恢复结果", () => {
   const report = createLifecycleReport({
     runId: "runtime-components",
     projectVersion: "1.2.3",
@@ -171,22 +171,22 @@ test("[platform:windows-native][platform:wsl-native] [A HAR-02 LCH-02] Windows �
     steps: ["switch-windows-runtime", "launch-windows-native", "switch-wsl-runtime",
       "launch-wsl-native", "restore-runtime"],
     metadata: { components: {
-      "C-windows-native": ["launch-windows-native"],
-      "C-wsl-native": ["launch-wsl-native"],
-      "C-runtime-switch": ["switch-windows-runtime", "switch-wsl-runtime", "restore-runtime"],
+      "lifecycle-windows-native": ["launch-windows-native"],
+      "lifecycle-wsl-native": ["launch-wsl-native"],
+      "lifecycle-runtime-switch": ["switch-windows-runtime", "switch-wsl-runtime", "restore-runtime"],
     } },
   });
   for (const step of report.steps) step.status = "passed";
   updateLifecycleComponents(report);
   const html = renderLifecycleProgressHtml(report);
-  assert.match(html, /C-windows-native/);
-  assert.match(html, /C-wsl-native/);
-  assert.match(html, /C-runtime-switch/);
+  assert.match(html, /Windows 原生：启动、重连与恢复/);
+  assert.match(html, /WSL 原生：启动、重连与恢复/);
+  assert.match(html, /运行环境切换与恢复/);
   assert.match(html, /切换到 Windows 原生运行方式/);
   assert.match(html, /恢复测试前的 Codex 运行方式/);
 });
 
-test("[A HAR-02 LCH-01] 进度页显示结束时的 Codex 窗口置前结果", () => {
+test("[HAR-02 LCH-01] 进度页显示结束时的 Codex 窗口置前结果", () => {
   const report = createLifecycleReport({
     runId: "completion-notification",
     projectVersion: "1.2.3",

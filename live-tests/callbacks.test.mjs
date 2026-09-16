@@ -11,13 +11,13 @@ import {
   selectLiveProfiles,
   startLiveRuntime,
 } from "./runtime.mjs";
-import { findOfficialAppServerUrl } from "./web-search-contract.mjs";
+import { findOfficialSearchSourceUrl } from "./web-search-contract.mjs";
 
 const profiles = approved ? selectLiveProfiles(await liveProfiles()) : [];
 let failed = false;
 
 if (!approved) test("真实 app-server 回调定向测试未获授权，不读取当前账号或发送模型请求", { skip: true }, () => {});
-for (const profile of profiles) test(`[B TOOL-04 IO-01 IO-03 INT-02] ${profile.id} 真实 app-server 回调与用户输入`, { timeout: 240_000 }, async t => {
+for (const profile of profiles) test(`[TOOL-04 IO-01 IO-03 INT-02] ${profile.id} 真实 app-server 回调与用户输入`, { timeout: 240_000 }, async t => {
   if (failed) { t.skip("前一配置失败；停止付费用例，保留尚未执行状态"); return; }
   const budget = liveBudget();
   let r;
@@ -66,12 +66,16 @@ for (const profile of profiles) test(`[B TOOL-04 IO-01 IO-03 INT-02] ${profile.i
       const webThread = (await r.thread({ config: { web_search: "live" } })).thread;
       const beforeWeb = r.rpc.events.length;
       const web = await r.turn(webThread.id,
-        "请实际使用网页搜索寻找 OpenAI 官方 Codex app-server 文档，只回复该文档标题和链接。不要用 shell 代替搜索。");
+        [
+          "请实际使用网页搜索寻找 OpenAI 官方介绍 Codex App Server 的资料，文档或技术文章均可。不要用 shell 代替搜索。",
+          "来源须为 openai.com、developers.openai.com、learn.chatgpt.com 或 github.com/openai/codex 官方仓库。",
+          "只回复找到的资料标题和完整 HTTPS 链接。",
+        ].join("\n"));
       assert.ok(r.rpc.events.slice(beforeWeb).some(event =>
         event.method === "item/completed" && event.params.item.type === "webSearch"),
       "未实际执行原生网页搜索");
-      assert.ok(findOfficialAppServerUrl(web),
-        `网页搜索未返回 OpenAI 官方 app-server 文档链接：${r.sanitize(web)}`);
+      assert.ok(findOfficialSearchSourceUrl(web),
+        `原生网页搜索已执行，但未返回可识别的 OpenAI 官方来源 HTTPS 链接：${r.sanitize(web)}`);
     }
 
     stage = "用户输入回调";

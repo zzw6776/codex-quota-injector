@@ -1,10 +1,6 @@
-function createUsageDetails(dependencies) {
-  const { paginateDetails, detailTitle, phaseText, primaryText, networkLatencyText, averageNetworkLatency, toolRows, toolRowElement, executionRemainder, scrollbarEndPadding } = dependencies;
-  const formatGenerationRate = (...args) => dependencies.formatGenerationRate(...args);
-  const formatFirstTokenLatency = (...args) => dependencies.formatFirstTokenLatency(...args);
-  const formatMetricDuration = (...args) => dependencies.formatMetricDuration(...args);
-
-function appendGenerationDetails(container, usage) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createUsageDetails({ paginateDetails, detailTitle, phaseText, primaryText, networkLatencyText, averageNetworkLatency, toolRows, toolRowElement, executionRemainder, scrollbarEndPadding, formatGenerationRate, formatFirstTokenLatency, formatMetricDuration }) {
+  function appendGenerationDetails(container, usage) {
     const details = Array.isArray(usage?.generationDetails) ? usage.generationDetails : [];
     const averageParts = [];
     if (Number(usage?.firstTokenLatencyMs) > 0) {
@@ -122,7 +118,7 @@ function appendGenerationDetails(container, usage) {
     container.append(detailSection);
   }
 
-function syncConversationScrollbarPadding(root) {
+  function syncConversationScrollbarPadding(root) {
     for (const container of root.querySelectorAll("[data-codex-scrollbar-container]")) {
       if (container.offsetWidth <= 0) continue;
       const style = getComputedStyle(container);

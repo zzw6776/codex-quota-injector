@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { testName, testCountsText, backendTestCounts } from "./test-labels.mjs";
 
 import {
   liveBudget,
@@ -20,7 +21,7 @@ import {
 import { requireFreeResult, RESULTS, ROOT, sourceSnapshot, writeReport } from "./test-support.mjs";
 import {
   backendComponentId,
-  combineBStatuses,
+  combineModelStatuses,
   desktopComponentId,
 } from "./desktop-host-evidence.mjs";
 
@@ -54,7 +55,7 @@ if (stageFilter && !liveStageFiles.has(stageFilter)) {
 }
 if (stageFilter && args.has("--wakeup")) throw new Error("单场景定向测试不能同时执行账号唤醒");
 if (!args.has("--plan") && !args.has("--confirm-token-use")) {
-  throw new Error("会消耗真实 Token。先查看 B1/B2 计划并取得对应批次的本次明确同意；查看计划不会发送模型请求。");
+  throw new Error("会消耗真实 Token。先查看对应模型的测试计划并取得对应批次的本次明确同意；查看计划不会发送模型请求。");
 }
 if (!args.has("--plan") && !profileFilter) {
   throw new Error("付费测试必须分批指定 --profile=official 或 --profile=deepseek；不得一次执行全部供应商");
@@ -71,12 +72,12 @@ const [runtimeTarget] = !availableRuntimes.length && args.has("--plan") && reque
 const profiles = selectLiveProfiles(await liveProfiles(), profileFilter).map(publicProfile);
 const budget = liveBudget();
 const batch = profileFilter === "official"
-  ? "B1-official"
+  ? "model-official"
   : profileFilter === "deepseek"
-    ? "B2-deepseek"
+    ? "model-deepseek"
     : profileFilter
-      ? "B-provider"
-      : "B-overview";
+      ? "model-provider"
+      : "model-overview";
 const stageDescriptions = new Map([
   ["tools", "独立任务的文件、命令、补丁与 MCP 调用"],
   ["history", "独立短任务的历史恢复与分叉"],
@@ -90,6 +91,7 @@ const desktopComponent = profileFilter && ["official", "deepseek"].includes(prof
   ? desktopComponentId(profileFilter, runtimeTarget)
   : `${batch}-desktop/${runtimeTarget}`;
 const plan = {
+  name: testName("backend", profileFilter),
   batch,
   component: backendComponent,
   platform: process.platform,
@@ -110,12 +112,14 @@ const plan = {
   components: [
     {
       id: backendComponent,
+      name: testName("backend", profileFilter),
       kind: "backend",
       status: "planned",
       stages: stageFilter ? [stageFilter] : [...liveStageFiles.keys()],
     },
     {
       id: desktopComponent,
+      name: testName("desktop", profileFilter),
       kind: "desktop-entry",
       status: "not-run",
       command: profileFilter
@@ -125,7 +129,7 @@ const plan = {
   ],
   desktopHostChecks: "后台通过后使用 test:desktop，由选择同一供应商模型的真实 Codex 桌面任务调用 web.run、computer use 等宿主工具",
   wakeup: args.has("--wakeup"),
-  lifecycle: "关闭、重启、接管、安装更新、Windows/WSL 自动切换和真实账号往返另由 C 批执行",
+  lifecycle: "关闭、重启、接管、安装更新、Windows/WSL 自动切换和真实账号往返由启停恢复测试单独执行",
   note: "一次授权只运行一个供应商和一个运行环境。每个隔离阶段分别应用 Token 与轮次阈值；任一阶段失败后停止后续付费阶段。",
 };
 console.log(JSON.stringify(plan, null, 2));
@@ -189,7 +193,7 @@ try {
   }
   report.backendStatus = code === 0 ? "passed" : "failed";
   report.components.find((component) => component.kind === "backend").status = report.backendStatus;
-  report.overallStatus = combineBStatuses(report.backendStatus, report.desktopHostStatus);
+  report.overallStatus = combineModelStatuses(report.backendStatus, report.desktopHostStatus);
   report.status = report.overallStatus;
   if (code !== 0) process.exitCode = 1;
 } catch (error) {
@@ -211,10 +215,15 @@ if (finishedSnapshot.sha256 !== report.snapshot.sha256) {
   process.exitCode = 1;
 }
 report.finishedAt = new Date().toISOString();
+report.summary = { counts: backendTestCounts(report.events, selectedStages(profileArtifact).length) };
+report.failureReasons = (report.events ?? []).filter(event => event.type === "test:fail")
+  .map(event => event.details?.error?.message ?? event.name);
 await writeReport(reportPath, report);
-console.log(`真实测试报告：${reportPath}。运行环境：${runtimeTargetLabel(runtimeTarget)}。桌面宿主结果须另行记录。`);
+console.log(`${plan.name}｜${testCountsText(report.summary.counts)}｜状态：${report.backendStatus}`);
+for (const reason of [report.error, ...report.failureReasons].filter(Boolean)) console.log(`原因：${reason}`);
+console.log(`报告：${reportPath}。运行环境：${runtimeTargetLabel(runtimeTarget)}。`);
 if (report.backendStatus === "passed") {
-  console.log(`${backendComponent}: passed；${desktopComponent}: not-run；${batch}: incomplete`);
+  console.log(`${testName("desktop", profileFilter)}：未执行；该模型整体验收尚未完成。`);
   console.log(`桌面入口计划：npm run test:desktop -- --profile=${profileFilter} --runtime=${runtimeTarget} --plan`);
 }
 

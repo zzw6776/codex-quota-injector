@@ -4,13 +4,13 @@ import { basename, dirname, join } from "node:path";
 import { defaultAccountDataDir } from "./platform.mjs";
 import { TokenPricingManager } from "./token-pricing.mjs";
 import { createToolExecutionLedger } from "./tool-executions.mjs";
-import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
+import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
 import { RolloutWorkerClient } from "./token-usage/rollout-worker.mjs";
 import { buildUsageViewModel } from "./token-usage/display.mjs";
 import { applySubagentMetadata } from "./token-usage/subagents.mjs";
 import { turnHasUnknownModel, calculateTurnCost, mergeUsageSegment, compactUsageSegments } from "./token-usage/turns.mjs";
 import { normalizeCachedTurn, normalizeCachedFileState, normalizeCachedHistory, readJson, writeJsonAtomic } from "./token-usage/cache.mjs";
-import { readAppendedChunks, collectRolloutFiles, readRolloutSessionMetadata, threadIdFromRolloutPath } from "./token-usage/rollout-files.mjs";
+import { readAppendedChunks, refreshRolloutCatalogFiles } from "./token-usage/rollout-files.mjs";
 import { processRolloutRecord } from "./token-usage/rollout-records.mjs";
 import { processTurnUsageEvent } from "./token-usage/usage-events.mjs";
 
@@ -131,6 +131,7 @@ export class TokenUsageManager {
     const task = this.#refreshOnce({ forceDiscovery })
       .catch((error) => {
         this.error = error.message;
+        this.#invalidateViewModel();
         console.error(`[token-usage] ${error.message}`);
         return this.getViewModel();
       })
@@ -237,6 +238,7 @@ export class TokenUsageManager {
   }
 
   async #refreshOnce({ forceDiscovery }) {
+    const revision = this.cacheRevision;
     this.#startEventWatcher();
     // Exchange-rate refresh is deliberately detached from usage parsing. A
     // cached rate is sufficient for the current view; the pricing listener
@@ -244,7 +246,6 @@ export class TokenUsageManager {
     void Promise.resolve(this.pricingManager.refreshExchangeRate()).catch((error) => {
       console.error(`[token-usage] 汇率刷新失败: ${error.message}`);
     });
-    this.#invalidateViewModel();
     await this.#readUsageEvents();
     const now = Date.now();
     if (forceDiscovery || now - this.lastDiscoveryAt >= this.discoveryIntervalMs) {
@@ -269,6 +270,7 @@ export class TokenUsageManager {
     }
     this.#pruneCompletedTurns();
     this.#queueCachePersist();
+    if (this.cacheRevision !== revision || this.error != null) this.#invalidateViewModel();
     this.error = null;
     const viewModel = this.getViewModel();
     if (!this.closed) this.#scheduleUnknownRolloutReconciliation();
@@ -490,55 +492,12 @@ export class TokenUsageManager {
   }
 
   async #refreshRolloutCatalog() {
-    const paths = await collectRolloutFiles(join(this.codexHome, "sessions"), 4);
-    this.rolloutPathsByThread.clear();
-    this.rolloutMetadataByThread.clear();
-    this.recentRolloutThreads.clear();
-    const discoveredPaths = new Set(paths);
-    for (const path of this.rolloutMetadataByPath.keys()) {
-      if (!discoveredPaths.has(path)) this.rolloutMetadataByPath.delete(path);
-    }
-    const catalogEntries = (await Promise.all(paths.map(async (path) => {
-      let metadata = this.rolloutMetadataByPath.get(path);
-      if (!metadata) {
-        metadata = await readRolloutSessionMetadata(path);
-        if (metadata) this.rolloutMetadataByPath.set(path, metadata);
-      }
-      let modifiedAt;
-      try {
-        modifiedAt = (await stat(path)).mtimeMs;
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-        return null;
-      }
-      const threadId = metadata?.threadId ?? threadIdFromRolloutPath(path);
-      return threadId ? { path, metadata, threadId, modifiedAt } : null;
-    }))).filter(Boolean);
-    const entriesByThread = new Map();
-    for (const entry of catalogEntries) {
-      const entries = entriesByThread.get(entry.threadId) ?? [];
-      entries.push(entry);
-      entriesByThread.set(entry.threadId, entries);
-    }
-    const latestEntries = [];
-    for (const [threadId, entries] of entriesByThread) {
-      entries.sort((left, right) => left.modifiedAt - right.modifiedAt ||
-        basename(left.path).localeCompare(basename(right.path)));
-      this.rolloutPathsByThread.set(threadId, entries.map((entry) => entry.path));
-      const latestEntry = entries.at(-1);
-      latestEntries.push(latestEntry);
-      if (latestEntry.metadata) {
-        this.rolloutMetadataByThread.set(threadId, latestEntry.metadata);
-      }
-    }
-    const recentCutoff = Date.now() - RECENT_ROLLOUT_ACTIVITY_MS;
-    const recentEntries = latestEntries
-      .filter((entry) => entry.modifiedAt >= recentCutoff)
-      .sort((left, right) => right.modifiedAt - left.modifiedAt)
-      .slice(0, MAX_TRACKED_ROLLOUT_STATES);
-    for (const entry of recentEntries) {
-      this.recentRolloutThreads.add(entry.threadId);
-    }
+    const { paths, discoveredPaths, entriesByThread, latestEntries } = await refreshRolloutCatalogFiles(this.codexHome, {
+      rolloutPathsByThread: this.rolloutPathsByThread,
+      rolloutMetadataByPath: this.rolloutMetadataByPath,
+      rolloutMetadataByThread: this.rolloutMetadataByThread,
+      recentRolloutThreads: this.recentRolloutThreads,
+    });
     if (this.#applySubagentMetadataToTurns()) {
       this.#markCacheDirty();
       this.#invalidateViewModel();

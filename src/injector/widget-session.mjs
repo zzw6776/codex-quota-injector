@@ -10,6 +10,10 @@ function createWidgetSession(dependencies) {
 
   let lastStaticCoreJson = null;
 
+  let lastNetworkJson = null;
+
+  let lastTokenUsageTurns = null;
+
   let lastTokenUsageSignatures = new Map();
 
   let lastTokenUsageStatus = null;
@@ -113,16 +117,20 @@ function createWidgetSession(dependencies) {
       operation: viewModel.operation,
       context: viewModel.context,
       extraModels: viewModel.extraModels,
-      network: viewModel.network,
       hostHealth: dependencies.hostHealth,
     };
+    const firstSnapshot = lastStaticJson == null;
+    const networkJson = JSON.stringify(viewModel.network);
     const staticJson = JSON.stringify(staticViewModel);
     const { extraModels: _extraModels, ...staticCoreViewModel } =
       staticViewModel;
     const staticCoreJson = JSON.stringify(staticCoreViewModel);
-    const nextTokenUsageSignatures = new Map();
+    // TokenUsageManager reuses the view until its data changes. Network and
+    // account events need not serialize every unchanged historical turn.
+    const sameTurns = !firstSnapshot && stableTokenUsage.turns === lastTokenUsageTurns;
+    const nextTokenUsageSignatures = sameTurns ? lastTokenUsageSignatures : new Map();
     const tokenUsageUpdates = [];
-    for (const turn of Array.isArray(stableTokenUsage.turns)
+    for (const turn of !sameTurns && Array.isArray(stableTokenUsage.turns)
       ? stableTokenUsage.turns
       : []) {
       const turnId = String(turn?.turnId ?? "");
@@ -154,44 +162,39 @@ function createWidgetSession(dependencies) {
             ++widgetUpdateRevision,
           ),
         );
-        if (tokenUsageChanged) {
-          await currentCdp.evaluate(
-            dependencies.widget.widgetTokenUsageDeltaUpdateExpressionJson(
-              JSON.stringify(tokenUsageDelta),
-              ++widgetUpdateRevision,
-            ),
-          );
-        }
       } else {
         await currentCdp.evaluate(
           dependencies.widget.widgetUpdateExpressionJson(
             JSON.stringify({
               ...staticViewModel,
-              tokenUsage: stableTokenUsage,
+              ...(firstSnapshot ? { tokenUsage: stableTokenUsage, network: viewModel.network } : {}),
             }),
             ++widgetUpdateRevision,
           ),
         );
       }
-      if (dependencies.cdp === currentCdp) {
-        lastStaticJson = staticJson;
-        lastStaticCoreJson = staticCoreJson;
-        lastTokenUsageSignatures = nextTokenUsageSignatures;
-        lastTokenUsageStatus = stableTokenUsage.status;
-        lastTokenUsageError = stableTokenUsage.error ?? null;
-      }
-    } else if (tokenUsageChanged) {
+    }
+    if (!firstSnapshot && networkJson !== lastNetworkJson) {
+      await currentCdp.evaluate(
+        dependencies.widget.widgetNetworkUpdateExpressionJson(networkJson),
+      );
+    }
+    if (!firstSnapshot && tokenUsageChanged) {
       await currentCdp.evaluate(
         dependencies.widget.widgetTokenUsageDeltaUpdateExpressionJson(
           JSON.stringify(tokenUsageDelta),
           ++widgetUpdateRevision,
         ),
       );
-      if (dependencies.cdp === currentCdp) {
-        lastTokenUsageSignatures = nextTokenUsageSignatures;
-        lastTokenUsageStatus = stableTokenUsage.status;
-        lastTokenUsageError = stableTokenUsage.error ?? null;
-      }
+    }
+    if (dependencies.cdp === currentCdp) {
+      lastStaticJson = staticJson;
+      lastStaticCoreJson = staticCoreJson;
+      lastNetworkJson = networkJson;
+      lastTokenUsageTurns = stableTokenUsage.turns;
+      lastTokenUsageSignatures = nextTokenUsageSignatures;
+      lastTokenUsageStatus = stableTokenUsage.status;
+      lastTokenUsageError = stableTokenUsage.error ?? null;
     }
     if (
       dependencies.cdp === currentCdp &&

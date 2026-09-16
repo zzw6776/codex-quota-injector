@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { testName } from "./test-labels.mjs";
 
 import packageJson from "../package.json" with { type: "json" };
 import { CdpClient, findCodexTarget } from "../src/cdp-client.mjs";
@@ -24,7 +25,7 @@ import { requireFreeResult, RESULTS, ROOT, sourceSnapshot, writeReport } from ".
 import {
   DESKTOP_HOST_REPORT_VERSION,
   backendComponentId,
-  combineBStatuses,
+  combineModelStatuses,
   desktopBatch,
   desktopComponentId,
   desktopHostProgressHtml,
@@ -33,6 +34,7 @@ import {
   findDesktopRolloutEvidence,
   findRequestToolInventoryEvidence,
   isDesktopSessionTerminal,
+  summarizeDesktopChecks,
   parseDesktopRollout,
 } from "./desktop-host-evidence.mjs";
 import {
@@ -220,7 +222,7 @@ async function main() {
   }
   if (!options.profile) throw new Error("必须指定 --profile=official 或 --profile=deepseek");
   if (!options.plan && !options.confirmTokenUse) {
-    throw new Error("桌面任务会产生对应模型用量；请先查看计划并取得该 B 批本次授权，再追加 --confirm-token-use");
+    throw new Error("桌面任务会产生对应模型用量；请先查看计划并取得该模型测试的本次授权，再追加 --confirm-token-use");
   }
   const runtimeTarget = await selectedRuntime(options.runtime, {
     allowUnsupportedCurrent: options.plan,
@@ -250,7 +252,7 @@ async function runFixtureOnly() {
     pagePath,
     manifestPath,
     url: hosted.url,
-    instruction: "仅提供免费本机材料，不执行 B 桌面验收；按 Ctrl-C 停止回环服务。",
+    instruction: "仅提供免费本机材料，不执行桌面集成测试；按 Ctrl-C 停止回环服务。",
   }, null, 2));
   await new Promise((resolveStop) => {
     let stopping = false;
@@ -271,6 +273,7 @@ async function desktopPlan(profile, runtimeTarget, triggerMode = "direct") {
   const snapshot = await sourceSnapshot();
   return {
     reportVersion: DESKTOP_HOST_REPORT_VERSION,
+    name: testName("desktop", profile),
     batch: desktopBatch(profile),
     component: desktopComponentId(profile, runtimeTarget),
     backendComponent: backendComponentId(profile, runtimeTarget),
@@ -297,7 +300,7 @@ async function desktopPlan(profile, runtimeTarget, triggerMode = "direct") {
         : "实际 computer use 打开、输入、单次提交、截图和下载",
       "记录模型请求实际收到的脱敏工具清单，并区分不支持、未执行和执行失败",
     ],
-    note: "后台 B 与桌面入口报告分别保存；两者属于同一源码、平台、运行环境和供应商且都通过时，B 总状态才是 passed。",
+    note: "后台功能测试与桌面集成测试分别报告；两者属于同一源码、平台、运行环境和供应商且都通过时，该模型整体验收才是 passed。",
   };
 }
 
@@ -332,7 +335,7 @@ async function runDesktopSession(plan) {
     startedAt: new Date().toISOString(),
     status: runtimeBinding.status === "passed" ? "running" : "blocked",
     desktopHostStatus: runtimeBinding.status === "passed" ? "not-run" : "blocked",
-    overallStatus: combineBStatuses(
+    overallStatus: combineModelStatuses(
       backend.report.backendStatus,
       runtimeBinding.status === "passed" ? "not-run" : "blocked",
     ),
@@ -400,6 +403,7 @@ async function runDesktopSession(plan) {
   console.log(JSON.stringify({
     runId,
     batch: report.batch,
+    name: testName("desktop", report.profile),
     component: report.component,
     reportPath: report.reportPath,
     progressPath: report.progressPath,
@@ -487,7 +491,7 @@ async function runDesktopSession(plan) {
   } finally {
     await hosted?.close();
   }
-  console.log(`桌面入口报告：${report.reportPath}；${report.component}: ${report.status}；${report.batch}: ${report.overallStatus}`);
+  console.log(`${testName("desktop", report.profile)}：${report.status}；该模型整体验收：${report.overallStatus}；报告：${report.reportPath}`);
   if (report.status !== "passed") process.exitCode = 1;
 }
 
@@ -556,7 +560,7 @@ async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerm
     report.status = previous;
   }
   report.desktopHostStatus = report.status === "stale" ? "failed" : report.status;
-  report.overallStatus = combineBStatuses(backend.report.backendStatus, report.desktopHostStatus);
+  report.overallStatus = combineModelStatuses(backend.report.backendStatus, report.desktopHostStatus);
   report.updatedAt = new Date().toISOString();
   await persistDesktopReport(report);
   await updateBackendReport(backend.path, report);
@@ -565,7 +569,7 @@ async function refreshDesktopReport(report, { backend, rolloutPath, preserveTerm
 async function requireBackendReport(plan, sourceSha256) {
   const path = join(RESULTS, `live-${plan.profile}-${plan.runtimeTarget}.json`);
   const report = JSON.parse(await readFile(path, "utf8").catch(() => {
-    throw new Error(`缺少 ${plan.backendComponent} 报告；请先运行对应 B 批后台测试`);
+    throw new Error(`缺少 ${plan.backendComponent} 报告；请先运行对应模型的后台功能测试`);
   }));
   if (report.profileFilter !== plan.profile || report.runtimeTarget !== plan.runtimeTarget ||
     report.platform !== process.platform || report.arch !== process.arch ||
@@ -658,7 +662,7 @@ async function updateBackendReport(path, desktopReport) {
     backend.profileFilter !== desktopReport.profile || backend.runtimeTarget !== desktopReport.runtimeTarget) return;
   backend.desktopHostStatus = desktopReport.desktopHostStatus;
   backend.desktopHostReport = desktopReport.reportPath;
-  backend.overallStatus = combineBStatuses(backend.backendStatus, backend.desktopHostStatus);
+  backend.overallStatus = combineModelStatuses(backend.backendStatus, backend.desktopHostStatus);
   backend.status = backend.overallStatus;
   const desktop = backend.components?.find((component) => component.kind === "desktop-entry");
   if (desktop) {
@@ -669,6 +673,9 @@ async function updateBackendReport(path, desktopReport) {
 }
 
 async function persistDesktopReport(report) {
+  report.name = testName("desktop", report.profile);
+  const checks = report.evaluation?.checks ?? [];
+  report.summary = summarizeDesktopChecks(checks);
   await writeReport(report.reportPath, report);
   await writeFile(report.progressPath, desktopHostProgressHtml(report));
 }
@@ -800,7 +807,7 @@ function parseArguments(argumentsList) {
     throw new Error("CODEX_TEST_DESKTOP_TIMEOUT_MS 必须是正整数");
   }
   if (options.fixtureOnly && (options.profile || options.plan || options.confirmTokenUse || options.statusRunId)) {
-    throw new Error("--serve 只保留为免费材料服务，不能与 B 桌面验收参数组合");
+    throw new Error("--serve 只保留为免费材料服务，不能与桌面集成测试参数组合");
   }
   return options;
 }

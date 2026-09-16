@@ -14,7 +14,7 @@ async function setup(t) {
   return { directory, options, store };
 }
 
-test("[A ACC-03 ACC-06] 并发账号更新从最新持久状态累加，重载后不丢更新", async t => {
+test("[ACC-03 ACC-06] 并发账号更新从最新持久状态累加，重载后不丢更新", async t => {
   const { options, store } = await setup(t);
   await Promise.all(Array.from({ length: 20 }, () => store.update("existing", previous => ({ tokenGeneration: previous.tokenGeneration + 1 }))));
   assert.equal(store.get("existing").tokenGeneration, 21);
@@ -23,7 +23,7 @@ test("[A ACC-03 ACC-06] 并发账号更新从最新持久状态累加，重载�
   assert.equal(restored.get("existing").tokenGeneration, 21);
 });
 
-test("[A ACC-06] 账号密文或索引写失败时不留下内存假账号、半保存凭据或临时文件", async t => {
+test("[ACC-06] 账号密文或索引写失败时不留下内存假账号、半保存凭据或临时文件", async t => {
   for (const target of ["account", "index"]) await t.test(target, async t => {
     const { directory, options, store } = await setup(t);
     const path = target === "index" ? store.indexPath : join(store.accountsDir, "new.json");
@@ -45,7 +45,7 @@ test("[A ACC-06] 账号密文或索引写失败时不留下内存假账号、半
   });
 });
 
-test("[A ACC-06] 损坏、未来版本与不可解密的已有账号数据明确报错且原文不被覆盖", async t => {
+test("[ACC-06] 损坏、未来版本与不可解密的已有账号数据明确报错且原文不被覆盖", async t => {
   for (const kind of ["broken-index", "future-index", "broken-account", "future-account"]) await t.test(kind, async t => {
     const { options, store } = await setup(t);
     const path = kind.endsWith("index") ? store.indexPath : join(store.accountsDir, "existing.json");

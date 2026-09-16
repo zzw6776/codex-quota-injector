@@ -25,7 +25,7 @@ const control = {
 };
 const healthyHistory = async () => ({ repairRequired: false, activeTurn: null, lastOrdinal: 20 });
 
-test("[platform:macos-native] [C LCH-04] Mac 调度绑定实际发起回合及独立 SQLite 目录，拒绝空绑定与旧控制记录", async () => {
+test("[platform:macos-native] [LCH-04] Mac 调度绑定实际发起回合及独立 SQLite 目录，拒绝空绑定与旧控制记录", async () => {
   const session = await captureMacLifecycleSession({
     codexHome: control.codexHome, sqliteHome: control.sqliteHome, threadId,
     capture: async (options) => {
@@ -40,7 +40,7 @@ test("[platform:macos-native] [C LCH-04] Mac 调度绑定实际发起回合及�
   assert.throws(() => validateMacLifecycleSession({ ...control, initiatingTurn: { ...control.initiatingTurn, turnId: "other" } }), /会话绑定/);
 });
 
-test("[platform:macos-native] [C LCH-04] Mac 历史异常在调度前阻断，不在线改写记录", async t => {
+test("[platform:macos-native] [LCH-04] Mac 历史异常在调度前阻断，不在线改写记录", async t => {
   const directory = await useTempDir(t, "mac-c-history-");
   const file = join(directory, `rollout-${threadId}.jsonl`);
   const records = [
@@ -54,7 +54,7 @@ test("[platform:macos-native] [C LCH-04] Mac 历史异常在调度前阻断，�
   assert.equal(await readFile(file, "utf8"), records);
 });
 
-test("[platform:macos-native] [C LCH-03 LCH-04] Mac 关闭必须等待回合结束且投影追平，重启后再次核验", async () => {
+test("[platform:macos-native] [LCH-03 LCH-04] Mac 关闭必须等待回合结束且投影追平，重启后再次核验", async () => {
   const events = [];
   let finishTurn;
   let inspections = 0;
@@ -88,7 +88,7 @@ test("[platform:macos-native] [C LCH-03 LCH-04] Mac 关闭必须等待回合结�
   assert.equal(result.sessionHistory.status, "durable");
 });
 
-test("[platform:macos-native] [C LCH-04] Mac 投影不追平或活动回合仍存在时，拒绝完成重启步骤", async () => {
+test("[platform:macos-native] [LCH-04] Mac 投影不追平或活动回合仍存在时，拒绝完成重启步骤", async () => {
   const guard = createMacLifecycleSessionGuard(control, {
     waitIdle: async () => undefined,
     inspectHistory: healthyHistory,
@@ -104,7 +104,7 @@ test("[platform:macos-native] [C LCH-04] Mac 投影不追平或活动回合仍�
   await assert.rejects(active.before(), /仍有活动回合/);
 });
 
-test("[platform:macos-native] [C LCH-03 LCH-04 LCH-06] Mac 实际操作表的关闭、接管、账号与回滚入口全部经过门禁", async () => {
+test("[platform:macos-native] [LCH-03 LCH-04 LCH-06] Mac 实际操作表的关闭、接管、账号与回滚入口全部经过门禁", async () => {
   let calls = 0;
   const blocked = new Error("test-session-blocked");
   const ops = createMacLifecycleOperations("/nonexistent/control.json", control, {
@@ -123,7 +123,7 @@ test("[platform:macos-native] [C LCH-03 LCH-04 LCH-06] Mac 实际操作表的关
   assert.equal(calls, checked);
 });
 
-test("[platform:macos-native] [C LCH-04] Mac 控制器恢复和回滚不能跳过重启后历史检查", async () => {
+test("[platform:macos-native] [LCH-04] Mac 控制器恢复和回滚不能跳过重启后历史检查", async () => {
   const events = [];
   const ops = protectMacLifecycleOperations({ test: {
     reconcile: async () => ({ completed: true, evidence: { recovered: true } }),

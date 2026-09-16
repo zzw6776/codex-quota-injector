@@ -1,21 +1,6 @@
-function createUsageTooltip(dependencies) {
-  const { state } = dependencies;
-  const conversationTooltipPointer = (...args) => dependencies.conversationTooltipPointer(...args);
-  const appendGenerationDetails = (...args) => dependencies.appendGenerationDetails(...args);
-  const syncConversationScrollbarPadding = (...args) => dependencies.syncConversationScrollbarPadding(...args);
-  const conversationSubagentLabel = (...args) => dependencies.conversationSubagentLabel(...args);
-  const formatContextTier = (...args) => dependencies.formatContextTier(...args);
-  const formatUnitPrice = (...args) => dependencies.formatUnitPrice(...args);
-  const ensureConversationTokenTooltip = (...args) => dependencies.ensureConversationTokenTooltip(...args);
-  const positionConversationTokenTooltip = (...args) => dependencies.positionConversationTokenTooltip(...args);
-  const clearConversationTooltipTimer = (...args) => dependencies.clearConversationTooltipTimer(...args);
-  const isLightTheme = (...args) => dependencies.isLightTheme(...args);
-  const formatTokenCount = (...args) => dependencies.formatTokenCount(...args);
-  const formatCny = (...args) => dependencies.formatCny(...args);
-  const formatTooltipPercent = (...args) => dependencies.formatTooltipPercent(...args);
-  const formatExchangeRate = (...args) => dependencies.formatExchangeRate(...args);
-
-function showConversationTokenTooltip(line, event = null) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createUsageTooltip({ state, conversationTooltipPointer, appendGenerationDetails, syncConversationScrollbarPadding, conversationSubagentLabel, formatContextTier, formatUnitPrice, ensureConversationTokenTooltip, positionConversationTokenTooltip, clearConversationTooltipTimer, isLightTheme, formatTokenCount, formatCny, formatTooltipPercent, formatExchangeRate }) {
+  function showConversationTokenTooltip(line, event = null) {
     clearConversationTooltipTimer();
     const usage = line?.__codexTokenUsage;
     if (!usage) return;
@@ -169,7 +154,7 @@ function showConversationTokenTooltip(line, event = null) {
     tooltip.style.visibility = "visible";
   }
 
-function appendConversationTooltipRow(
+  function appendConversationTooltipRow(
     container,
     label,
     tokens,
@@ -193,7 +178,7 @@ function appendConversationTooltipRow(
     container.append(row);
   }
 
-function appendConversationTooltipSummaryRow(container, label, tokens, amount) {
+  function appendConversationTooltipSummaryRow(container, label, tokens, amount) {
     const row = document.createElement("div");
     row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:16px;font-weight:650";
     const name = document.createElement("span");
@@ -205,7 +190,7 @@ function appendConversationTooltipSummaryRow(container, label, tokens, amount) {
     container.append(row);
   }
 
-function appendConversationTooltipMetricRow(container, label, value, detail) {
+  function appendConversationTooltipMetricRow(container, label, value, detail) {
     const row = document.createElement("div");
     row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:16px;color:var(--color-token-text-tertiary,#9a9aa4);font-size:10px";
     const name = document.createElement("span");
@@ -217,7 +202,7 @@ function appendConversationTooltipMetricRow(container, label, value, detail) {
     container.append(row);
   }
 
-function summarizeConversationTooltipInput(tiers) {
+  function summarizeConversationTooltipInput(tiers) {
     return tiers.reduce((summary, tier) => {
       const usage = tier.usage;
       summary.inputTokens += usage.input_tokens;
@@ -239,7 +224,7 @@ function summarizeConversationTooltipInput(tiers) {
     });
   }
 
-function getConversationTooltipTiers(cost, usage) {
+  function getConversationTooltipTiers(cost, usage) {
     const fallbackUsage = {
       input_tokens: Number(usage.inputTokens || 0),
       cached_input_tokens: Number(usage.cachedInputTokens || 0),
@@ -276,7 +261,7 @@ function getConversationTooltipTiers(cost, usage) {
     });
   }
 
-function normalizeTooltipUsage(usage) {
+  function normalizeTooltipUsage(usage) {
     return {
       input_tokens: Math.max(0, Number(usage?.input_tokens) || 0),
       cached_input_tokens: Math.max(0, Number(usage?.cached_input_tokens) || 0),
@@ -287,7 +272,7 @@ function normalizeTooltipUsage(usage) {
     };
   }
 
-  return { showConversationTokenTooltip, appendConversationTooltipRow, appendConversationTooltipSummaryRow, appendConversationTooltipMetricRow, summarizeConversationTooltipInput, getConversationTooltipTiers, normalizeTooltipUsage };
+  return { showConversationTokenTooltip };
 }
 
 export { createUsageTooltip };

@@ -1,14 +1,6 @@
-function createWakeup(dependencies) {
-  const { state } = dependencies;
-  const render = (...args) => dependencies.render(...args);
-  const renderPanelControls = (...args) => dependencies.renderPanelControls(...args);
-  const captureDetailPanelBaseSize = (...args) => dependencies.captureDetailPanelBaseSize(...args);
-  const resetDetailPanelSize = (...args) => dependencies.resetDetailPanelSize(...args);
-  const enqueue = (...args) => dependencies.enqueue(...args);
-  const formatUpdatedAt = (...args) => dependencies.formatUpdatedAt(...args);
-  const escapeHtml = (...args) => dependencies.escapeHtml(...args);
-
-function renderWakeupPage(busy) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createWakeup({ state, render, renderPanelControls, captureDetailPanelBaseSize, resetDetailPanelSize, enqueue, formatUpdatedAt, escapeHtml }) {
+  function renderWakeupPage(busy) {
     const accounts = (state.data.accounts ?? []).filter((item) =>
       item.authMode === "oauth" && item.authStatus === "active"
     );
@@ -22,7 +14,7 @@ function renderWakeupPage(busy) {
       <div class="account-list">${accounts.map((account) => renderWakeupAccount(account, busy)).join("")}</div>`;
   }
 
-function renderWakeupAccount(account, busy) {
+  function renderWakeupAccount(account, busy) {
     const wakeup = account.wakeup ?? {};
     const draft = state.wakeupDrafts.get(account.id) ?? { enabled: Boolean(wakeup.enabled), times: [...(wakeup.times ?? [])] };
     const accountId = escapeHtml(account.id);
@@ -56,7 +48,7 @@ function renderWakeupAccount(account, busy) {
     </article>`;
   }
 
-function renderWakeupStatus(account) {
+  function renderWakeupStatus(account) {
     if (account.authMode !== "oauth" || account.authStatus !== "active") return "";
     const wakeup = account.wakeup ?? {};
     const lastRun = wakeup.lastRun;
@@ -71,15 +63,15 @@ function renderWakeupStatus(account) {
     return `<button class="btn account-switch wakeup-status wakeup-open ${wakeup.enabled ? "primary" : ""}" type="button" data-account-id="${escapeHtml(account.id)}" data-account-tooltip="${tooltip}" aria-label="每日唤醒${wakeup.enabled ? "已开启" : "未开启"}；${tooltip}；点击打开设置">唤醒</button>`;
   }
 
-function readWakeupForm(form) {
+  function readWakeupForm(form) {
     return {
       enabled: Boolean(form?.querySelector('[name="enabled"]')?.checked),
       times: [...(form?.querySelectorAll('[name="time"]') ?? [])].map((input) => input.value),
     };
   }
 
-function bindWakeupNavigation(wrap) {
-wrap.querySelectorAll(".wakeup-open").forEach((button) => button.addEventListener("click", () => {
+  function bindWakeupNavigation(wrap, scope = wrap) {
+scope.querySelectorAll(".wakeup-open").forEach((button) => button.addEventListener("click", () => {
       captureDetailPanelBaseSize(wrap);
       state.wakeupDrafts.clear();
       state.page = "wakeup";
@@ -92,7 +84,7 @@ wrap.querySelectorAll(".wakeup-open").forEach((button) => button.addEventListene
         state.shadow.getElementById(`wakeup-account-${button.dataset.accountId}`)?.scrollIntoView({ block: "nearest" });
       }
     }));
-wrap.querySelector(".wakeup-back")?.addEventListener("click", () => {
+scope.querySelector(".wakeup-back")?.addEventListener("click", () => {
       state.page = "accounts";
       resetDetailPanelSize();
       state.wakeupDrafts.clear();
@@ -100,7 +92,7 @@ wrap.querySelector(".wakeup-back")?.addEventListener("click", () => {
     });
 }
 
-function bindWakeupFormEvents(wrap) {
+  function bindWakeupFormEvents(wrap) {
 wrap.querySelectorAll(".wakeup-form").forEach((form) => {
       const accountId = form.dataset.accountId;
       const keepWakeupDraft = () => {
@@ -135,7 +127,7 @@ wrap.querySelectorAll(".wakeup-now").forEach((button) => button.addEventListener
     }));
 }
 
-  return { renderWakeupPage, renderWakeupAccount, renderWakeupStatus, readWakeupForm, bindWakeupNavigation, bindWakeupFormEvents };
+  return { renderWakeupPage, renderWakeupStatus, bindWakeupNavigation, bindWakeupFormEvents };
 }
 
 export { createWakeup };

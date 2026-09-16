@@ -18,6 +18,14 @@ async function claimRelayState(path, generation, processIdentity = null) {
       current?.pid !== identity.pid && await relayStateProcessIsAlive(current)) {
       return false;
     }
+    // This file identifies the owner; it is not a heartbeat. Replacing it on
+    // every ownership poll wakes the desktop's health watcher unnecessarily.
+    if (current?.version === RELAY_STATE_VERSION &&
+      current.generation === resolvedGeneration &&
+      current.pid === identity.pid &&
+      current.processStartedAt === identity.processStartedAt &&
+      current.bootId === identity.bootId &&
+      current.processStartTicks === identity.processStartTicks) return true;
     const now = Date.now();
     const state = {
       version: RELAY_STATE_VERSION,

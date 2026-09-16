@@ -1,11 +1,10 @@
-function createFormatting(dependencies) {
-
-
-function formatContextTier(value) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createFormatting() {
+  function formatContextTier(value) {
     return value === "short" ? "短" : value === "long" ? "长" : "标准";
   }
 
-function formatUnitPrice(cost, component) {
+  function formatUnitPrice(cost, component) {
     if (!cost?.available) return "未知";
     if (cost.normalizedModel === "multiple" ||
       (Array.isArray(cost.contextTiers) && cost.contextTiers.length > 1)) {
@@ -21,13 +20,13 @@ function formatUnitPrice(cost, component) {
     return `${formatCny(rate * exchangeRate)}/M`;
   }
 
-function isLightTheme() {
+  function isLightTheme() {
     return document.documentElement.classList.contains("electron-light") ||
       (!document.documentElement.classList.contains("electron-dark") &&
         window.matchMedia?.("(prefers-color-scheme: light)").matches);
   }
 
-function formatReset(seconds) {
+  function formatReset(seconds) {
     if (!Number.isFinite(Number(seconds))) return "未知";
     const date = new Date(Number(seconds) * 1000);
     if (Number.isNaN(date.getTime())) return "未知";
@@ -36,7 +35,7 @@ function formatReset(seconds) {
     return `${relative}（${new Intl.DateTimeFormat(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date)}）`;
   }
 
-function formatExpiry(value) {
+  function formatExpiry(value) {
     if (!value) return "未获取";
     const raw = String(value).trim();
     const numeric = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
@@ -49,7 +48,7 @@ function formatExpiry(value) {
     return `${prefix}（${new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" }).format(date)}）`;
   }
 
-function formatUpdatedAt(value) {
+  function formatUpdatedAt(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric) || numeric <= 0) return "从未成功刷新";
     const date = new Date(numeric > 1_000_000_000_000 ? numeric : numeric * 1000);
@@ -63,7 +62,7 @@ function formatUpdatedAt(value) {
     }).format(date);
   }
 
-function formatPlan(value) {
+  function formatPlan(value) {
     const raw = String(value ?? "未知").trim();
     const normalized = raw.toLowerCase().replaceAll(/[_\s-]/g, "");
     const names = {
@@ -76,13 +75,13 @@ function formatPlan(value) {
     return names[normalized] ?? raw;
   }
 
-function levelClass(remaining) {
+  function levelClass(remaining) {
     if (Number(remaining) < 10) return "is-critical";
     if (Number(remaining) < 20) return "is-warning";
     return "";
   }
 
-function formatContextValue(value) {
+  function formatContextValue(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || number <= 0) return "未声明";
     if (number >= 1_000_000) {
@@ -92,19 +91,19 @@ function formatContextValue(value) {
     return String(Math.round(number));
   }
 
-function contextTokensToK(value) {
+  function contextTokensToK(value) {
     const tokens = Number(value);
     if (!Number.isFinite(tokens) || tokens <= 0) return "";
     return String(Number((tokens / 1_000).toFixed(3)));
   }
 
-function contextKToTokens(value) {
+  function contextKToTokens(value) {
     const kiloTokens = Number(value);
     if (!Number.isFinite(kiloTokens) || kiloTokens <= 0) return 0;
     return Math.round(kiloTokens * 1_000);
   }
 
-function formatTokenCount(value) {
+  function formatTokenCount(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || number < 0) return "0.00M";
     return `${(number / 1_000_000).toLocaleString(undefined, {
@@ -113,7 +112,7 @@ function formatTokenCount(value) {
     })}M`;
   }
 
-function formatGenerationRate(value) {
+  function formatGenerationRate(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || number <= 0) return "—";
     const digits = number >= 100 ? 0 : number >= 10 ? 1 : 2;
@@ -123,7 +122,7 @@ function formatGenerationRate(value) {
     })} tok/s`;
   }
 
-function formatFirstTokenLatency(value) {
+  function formatFirstTokenLatency(value) {
     const milliseconds = Number(value);
     if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "—";
     if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
@@ -135,7 +134,7 @@ function formatFirstTokenLatency(value) {
     })}s`;
   }
 
-function formatMetricDuration(value) {
+  function formatMetricDuration(value) {
     const milliseconds = Number(value);
     if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
     if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
@@ -147,7 +146,7 @@ function formatMetricDuration(value) {
     })}s`;
   }
 
-function formatCny(value) {
+  function formatCny(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || number < 0) return "¥0.000000";
     const digits = number >= 1 ? 2 : number >= 0.01 ? 4 : 6;
@@ -157,7 +156,7 @@ function formatCny(value) {
     })}`;
   }
 
-function formatTooltipPercent(value) {
+  function formatTooltipPercent(value) {
     const number = Number(value);
     if (!Number.isFinite(number)) return "—";
     return `${number.toLocaleString(undefined, {
@@ -166,16 +165,16 @@ function formatTooltipPercent(value) {
     })}%`;
   }
 
-function formatExchangeRate(value) {
+  function formatExchangeRate(value) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number.toFixed(4) : "未知";
   }
 
-function number(value) {
+  function number(value) {
     return Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
   }
 
-function escapeHtml(value) {
+  function escapeHtml(value) {
     return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   }
 

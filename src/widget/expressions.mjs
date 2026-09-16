@@ -34,6 +34,10 @@ function widgetExtraModelsUpdateExpressionJson(serializedExtraModels, revision =
   return `window.__codexQuotaWidget?.updateExtraModels(${String(serializedExtraModels)}${revisionArgument})`;
 }
 
+function widgetNetworkUpdateExpressionJson(serializedNetwork) {
+  return `window.__codexQuotaWidget?.updateNetwork(${String(serializedNetwork)})`;
+}
+
 function widgetTokenUsageDeltaUpdateExpressionJson(serializedDelta, revision = null) {
   const revisionArgument = revision == null ? "" : `,${JSON.stringify(revision)}`;
   return `window.__codexQuotaWidget?.updateTokenUsageDelta(${String(serializedDelta)}${revisionArgument})`;
@@ -47,4 +51,4 @@ function serializeWidgetFeatures() {
   return `{${Object.entries(WIDGET_FEATURES).map(([name, factory]) => `${JSON.stringify(name)}:(${factory.toString()})`).join(",")}}`;
 }
 
-export { widgetInstallExpression, widgetRuntimeVersionExpression, widgetUpdateExpression, widgetUpdateExpressionJson, widgetTokenUsageUpdateExpressionJson, widgetExtraModelsUpdateExpressionJson, widgetTokenUsageDeltaUpdateExpressionJson, widgetDrainActionsExpression };
+export { widgetInstallExpression, widgetRuntimeVersionExpression, widgetUpdateExpression, widgetUpdateExpressionJson, widgetTokenUsageUpdateExpressionJson, widgetExtraModelsUpdateExpressionJson, widgetNetworkUpdateExpressionJson, widgetTokenUsageDeltaUpdateExpressionJson, widgetDrainActionsExpression };

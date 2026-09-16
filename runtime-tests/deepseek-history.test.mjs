@@ -40,7 +40,7 @@ function assertDeepSeekReasoningHistory(body) {
   }
 }
 
-test("[A MOD-03 SES-01 SES-02 SES-06] 模型配置平台的 DeepSeek Flash 按检测结果保留完整推理历史", { timeout: 30_000 }, async t => {
+test("[MOD-03 SES-01 SES-02 SES-06] 模型配置平台的 DeepSeek Flash 按检测结果保留完整推理历史", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "deepseek" });
   assert.equal(r.model, "deepseek-flash");
   r.enqueue(

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { acquireSingleInstance, closeSingleInstance, readSingleInstanceStatus } from "../src/single-instance.mjs";
 
-test("[A LCH-03] 单实例状态只读查询不触发接管，区分端口已监听与启动完成", async t => {
+test("[LCH-03] 单实例状态只读查询不触发接管，区分端口已监听与启动完成", async t => {
   const status = { phase: "starting", revision: 0 };
   let reuse = 0;
   const owner = await acquireSingleInstance({ port: 0, mode: "formal", version: "1.2.3",
@@ -25,7 +25,7 @@ test("[A LCH-03] 单实例状态只读查询不触发接管，区分端口已监
   assert.equal((await readSingleInstanceStatus({port})).revision,1);
 });
 
-test("[A LCH-03] 状态客户端连接重置后单实例监听仍可查询且不触发接管", async t => {
+test("[LCH-03] 状态客户端连接重置后单实例监听仍可查询且不触发接管", async t => {
   const { createConnection } = await import("node:net");
   let actions = 0;
   const owner = await acquireSingleInstance({ port: 0, getStatus: () => ({phase: "ready"}),

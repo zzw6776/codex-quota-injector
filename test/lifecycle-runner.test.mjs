@@ -15,7 +15,7 @@ import {
 } from "../src/lifecycle-runner.mjs";
 import { useTempDir } from "./helpers.mjs";
 
-test("[A HAR-02 LCH-01 LCH-05] 外部执行器在被测进程退出后继续落盘并完成后续步骤", async (t) => {
+test("[HAR-02 LCH-01 LCH-05] 外部执行器在被测进程退出后继续落盘并完成后续步骤", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const events = [];
@@ -40,7 +40,7 @@ test("[A HAR-02 LCH-01 LCH-05] 外部执行器在被测进程退出后继续落�
   assert.equal(await readFile(join(directory, "survived"), "utf8"), "yes");
 });
 
-test("[A HAR-03 LCH-03] 中断后按检查点核对已完成副作用，不重复执行结果未知动作", async (t) => {
+test("[HAR-03 LCH-03] 中断后按检查点核对已完成副作用，不重复执行结果未知动作", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({
@@ -69,7 +69,7 @@ test("[A HAR-03 LCH-03] 中断后按检查点核对已完成副作用，不重�
   assert.deepEqual(result.steps[0].evidence, { installedVersion: "1.0.0" });
 });
 
-test("[A HAR-03 ACC-04] 无法确认的账号动作不会重放，失败后反向恢复已完成步骤", async (t) => {
+test("[HAR-03 ACC-04] 无法确认的账号动作不会重放，失败后反向恢复已完成步骤", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({
@@ -97,7 +97,7 @@ test("[A HAR-03 ACC-04] 无法确认的账号动作不会重放，失败后反�
   assert.equal(restored, 1);
 });
 
-test("[A HAR-03 LCH-05] 回滚中断快照仍阻止新测试且能恢复未开始与运行中的回滚", async (t) => {
+test("[HAR-03 LCH-05] 回滚中断快照仍阻止新测试且能恢复未开始与运行中的回滚", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   await writeLifecycleReport(reportPath, createLifecycleReport({ steps: ["install", "switch-runtime", "verify"] }));
@@ -124,7 +124,7 @@ test("[A HAR-03 LCH-05] 回滚中断快照仍阻止新测试且能恢复未开�
   assert.equal(await readLatestUnfinishedLifecycle(latestPath), null);
 });
 
-test("[A LCH-06] 报告使用原子替换，拒绝未来版本和重复步骤", async (t) => {
+test("[LCH-06] 报告使用原子替换，拒绝未来版本和重复步骤", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   assert.throws(() => createLifecycleReport({ steps: ["same", "same"] }), /必须唯一/);
@@ -137,7 +137,7 @@ test("[A LCH-06] 报告使用原子替换，拒绝未来版本和重复步骤", 
   await assert.rejects(readLifecycleReport(reportPath), /版本不受支持/);
 });
 
-test("[A HAR-03 LCH-06] 恢复任务只接受当前项目运行目录内的控制文件路径", async (t) => {
+test("[HAR-03 LCH-06] 恢复任务只接受当前项目运行目录内的控制文件路径", async (t) => {
   const root = resolve(await useTempDir(t, "lifecycle-control-"));
   const runDirectory = join(root, ".runtime", "test-results", "lifecycle", "run-1");
   const control = {
@@ -162,16 +162,16 @@ test("[A HAR-03 LCH-06] 恢复任务只接受当前项目运行目录内的控�
   }), /不属于当前项目/);
 });
 
-test("[platform:windows-native][platform:wsl-native] [A HAR-04 LCH-01] 生命周期报告按公共、Windows、WSL 和切换链分别汇总", async (t) => {
+test("[platform:windows-native][platform:wsl-native] [HAR-04 LCH-01] 生命周期报告按公共、Windows、WSL 和切换链分别汇总", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({
     steps: ["verify", "windows", "wsl", "restore"],
     metadata: { components: {
-      "C-package-common": ["verify"],
-      "C-windows-native": ["windows"],
-      "C-wsl-native": ["wsl"],
-      "C-runtime-switch": ["restore"],
+      "lifecycle-package-common": ["verify"],
+      "lifecycle-windows-native": ["windows"],
+      "lifecycle-wsl-native": ["wsl"],
+      "lifecycle-runtime-switch": ["restore"],
     } },
   });
   report.steps[0].status = "passed";
@@ -179,14 +179,14 @@ test("[platform:windows-native][platform:wsl-native] [A HAR-04 LCH-01] 生命周
   report.steps[2].status = "failed";
   await writeLifecycleReport(reportPath, report);
   assert.deepEqual((await readLifecycleReport(reportPath)).components.map(({ id, status }) => ({ id, status })), [
-    { id: "C-package-common", status: "passed" },
-    { id: "C-windows-native", status: "passed" },
-    { id: "C-wsl-native", status: "failed" },
-    { id: "C-runtime-switch", status: "pending" },
+    { id: "lifecycle-package-common", status: "passed" },
+    { id: "lifecycle-windows-native", status: "passed" },
+    { id: "lifecycle-wsl-native", status: "failed" },
+    { id: "lifecycle-runtime-switch", status: "pending" },
   ]);
 });
 
-test("[A HAR-03 LCH-05] 新生命周期运行不会覆盖尚未完成或回滚失败的恢复现场", async (t) => {
+test("[HAR-03 LCH-05] 新生命周期运行不会覆盖尚未完成或回滚失败的恢复现场", async (t) => {
   const directory = await useTempDir(t);
   const latestPath = join(directory, "latest.json");
   const reportPath = join(directory, "report.json");
@@ -212,7 +212,7 @@ test("[A HAR-03 LCH-05] 新生命周期运行不会覆盖尚未完成或回滚�
   assert.equal(await readLatestUnfinishedLifecycle(latestPath), null);
 });
 
-test("[A HAR-03 LCH-05] 恢复入口只重新调度确实中断的生命周期任务", () => {
+test("[HAR-03 LCH-05] 恢复入口只重新调度确实中断的生命周期任务", () => {
   const report = createLifecycleReport({ steps: ["reopen"] });
   assert.equal(lifecycleResumeDecision(report), "resume");
   report.status = "running";
@@ -225,7 +225,7 @@ test("[A HAR-03 LCH-05] 恢复入口只重新调度确实中断的生命周期�
   assert.equal(lifecycleResumeDecision(report), "terminal");
 });
 
-test("[A HAR-03 LCH-05] 回滚恢复只重试失败项并保留原测试失败结论", async (t) => {
+test("[HAR-03 LCH-05] 回滚恢复只重试失败项并保留原测试失败结论", async (t) => {
   const directory = await useTempDir(t);
   const reportPath = join(directory, "report.json");
   const report = createLifecycleReport({ steps: ["install", "switch-runtime", "launch"] });

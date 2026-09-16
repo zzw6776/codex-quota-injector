@@ -171,7 +171,7 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
   }
   if (plan.unfinishedLifecycle) {
     throw new Error(
-      `上一次 C 批 ${plan.unfinishedLifecycle.runId} 仍为 ${plan.unfinishedLifecycle.status}；` +
+      `上一次启停恢复测试 ${plan.unfinishedLifecycle.runId} 仍为 ${plan.unfinishedLifecycle.status}；` +
       `请先执行 ${plan.unfinishedLifecycle.nextCommand}`,
     );
   }
@@ -211,7 +211,7 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
   const sessionCheckpoint = await captureCodexSessionCheckpoint({ codexHome });
   const runtimeConfiguration = await captureWindowsRuntimeConfiguration({ runDirectory });
   if (runtimeConfiguration.originalRuntime !== plan.currentRuntime) {
-    throw new Error("Codex 运行方式在计划与调度之间发生变化；请重新查看 C 批计划");
+    throw new Error("Codex 运行方式在计划与调度之间发生变化；请重新查看启停恢复测试计划");
   }
   const taskName = `CodexQuotaInjector-Lifecycle-${runId}`;
   const initialPrivate = await inspectLifecycleHost({
@@ -255,18 +255,19 @@ export async function runWindowsLifecycleCli(argv = process.argv.slice(2)) {
     ],
     metadata: {
       batch: plan.batch,
+      name: plan.name,
       mode: "windows-task-scheduler-resumable",
       currentRuntime: plan.currentRuntime,
       runtimeTargets: plan.runtimeTargets,
       components: {
-        "C-package-common": ["verify-package", "wait-desktop-idle",
+        "lifecycle-package-common": ["verify-package", "wait-desktop-idle",
           "repair-desktop-history", "install-update"],
-        "C-windows-native": ["launch-windows-native", "repeat-windows-native",
+        "lifecycle-windows-native": ["launch-windows-native", "repeat-windows-native",
           "reconnect-windows-native", "reopen-windows-native"],
-        "C-wsl-native": ["launch-wsl-native", "repeat-wsl-native",
+        "lifecycle-wsl-native": ["launch-wsl-native", "repeat-wsl-native",
           "reconnect-wsl-native", "reopen-wsl-native"],
-        "C-runtime-switch": ["switch-windows-runtime", "switch-wsl-runtime", "restore-runtime"],
-        "C-account-roundtrip": ["switch-account", "restore-account", "final-state"],
+        "lifecycle-runtime-switch": ["switch-windows-runtime", "switch-wsl-runtime", "restore-runtime"],
+        "lifecycle-account-roundtrip": ["switch-account", "restore-account", "final-state"],
       },
       originalRuntimeConfiguration: {
         existed: runtimeConfiguration.existed,

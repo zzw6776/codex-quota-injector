@@ -16,7 +16,7 @@ const readInputCommand = process.platform === "win32"
   ? "Get-Content -Raw -LiteralPath input.txt"
   : "cat input.txt";
 
-test("[A HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时临时配置、本地端点和初始化协商", { timeout: 30_000 }, async t => {
+test("[HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时临时配置、本地端点和初始化协商", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { initialize: false });
   await assert.rejects(r.rpc.request("model/list", {}), /initializ/i);
   const hello = await r.rpc.request("initialize", { clientInfo: { name: "offline_contract", version: "1" }, capabilities: { experimentalApi: true } });
@@ -34,7 +34,7 @@ test("[A HAR-01 LCH-02 RPC-01 MOD-06] 官方运行时临时配置、本地端点
 });
 
 for (const profile of ["direct", "shim", "router", "custom", "chat", "configured-responses", "configured-chat"]) {
-  test(`[A TOOL-01 TOOL-04 TOOL-07 ENV-01 NET-03 NET-04 IO-02 OBS-01] ${profile} 官方工具执行文件读取、补丁、命令与续接`, { timeout: 40_000 }, async t => {
+  test(`[TOOL-01 TOOL-04 TOOL-07 ENV-01 NET-03 NET-04 IO-02 OBS-01] ${profile} 官方工具执行文件读取、补丁、命令与续接`, { timeout: 40_000 }, async t => {
     const r = await startRuntime(t, { profile });
     await writeFile(join(r.cwd, "input.txt"), "BEFORE 中文\n");
     await execFileAsync(gitExecutable, ["init", "-q", r.cwd]);
@@ -83,7 +83,7 @@ for (const profile of ["direct", "shim", "router", "custom", "chat", "configured
   });
 }
 
-test("[A TOOL-01 ENV-03 IO-01 RPC-05 OBS-03] 官方 fs 接口读取、复制、监听、删除大文件与 UTF-8 二进制内容", { timeout: 30_000 }, async t => {
+test("[TOOL-01 ENV-03 IO-01 RPC-05 OBS-03] 官方 fs 接口读取、复制、监听、删除大文件与 UTF-8 二进制内容", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim" });
   const directory = join(r.cwd, "附件 中文");
   await r.rpc.request("fs/createDirectory", { path: directory, recursive: true });
@@ -115,7 +115,7 @@ test("[A TOOL-01 ENV-03 IO-01 RPC-05 OBS-03] 官方 fs 接口读取、复制、�
   });
 });
 
-test("[A TOOL-02 ENV-01] 官方命令 PTY 的输入、调整尺寸、输出和受控终止", { timeout: 30_000 }, async t => {
+test("[TOOL-02 ENV-01] 官方命令 PTY 的输入、调整尺寸、输出和受控终止", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim" });
   const processId = "offline-terminal";
   const after = r.rpc.events.length;
@@ -155,7 +155,7 @@ test("[A TOOL-02 ENV-01] 官方命令 PTY 的输入、调整尺寸、输出和�
   );
 });
 
-test("[A SES-01 SES-02 SES-04 SES-07 ENV-03] 官方任务恢复、分叉、名称、列表、归档和历史回滚", { timeout: 30_000 }, async t => {
+test("[SES-01 SES-02 SES-04 SES-07 ENV-03] 官方任务恢复、分叉、名称、列表、归档和历史回滚", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "router" });
   const { thread } = await r.thread({ historyMode: "legacy" });
   r.enqueue("FIRST_MARKER", "SECOND_MARKER");
@@ -186,7 +186,7 @@ test("[A SES-01 SES-02 SES-04 SES-07 ENV-03] 官方任务恢复、分叉、名�
   await r.turn(thread.id, "resume after archive");
 });
 
-test("[A SES-05 SES-08] 官方任务目标和输入队列实际执行一次，顺序与修改一致", { timeout: 30_000 }, async t => {
+test("[SES-05 SES-08] 官方任务目标和输入队列实际执行一次，顺序与修改一致", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim" });
   const { thread } = await r.thread();
   await r.rpc.request("thread/goal/set", { threadId: thread.id, objective: "fixture goal", tokenBudget: 1000, status: "paused" });

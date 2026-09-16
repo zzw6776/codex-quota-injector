@@ -35,7 +35,8 @@ async function createWindowsLifecyclePlan({
     sourceRecoveryRelay,
   });
   return {
-    batch: "C-lifecycle",
+    batch: "lifecycle-official",
+    name: "启停恢复测试 - Codex 官方模型",
     mode: "windows-task-scheduler-supervisor",
     platform: process.platform,
     arch: process.arch,

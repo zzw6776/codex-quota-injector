@@ -19,7 +19,7 @@ const event = (ordinal, type, turnId, extra = {}) => ({
   payload: { type, turn_id: turnId, ...extra },
 });
 
-test("[C LCH-04] 检出重启造成的重复 ordinal 和未终止回合", () => {
+test("[LCH-04] 检出重启造成的重复 ordinal 和未终止回合", () => {
   const records = [
     event(0, "task_started", "interrupted", { started_at: 100 }),
     event(1, "token_count"),
@@ -39,7 +39,7 @@ test("[C LCH-04] 检出重启造成的重复 ordinal 和未终止回合", () => 
   assert.equal(result.repairable, true);
 });
 
-test("[C LCH-04] 修复保留对话内容并补齐中断边界和连续 ordinal", () => {
+test("[LCH-04] 修复保留对话内容并补齐中断边界和连续 ordinal", () => {
   const userItem = {
     ordinal: 1,
     type: "event_msg",
@@ -73,7 +73,7 @@ test("[C LCH-04] 修复保留对话内容并补齐中断边界和连续 ordinal"
   assert.equal(after.conversationRecordCount, 2);
 });
 
-test("[C LCH-04] 文件修复先备份再原子替换并保留替换前现场", async (t) => {
+test("[LCH-04] 文件修复先备份再原子替换并保留替换前现场", async (t) => {
   const directory = await useTempDir(t, "codex-rollout-repair-");
   const rolloutPath = join(directory, "rollout-01a0966e-380a-7692-a939-0a3beeb054a5.jsonl");
   const records = [
@@ -105,14 +105,14 @@ test("[C LCH-04] 文件修复先备份再原子替换并保留替换前现场", 
   );
 });
 
-test("[C LCH-04] 无法证明 ordinal 的记录拒绝自动修复", () => {
+test("[LCH-04] 无法证明 ordinal 的记录拒绝自动修复", () => {
   const result = analyzeRolloutRecords([{ type: "session_meta", payload: {} }]);
   assert.equal(result.repairRequired, true);
   assert.equal(result.repairable, false);
   assert.equal(result.invalidOrdinalRecords.length, 1);
 });
 
-test("[C LCH-04] ordinal 缺口可能代表记录丢失，不能用重新编号掩盖", () => {
+test("[LCH-04] ordinal 缺口可能代表记录丢失，不能用重新编号掩盖", () => {
   const result = analyzeRolloutRecords([
     event(0, "task_started", "turn", { started_at: 100 }),
     event(2, "task_complete", "turn"),
@@ -122,7 +122,7 @@ test("[C LCH-04] ordinal 缺口可能代表记录丢失，不能用重新编号�
   assert.equal(result.repairable, false);
 });
 
-test("[C LCH-04] 官方分页分叉从继承边界接续，不将合法非零起点误报为缺口", () => {
+test("[LCH-04] 官方分页分叉从继承边界接续，不将合法非零起点误报为缺口", () => {
   const meta = { ordinal: 24658, type: "session_meta", payload: {
     forked_from_id: "parent", forked_from_ordinal_exclusive: 24658,
     history_base: { thread_id: "parent", end_ordinal_exclusive: 24658 },
@@ -141,4 +141,26 @@ test("[C LCH-04] 官方分页分叉从继承边界接续，不将合法非零起
   assert.deepEqual(repair.records[0].payload, meta.payload);
   assert.equal(repair.manifest.outputRecords, 5);
   assert.equal(analyzeRolloutRecords(repair.records).repairRequired, false);
+});
+
+test("[LCH-04] 同一任务恢复文件保留历史边界，错误声明和真实断号仍被拒绝", () => {
+  const meta = { ordinal: 524, type: "session_meta", payload: {
+    id: "thread", history_base: { thread_id: "thread", end_ordinal_exclusive: 524, end_byte_offset: 6008847 },
+  } };
+  const records = [meta, event(525, "task_started", "turn"), event(526, "task_complete", "turn")];
+  assert.equal(analyzeRolloutRecords(records).repairRequired, false);
+  for (const payload of [
+    { ...meta.payload, id: "other" },
+    { ...meta.payload, forked_from_id: "other" },
+    { ...meta.payload, history_base: { ...meta.payload.history_base, end_byte_offset: null } },
+    { ...meta.payload, history_base: { ...meta.payload.history_base, end_ordinal_exclusive: 523 } },
+  ]) {
+    assert.equal(analyzeRolloutRecords([{ ...meta, payload }, ...records.slice(1)]).repairable, false);
+  }
+  assert.equal(analyzeRolloutRecords([meta, event(526, "task_complete", "turn")]).repairable, false);
+  const repaired = repairRolloutRecords([meta, event(525, "task_started", "old"),
+    event(526, "task_started", "next"), event(527, "task_complete", "next")]);
+  assert.equal(repaired.records[0].ordinal, 524);
+  assert.deepEqual(repaired.records[0].payload, meta.payload);
+  assert.equal(analyzeRolloutRecords(repaired.records).repairRequired, false);
 });

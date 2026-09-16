@@ -78,7 +78,7 @@ if (resumeArgument) {
   validateMacLifecycleSession(control);
   const previousReport = await readLifecycleReport(control.reportPath);
   const decision = lifecycleResumeDecision(previousReport);
-  if (decision === "already-running") throw new Error("C 监督器仍在运行，拒绝中断并重复启动");
+  if (decision === "already-running") throw new Error("启停恢复测试监督器仍在运行，拒绝中断并重复启动");
   if (decision === "terminal") {
     console.log(JSON.stringify({ status: previousReport.status, runId, reportPath: control.reportPath }));
     process.exit(0);
@@ -111,7 +111,7 @@ if (!argv.includes("--confirm-restart")) {
 }
 assertMacOS();
 if (plan.unfinishedLifecycle) {
-  throw new Error(`上一次 C ${plan.unfinishedLifecycle.runId} 尚未完成；` +
+  throw new Error(`上一次启停恢复测试 ${plan.unfinishedLifecycle.runId} 尚未完成；` +
     `请先执行 npm run test:lifecycle -- --resume=${plan.unfinishedLifecycle.runId}`);
 }
 if (plan.accountRoundTrip !== "ready") {
@@ -167,6 +167,7 @@ const report = createLifecycleReport({
   ],
   metadata: {
     batch: plan.batch,
+    name: plan.name,
     mode: "launchd-one-shot",
     sourceSnapshot: free.snapshot,
     initialHost: plan.host,

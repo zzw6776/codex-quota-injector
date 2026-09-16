@@ -20,9 +20,10 @@ export async function inspectThreadHistoryStore({
     const thread = state.prepare(
       "SELECT id, rollout_path, title, history_mode FROM threads WHERE id = ?",
     ).get(threadId);
+    const projectionId = rolloutProjectionId(thread?.rollout_path, threadId);
     const projection = history.prepare(
       "SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
-    ).get(threadId);
+    ).get(projectionId);
     const item = history.prepare(
       "SELECT item_type FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ?",
     );
@@ -34,15 +35,15 @@ export async function inspectThreadHistoryStore({
         `SELECT turn_id, status, rollout_ordinal, rollout_end_ordinal,
           first_user_item_id, final_agent_item_id
         FROM thread_turns WHERE thread_id = ? AND turn_id = ?`,
-      ).get(threadId, turnId) ?? { turn_id: turnId, status: "missing" };
+      ).get(projectionId, turnId) ?? { turn_id: turnId, status: "missing" };
       const firstUserItem = turn.first_user_item_id
-        ? item.get(threadId, turnId, turn.first_user_item_id)
+        ? item.get(projectionId, turnId, turn.first_user_item_id)
         : null;
       const finalAgentItem = turn.final_agent_item_id
-        ? item.get(threadId, turnId, turn.final_agent_item_id)
+        ? item.get(projectionId, turnId, turn.final_agent_item_id)
         : null;
       const delegatedInputPresent = firstUserItem?.item_type !== "userMessage" &&
-        delegatedItems.all(threadId, turnId).some(row => {
+        delegatedItems.all(projectionId, turnId).some(row => {
           try { return Boolean(readCodexDelegationInput(JSON.parse(row.item_json))); }
           catch { return false; }
         });
@@ -69,6 +70,7 @@ export async function inspectThreadHistoryStore({
         : !projectionCaughtUp ? "projection-behind" : !turnsDurable ? "turn-not-durable" : null,
       sqliteHome,
       paths,
+      projectionId,
       thread: thread ? {
         id: thread.id,
         title: thread.title,
@@ -168,4 +170,13 @@ function normalizePath(value) {
     .replaceAll("\\", "/")
     .replace(/\/$/, "")
     .toLowerCase();
+}
+
+function rolloutProjectionId(path, threadId) {
+  // Official recovered rollouts keep the logical thread ID in state.sqlite,
+  // but their history rows use the UUID suffix of the indexed rollout file.
+  const recovered = normalizePath(path).split("/").pop().match(
+    /-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})_([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/,
+  );
+  return recovered?.[1] === String(threadId).toLowerCase() ? recovered[2] : threadId;
 }

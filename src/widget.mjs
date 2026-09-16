@@ -8,4 +8,4 @@ export { calculatePopoverMaxHeight, calculateScrollbarEndPadding } from "./widge
 
 export { installQuotaWidget } from "./widget/runtime.mjs";
 
-export { widgetInstallExpression, widgetRuntimeVersionExpression, widgetUpdateExpression, widgetUpdateExpressionJson, widgetTokenUsageUpdateExpressionJson, widgetExtraModelsUpdateExpressionJson, widgetTokenUsageDeltaUpdateExpressionJson, widgetDrainActionsExpression } from "./widget/expressions.mjs";
+export { widgetInstallExpression, widgetRuntimeVersionExpression, widgetUpdateExpression, widgetUpdateExpressionJson, widgetTokenUsageUpdateExpressionJson, widgetExtraModelsUpdateExpressionJson, widgetNetworkUpdateExpressionJson, widgetTokenUsageDeltaUpdateExpressionJson, widgetDrainActionsExpression } from "./widget/expressions.mjs";

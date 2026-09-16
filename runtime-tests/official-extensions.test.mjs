@@ -35,7 +35,7 @@ function expectedMethods(inventory, variant, mode, type) {
   return [...inventory.modes[mode][type].methods.filter(method => !removed.has(method)), ...(changes.added ?? [])];
 }
 
-test("[A RPC-02 RPC-04 INT-03 IO-04 ENV-02 SES-09] 官方协议升级检查要求重新盘点所有能力分支", { timeout: 30_000 }, async t => {
+test("[RPC-02 RPC-04 INT-03 IO-04 ENV-02 SES-09] 官方协议升级检查要求重新盘点所有能力分支", { timeout: 30_000 }, async t => {
   const directory = await useTempDir(t);
   const cli = await officialExecutable();
   const expected = JSON.parse(await readFile(inventoryUrl, "utf8"));
@@ -59,7 +59,7 @@ test("[A RPC-02 RPC-04 INT-03 IO-04 ENV-02 SES-09] 官方协议升级检查要�
   }
 });
 
-test("[A INT-03] 官方用户验证能力按当前已审核协议明确报告未提供或平台不可用", { timeout: 30_000 }, async t => {
+test("[INT-03] 官方用户验证能力按当前已审核协议明确报告未提供或平台不可用", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim" });
   const inventory = JSON.parse(await readFile(inventoryUrl, "utf8"));
   const { stdout: versionOutput } = await execOffline(r.cli, ["--version"], { directory: r.directory });
@@ -79,7 +79,7 @@ test("[A INT-03] 官方用户验证能力按当前已审核协议明确报告未
   assert.equal(r.requests.length, 0, "读取本机验证状态不能调用模型");
 });
 
-test("[A EXT-02 MOD-06] 隔离的本地插件真实发现、安装、技能加载、停用和卸载", { timeout: 30_000 }, async t => {
+test("[EXT-02 MOD-06] 隔离的本地插件真实发现、安装、技能加载、停用和卸载", { timeout: 30_000 }, async t => {
   let marketplacePath;
   const r = await startRuntime(t, { profile: "shim", prepare: async ({ cwd }) => {
     await exec(gitExecutable, ["init", "-q", cwd]);
@@ -109,7 +109,7 @@ test("[A EXT-02 MOD-06] 隔离的本地插件真实发现、安装、技能加�
   assert.equal(r.requests.length, 0, "插件管理不应向模型发送请求");
 });
 
-test("[A ENV-01 IO-02] 官方审查在临时 Git 工作树读取真实差异并返回审查结果", { timeout: 30_000 }, async t => {
+test("[ENV-01 IO-02] 官方审查在临时 Git 工作树读取真实差异并返回审查结果", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "custom" });
   await exec(gitExecutable, ["init", "-q", r.cwd]);
   await writeFile(join(r.cwd, "review.txt"), "BEFORE_REVIEW\n");

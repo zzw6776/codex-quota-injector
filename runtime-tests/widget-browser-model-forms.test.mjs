@@ -5,7 +5,7 @@ import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mj
 import { widgetExtraModelsUpdateExpressionJson } from "../src/widget.mjs";
 import { fixtureData, SHADOW, startBrowser } from "./support/browser.mjs";
 
-test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模型、取消和保存均使用真实 DOM", { timeout: 30_000 }, async t => {
+test("[UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模型、取消和保存均使用真实 DOM", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   await b.click(".quota-chip");
   await b.click(".extra-models-open");

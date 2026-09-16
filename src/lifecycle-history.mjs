@@ -252,13 +252,16 @@ function updateTurnState(state, record, onMissingTerminal = null) {
 function declaredInitialOrdinal(record) {
   const meta = record?.type === "session_meta" ? record.payload : null;
   const base = meta?.history_base;
-  // Paginated forks keep their parent's ordinal space. Do not treat an
-  // arbitrary nonzero first record as a valid base without matching metadata.
-  return typeof base?.thread_id === "string" && base.thread_id.length > 0 &&
-    base.thread_id === meta.forked_from_id &&
-    Number.isSafeInteger(base.end_ordinal_exclusive) && base.end_ordinal_exclusive >= 0 &&
-    base.end_ordinal_exclusive === meta.forked_from_ordinal_exclusive
-    ? base.end_ordinal_exclusive : 0;
+  // Paginated forks and same-thread recovery files retain the declared
+  // history boundary; arbitrary nonzero starting ordinals remain invalid.
+  if (typeof base?.thread_id !== "string" || !base.thread_id.length ||
+    !Number.isSafeInteger(base.end_ordinal_exclusive) || base.end_ordinal_exclusive < 0) return 0;
+  const fork = base.thread_id === meta.forked_from_id &&
+    base.end_ordinal_exclusive === meta.forked_from_ordinal_exclusive;
+  const recovery = base.thread_id === meta.id && meta.forked_from_id == null &&
+    meta.forked_from_ordinal_exclusive == null &&
+    Number.isSafeInteger(base.end_byte_offset) && base.end_byte_offset > 0;
+  return fork || recovery ? base.end_ordinal_exclusive : 0;
 }
 
 function eventPayload(record) {

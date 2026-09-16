@@ -6,7 +6,7 @@ import { build } from "esbuild";
 import { widgetInstallExpression, WIDGET_RUNTIME_VERSION } from "../src/widget.mjs";
 import { SHADOW, startBrowser, fixtureData } from "./support/browser.mjs";
 
-test("[A UI-01 UI-02] 正式包压缩后的 Widget 可序列化功能模块并完成页面动作", { timeout: 30_000 }, async t => {
+test("[UI-01 UI-02] 正式包压缩后的 Widget 可序列化功能模块并完成页面动作", { timeout: 30_000 }, async t => {
   const bundle = await build({
     entryPoints: [fileURLToPath(new URL("../src/widget.mjs", import.meta.url))],
     bundle: true, platform: "node", format: "cjs", target: "node22",
@@ -35,7 +35,7 @@ test("[A UI-01 UI-02] 正式包压缩后的 Widget 可序列化功能模块并�
   assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.account-list') != null`), true);
 });
 
-test("[A UI-01 UI-03 TOOL-06] 真实浏览器挂载、重复注入、换节点、版本替换和销毁不拦截原生输入", { timeout: 30_000 }, async t => {
+test("[UI-01 UI-03 TOOL-06] 真实浏览器挂载、重复注入、换节点、版本替换和销毁不拦截原生输入", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const count = () => b.client.evaluate('document.querySelectorAll("#codex-quota-injector-root").length');
   assert.equal(await count(), 1);
@@ -69,7 +69,7 @@ test("[A UI-01 UI-03 TOOL-06] 真实浏览器挂载、重复注入、换节点�
   assert.equal(await count(), 0, "销毁后观察器不能重新挂载");
 });
 
-test("[A LCH-04 UI-02] codex_app 降级会显示常驻入口、诊断与恢复动作", { timeout: 30_000 }, async t => {
+test("[LCH-04 UI-02] codex_app 降级会显示常驻入口、诊断与恢复动作", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   await b.update(fixtureData({
     hostHealth: {

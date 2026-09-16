@@ -3,7 +3,7 @@ import test from "node:test";
 import { widgetTokenUsageDeltaUpdateExpressionJson, widgetTokenUsageUpdateExpressionJson } from "../src/widget.mjs";
 import { fixtureData, SHADOW, startBrowser } from "./support/browser.mjs";
 
-test("[A UI-03 UI-04 OBS-01 OBS-03] 页面大小、长列表、主题、任务切换和用量增量不串到另一任务", { timeout: 30_000 }, async t => {
+test("[UI-03 UI-04 OBS-01 OBS-03] 页面大小、长列表、主题、任务切换和用量增量不串到另一任务", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const accounts = Array.from({ length: 40 }, (_, i) => ({ ...fixtureData().accounts[0], id: `a-${i}`, current: i === 0, email: `${i}-${"long".repeat(18)}@example.test` }));
   await b.update(fixtureData({ accounts }));
@@ -40,7 +40,7 @@ test("[A UI-03 UI-04 OBS-01 OBS-03] 页面大小、长列表、主题、任务�
   assert.equal(await b.client.evaluate('document.querySelector("[data-codex-token-usage]").getAttribute("data-codex-token-usage")'), "turn-late");
 });
 
-test("[A UI-04] 请求明细按实际滚动条宽度补齐右侧间距", { timeout: 30_000 }, async t => {
+test("[UI-04] 请求明细按实际滚动条宽度补齐右侧间距", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const generationDetails = Array.from({ length: 30 }, (_, sequence) => ({
     sequence,
@@ -93,7 +93,7 @@ test("[A UI-04] 请求明细按实际滚动条宽度补齐右侧间距", { timeo
   assert.ok(layout.contentEndGap >= 15 && layout.contentEndGap <= 17, JSON.stringify(layout));
 });
 
-test("[A UI-03] 二级页面继承主窗口尺寸、可临时拖大且返回后不保存", { timeout: 30_000 }, async t => {
+test("[UI-03] 二级页面继承主窗口尺寸、可临时拖大且返回后不保存", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   await b.client.request("Emulation.setDeviceMetricsOverride", {
     width: 1280,
@@ -170,7 +170,7 @@ test("[A UI-03] 二级页面继承主窗口尺寸、可临时拖大且返回后�
   assert.deepEqual(await size(), compactAccountSize, "小窗口中的二级页面也必须继承主窗口实际尺寸");
 });
 
-test("[A UI-02] 标题与返回状态关闭按钮固定在滚动内容之外", { timeout: 30_000 }, async t => {
+test("[UI-02] 标题与返回状态关闭按钮固定在滚动内容之外", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const data = fixtureData();
   data.accounts = Array.from({ length: 12 }, (_, index) => ({ ...data.accounts[0], id: `account-${index}` }));

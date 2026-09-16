@@ -6,7 +6,7 @@ import { crc32, deflateSync } from "node:zlib";
 import { customCall, message, startRuntime } from "./support/offline-runtime.mjs";
 import { waitFor } from "../test/helpers.mjs";
 
-test("[A SES-06 NET-06 OBS-01] 官方远程压缩协议返回状态，压缩后仍可继续", { timeout: 30_000 }, async t => {
+test("[SES-06 NET-06 OBS-01] 官方远程压缩协议返回状态，压缩后仍可继续", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "router" });
   const { thread } = await r.thread();
   r.enqueue("原始内容 KEEP_BEFORE_COMPACTION");
@@ -37,7 +37,7 @@ test("[A SES-06 NET-06 OBS-01] 官方远程压缩协议返回状态，压缩后�
     "累计用量必须避免把远程压缩的完整上下文重复相加");
 });
 
-test("[A IO-01 IO-03 MOD-04] 官方读取图片附件和动态工具产物，字节到模型输入完整", { timeout: 30_000 }, async t => {
+test("[IO-01 IO-03 MOD-04] 官方读取图片附件和动态工具产物，字节到模型输入完整", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "custom" });
   const chunk = (name, data) => {
     const payload = Buffer.concat([Buffer.from(name), data]);
@@ -67,7 +67,7 @@ test("[A IO-01 IO-03 MOD-04] 官方读取图片附件和动态工具产物，字
   assert.deepEqual(await readFile(join(r.cwd, "artifact.png")), png);
 });
 
-test("[A SES-03 MOD-05 SES-07] 官方 steer 保留追加指令，设置更新和注入历史影响下一轮", { timeout: 30_000 }, async t => {
+test("[SES-03 MOD-05 SES-07] 官方 steer 保留追加指令，设置更新和注入历史影响下一轮", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "custom" });
   const { thread } = await r.thread({ historyMode: "legacy" });
   let release;
@@ -91,7 +91,7 @@ test("[A SES-03 MOD-05 SES-07] 官方 steer 保留追加指令，设置更新和
   assert.equal(resumed.thread.id, thread.id);
 });
 
-test("[A EXT-01] 官方 Hooks 从隔离配置加载并执行，真实文件与开发者上下文可核对", { timeout: 30_000 }, async t => {
+test("[EXT-01] 官方 Hooks 从隔离配置加载并执行，真实文件与开发者上下文可核对", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "custom", prepare: async ({ env, cwd }) => {
     const script = join(env.CODEX_HOME, "hook.mjs");
     await writeFile(script, `import {appendFileSync} from "node:fs";let input="";process.stdin.on("data",chunk=>{input+=chunk;try{JSON.parse(input);}catch{return;}appendFileSync(${JSON.stringify(join(cwd,"hook-events.jsonl"))},input+"\\n");process.stdout.write("HOOK_CONTEXT_MARKER\\n",()=>process.exit(0));});`);

@@ -13,7 +13,7 @@ export async function captureMacLifecycleSession({
 } = {}) {
   const sessionCheckpoint = await capture({ codexHome, sqliteHome });
   const turn = sessionCheckpoint.turns.find((entry) => threadIdFromPath(entry.path) === threadId);
-  if (!threadId || !turn) throw new Error("BLOCKED：无法绑定发起 C 的活动任务及回合，未调度关闭操作");
+  if (!threadId || !turn) throw new Error("BLOCKED：无法绑定发起启停恢复测试的活动任务及回合，未调度关闭操作");
   const session = {
     sessionSafetyVersion: 1,
     codexHome,

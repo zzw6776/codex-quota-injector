@@ -19,7 +19,7 @@ const record = (type, turnId, timestamp) => JSON.stringify({
   payload: { type, turn_id: turnId },
 });
 
-test("[A HAR-04 LCH-03] 只有缺少完成事件的最新 Codex 回合会阻止生命周期关闭", () => {
+test("[HAR-04 LCH-03] 只有缺少完成事件的最新 Codex 回合会阻止生命周期关闭", () => {
   const active = parseActiveCodexTurns([
     record("task_started", "lost-on-restart", "2026-09-13T11:00:00.000Z"),
     record("task_started", "current", "2026-09-13T11:01:00.000Z"),
@@ -40,7 +40,7 @@ test("[A HAR-04 LCH-03] 只有缺少完成事件的最新 Codex 回合会阻止�
   ].join("\n")), []);
 });
 
-test("[A HAR-04 LCH-03] 生命周期等待活动回合完成落盘后才允许关闭", async () => {
+test("[HAR-04 LCH-03] 生命周期等待活动回合完成落盘后才允许关闭", async () => {
   const observations = [
     [{ turnId: "active" }],
     [],
@@ -54,7 +54,7 @@ test("[A HAR-04 LCH-03] 生命周期等待活动回合完成落盘后才允许�
   assert.deepEqual(result, { idle: true, observedTurnCount: 1 });
 });
 
-test("[C HAR-04 LCH-04] 调度时固定发起 C 的任务和回合用于重启后持久化验收", async (t) => {
+test("[HAR-04 LCH-04] 调度时固定发起启停恢复测试的任务和回合用于重启后持久化验收", async (t) => {
   const codexHome = await useTempDir(t, "codex-session-checkpoint-");
   const sessions = join(codexHome, "sessions", "2026", "09", "13");
   await mkdir(sessions, { recursive: true });
@@ -74,7 +74,7 @@ test("[C HAR-04 LCH-04] 调度时固定发起 C 的任务和回合用于重启�
   assert.ok(Number.isFinite(Date.parse(checkpoint.capturedAt)));
 });
 
-test("[A HAR-04 LCH-03] 大型 rollout 从尾部查找状态且不损坏跨块 UTF-8", async (t) => {
+test("[HAR-04 LCH-03] 大型 rollout 从尾部查找状态且不损坏跨块 UTF-8", async (t) => {
   const codexHome = await useTempDir(t, "codex-turn-gate-");
   const sessions = join(codexHome, "sessions", "2026", "09", "13");
   await mkdir(sessions, { recursive: true });
@@ -94,7 +94,7 @@ test("[A HAR-04 LCH-03] 大型 rollout 从尾部查找状态且不损坏跨块 U
   assert.deepEqual(await findActiveCodexTurns({ codexHome }), []);
 });
 
-test("[A HAR-04 LCH-03] 活动回合未落盘时超时并拒绝关闭", async () => {
+test("[HAR-04 LCH-03] 活动回合未落盘时超时并拒绝关闭", async () => {
   await assert.rejects(waitForCodexTurnsIdle({
     findActiveTurns: async () => [{ turnId: "active" }],
     stableDurationMs: 0,
@@ -103,7 +103,7 @@ test("[A HAR-04 LCH-03] 活动回合未落盘时超时并拒绝关闭", async ()
   }), /拒绝关闭桌面应用/);
 });
 
-test("[A HAR-04 LCH-03] 官方索引指向恢复后的 rollout 时，旧文件不再制造假活动回合", async t => {
+test("[HAR-04 LCH-03] 官方索引指向恢复后的 rollout 时，旧文件不再制造假活动回合", async t => {
   const codexHome = await useTempDir(t, "codex-turn-index-");
   const sessions = join(codexHome, "sessions");
   await mkdir(sessions);

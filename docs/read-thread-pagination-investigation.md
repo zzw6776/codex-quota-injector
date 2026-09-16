@@ -2,7 +2,7 @@
 
 ## 再次出现时先做什么
 
-已知问题编号：`codex-desktop-read-thread-pagination-cursor`。本说明同时供 B1 官方模型和 B2 DeepSeek 桌面验收使用；模型不同不改变官方桌面工具封装的归因。
+已知问题编号：`codex-desktop-read-thread-pagination-cursor`。本说明同时供 Codex 官方模型测试和 DeepSeek Flash 测试桌面验收使用；模型不同不改变官方桌面工具封装的归因。
 
 触发症状：`read_thread` 成功返回正确任务，但已完成回合的 `items` 为空。遇到此症状，先核对本说明，不先修改供应商兼容逻辑，也不反复消耗 Token 诱导模型重读。
 
@@ -27,9 +27,9 @@
 
 从安装包只读提取的相关调用链为 `$wi → vwi → readThreadTurnsPage → qLt`；这些符号仅适用于此次构建。现场临时条件断点只记录入参且返回 false，不暂停执行，结束后已移除。
 
-以下为同一任务两个完成回合的脱敏数量对照，A/B 为回合代称：
+以下为同一任务两个完成回合的脱敏数量对照，免费回归与真实模型测试为回合代称：
 
-| 读取入口与参数 | 回合 A 的 items 数 | 回合 B 的 items 数 |
+| 读取入口与参数 | 回合免费回归的 items 数 | 回合真实模型测试的 items 数 |
 | --- | ---: | ---: |
 | 当前官方桌面 read_thread | 0 | 0 |
 | 正式 Relay，items/list，页面旧游标 | 0 | 0 |

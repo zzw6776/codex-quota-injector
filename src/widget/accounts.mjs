@@ -1,16 +1,6 @@
-function createAccounts(dependencies) {
-  const { state } = dependencies;
-  const renderWakeupStatus = (...args) => dependencies.renderWakeupStatus(...args);
-  const enqueue = (...args) => dependencies.enqueue(...args);
-  const formatReset = (...args) => dependencies.formatReset(...args);
-  const formatExpiry = (...args) => dependencies.formatExpiry(...args);
-  const formatUpdatedAt = (...args) => dependencies.formatUpdatedAt(...args);
-  const formatPlan = (...args) => dependencies.formatPlan(...args);
-  const levelClass = (...args) => dependencies.levelClass(...args);
-  const number = (...args) => dependencies.number(...args);
-  const escapeHtml = (...args) => dependencies.escapeHtml(...args);
-
-function renderAccount(account) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createAccounts({ state, renderWakeupStatus, enqueue, formatReset, formatExpiry, formatUpdatedAt, formatPlan, levelClass, number, escapeHtml }) {
+  function renderAccount(account) {
     const windows = Array.isArray(account.windows) ? account.windows : [];
     const quotaHtml = windows.length
       ? `<div class="window-list">${windows.map((quota, idx) => renderWindow(quota, idx === windows.length - 1 ? account : null)).join("")}</div>`
@@ -49,7 +39,7 @@ function renderAccount(account) {
     </article>`;
   }
 
-function renderWindow(quota, account = null) {
+  function renderWindow(quota, account = null) {
     const remaining = number(quota.remainingPercent);
     const creditText = account?.credits?.formattedUsd
       ? `点数：${escapeHtml(account.credits.formattedUsd)}`
@@ -68,7 +58,7 @@ function renderWindow(quota, account = null) {
     </div>`;
   }
 
-function bindAccountEvents(wrap) {
+  function bindAccountEvents(wrap) {
 wrap.querySelectorAll(".switch-account").forEach((button) => button.addEventListener("click", () => enqueue({ type: "switch-account", accountId: button.dataset.accountId })));
 wrap.querySelectorAll(".restore-transferred").forEach((button) => button.addEventListener("click", () => {
       const email = button.dataset.accountEmail || "该账号";
@@ -94,15 +84,17 @@ wrap.querySelector(".token-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
       enqueue({ type: "token-add", token: String(form.get("token") ?? "") });
+      event.currentTarget.reset();
     });
 wrap.querySelector(".api-key-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
       enqueue({ type: "api-key-add", name: String(form.get("name") ?? ""), apiKey: String(form.get("apiKey") ?? "") });
+      event.currentTarget.reset();
     });
 }
 
-  return { renderAccount, renderWindow, bindAccountEvents };
+  return { renderAccount, bindAccountEvents };
 }
 
 export { createAccounts };

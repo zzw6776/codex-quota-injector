@@ -1,14 +1,6 @@
-function createMigration(dependencies) {
-  const { state } = dependencies;
-  const render = (...args) => dependencies.render(...args);
-  const renderPanelControls = (...args) => dependencies.renderPanelControls(...args);
-  const captureDetailPanelBaseSize = (...args) => dependencies.captureDetailPanelBaseSize(...args);
-  const resetDetailPanelSize = (...args) => dependencies.resetDetailPanelSize(...args);
-  const enqueue = (...args) => dependencies.enqueue(...args);
-  const formatPlan = (...args) => dependencies.formatPlan(...args);
-  const escapeHtml = (...args) => dependencies.escapeHtml(...args);
-
-function renderMigrationPage(accounts, busy, operation) {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createMigration({ state, render, renderPanelControls, captureDetailPanelBaseSize, resetDetailPanelSize, enqueue, formatPlan, escapeHtml }) {
+  function renderMigrationPage(accounts, busy, operation) {
     const mode = state.migrationMode === "handoff" ? "handoff" : "temporary";
     const isEligible = (account) => mode === "handoff"
       ? account.canTransfer === true
@@ -61,7 +53,7 @@ function renderMigrationPage(accounts, busy, operation) {
       </form>`;
   }
 
-function bindMigrationEvents(wrap) {
+  function bindMigrationEvents(wrap) {
 wrap.querySelector(".migration-open")?.addEventListener("click", () => {
       captureDetailPanelBaseSize(wrap);
       state.migrationMode = "temporary";

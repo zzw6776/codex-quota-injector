@@ -33,7 +33,7 @@ function fakeTokens() {
     "https://api.openai.com/auth": { chatgpt_account_id: "fixture-workspace" } }), refresh_token: "offline-refresh" };
 }
 
-test("[A ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存，完整转移后可导入", async t => {
+test("[ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存，完整转移后可导入", async t => {
   const { directory, store, manager, opened } = await setup(t);
   const requests = [];
   t.mock.method(globalThis, "fetch", async (url, options) => {
@@ -74,7 +74,7 @@ test("[A ACC-01 ACC-02] OAuth 回调验证 state 和 PKCE，凭据加密保存�
   assert.equal(other.store.list().every(account => account.authStatus === "active"), true);
 });
 
-test("[A ACC-02] OAuth 取消、超时和回调端口冲突均释放流程，错误不创建账号", async t => {
+test("[ACC-02] OAuth 取消、超时和回调端口冲突均释放流程，错误不创建账号", async t => {
   t.mock.method(globalThis, "fetch", () => { throw new Error("此场景不得发送凭据请求"); });
   for (const kind of ["cancel", "timeout", "port"]) await t.test(kind, async t => {
     let server;
@@ -96,7 +96,7 @@ test("[A ACC-02] OAuth 取消、超时和回调端口冲突均释放流程，错
   });
 });
 
-test("[A ACC-02] OAuth 在 Token 交换阶段取消会终止请求，迟到响应不保存账号", async t => {
+test("[ACC-02] OAuth 在 Token 交换阶段取消会终止请求，迟到响应不保存账号", async t => {
   const { manager, store, opened } = await setup(t);
   let entered = false;
   t.mock.method(globalThis, "fetch", (_url, options) => new Promise((_resolve, reject) => {

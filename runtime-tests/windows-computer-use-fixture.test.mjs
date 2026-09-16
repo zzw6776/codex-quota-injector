@@ -12,7 +12,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-test("[A TOOL-06 HAR-04] Windows 非浏览器 Computer Use 材料拒绝错误值和重复提交", () => {
+test("[TOOL-06 HAR-04] Windows 非浏览器 Computer Use 材料拒绝错误值和重复提交", () => {
   const marker = "WINDOWS_CU_contract";
   assert.deepEqual(verifyWindowsComputerUseFixture({
     marker,
@@ -43,7 +43,7 @@ test("[A TOOL-06 HAR-04] Windows 非浏览器 Computer Use 材料拒绝错误值
   }), /恰好一次提交/);
 });
 
-test("[A TOOL-06 ENV-03] Windows 原生材料使用每轮路径和随机标记且可独立自检", { timeout: 30_000 }, async t => {
+test("[TOOL-06 ENV-03] Windows 原生材料使用每轮路径和随机标记且可独立自检", { timeout: 30_000 }, async t => {
   const source = windowsComputerUseFixtureSource({
     evidencePath: String.raw`D:\temporary\computer-use-evidence.json`,
     marker: "WINDOWS_CU_source_contract",

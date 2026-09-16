@@ -3,7 +3,7 @@ import test from "node:test";
 import { customCall, startRuntime } from "./support/offline-runtime.mjs";
 import { startBrowserHost } from "./support/browser-host.mjs";
 
-test("[A TOOL-04 TOOL-05 TOOL-06 UI-03] 真实宿主回调完成受控网页搜索、读取、查找和浏览器输入点击", { timeout: 30_000 }, async t => {
+test("[TOOL-04 TOOL-05 TOOL-06 UI-03] 真实宿主回调完成受控网页搜索、读取、查找和浏览器输入点击", { timeout: 30_000 }, async t => {
   const host = await startBrowserHost(t);
   const r = await startRuntime(t, { profile: "direct" });
   r.rpc.onRequest = async request => { assert.equal(request.method, "item/tool/call"); return host.handle(request.params); };

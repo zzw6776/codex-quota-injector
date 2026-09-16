@@ -331,7 +331,7 @@ for await (const line of lines) {
   await waitFor(async () => !await readFile(statePath, "utf8").then(() => true, () => false));
 });
 
-test("[A LCH-04 TOOL-04] 重新加载并检查会重载官方 MCP 并以内置状态查询验证工具目录", async (t) => {
+test("[LCH-04 TOOL-04] 重新加载并检查会重载官方 MCP 并以内置状态查询验证工具目录", async (t) => {
   const directory = await useTempDir(t, "codex-host-tools-reload-");
   const fakeCodexPath = join(directory, "fake-codex.mjs");
   const upstreamExecutable = join(

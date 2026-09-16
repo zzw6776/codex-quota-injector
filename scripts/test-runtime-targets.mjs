@@ -11,7 +11,7 @@ import { codexRunsInWindowsSubsystemForLinux, defaultAccountDataDir } from "../s
 
 const execFileAsync = promisify(execFile);
 
-export const COMMON_COMPONENT = "A-common";
+export const COMMON_COMPONENT = "free-common";
 export const MACOS_NATIVE = "macos-native";
 export const WINDOWS_NATIVE = "windows-native";
 export const WSL_NATIVE = "wsl-native";
@@ -55,7 +55,7 @@ export function runtimeTargetsForPlatform(platform = process.platform) {
 
 export function runtimeComponentId(runtimeTarget) {
   if (!RUNTIME_TARGETS.has(runtimeTarget)) throw new Error(`未知测试运行环境 ${runtimeTarget}`);
-  return `A-${runtimeTarget}-relay`;
+  return `free-${runtimeTarget}-relay`;
 }
 
 export function runtimeTargetLabel(runtimeTarget) {

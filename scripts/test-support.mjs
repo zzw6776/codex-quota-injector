@@ -90,7 +90,7 @@ export async function requireFreeResult({ runtimeTarget = null, requireAll = fal
   if (runtime.artifact?.path) {
     const actualHash = await hashFile(runtime.artifact.path).catch(() => null);
     if (actualHash !== runtime.artifact.sha256) {
-      throw new Error(`${target === WSL_NATIVE ? "WSL" : "Windows"} 原生 Relay 已变化；请重新运行完整 A 批`);
+      throw new Error(`${target === WSL_NATIVE ? "WSL" : "Windows"} 原生 Relay 已变化；请重新运行完整免费回归`);
     }
   }
   return { ...report, selectedRuntime: target, selectedRuntimeComponent: runtime };

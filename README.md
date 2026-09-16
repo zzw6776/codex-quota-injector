@@ -135,11 +135,11 @@ npm run test:desktop -- --profile=deepseek --plan
 npm run test:lifecycle -- --plan
 ```
 
-`npm test` 运行免费基础回归；`npm run test:offline` 运行当前平台完整 A，不消耗模型 Token。A 由只跑一次的公共组件和原生 Relay 组件组成：macOS 执行 `A-common + A-macos-native-relay`，Windows 分别执行 `A-common + A-windows-native-relay + A-wsl-native-relay`。Windows 与 WSL 使用各自的 Node.js、依赖、官方 CLI、实际 PE/ELF SEA Relay 和临时目录，结果不能互相继承；报告同时记录当前桌面运行环境与本平台全部支持环境的状态。各平台使用临时配置、测试凭据和本地模型端点，macOS 额外使用 Seatbelt 限制出站。若请求没有到达本地端点，测试会失败。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI、浏览器和 Relay 摘要。
+`npm test` 运行免费基础回归；`npm run test:offline` 运行当前平台完整免费回归，不消耗模型 Token。免费回归由只跑一次的公共组件和原生 Relay 组件组成：macOS 执行 `free-common + free-macos-native-relay`，Windows 分别执行 `free-common + free-windows-native-relay + free-wsl-native-relay`。Windows 与 WSL 使用各自的 Node.js、依赖、官方 CLI、实际 PE/ELF SEA Relay 和临时目录，结果不能互相继承；报告同时记录当前桌面运行环境与本平台全部支持环境的状态。各平台使用临时配置、测试凭据和本地模型端点，macOS 额外使用 Seatbelt 限制出站。若请求没有到达本地端点，测试会失败。报告保存在 `.runtime/test-results/offline.json`，同时绑定代码、CLI、浏览器和 Relay 摘要。
 
-测试固定分为三批。A 为 `npm run test:offline` 免费回归，只有用户明确要求时才运行指定范围。A 通过后应主动展示后续计划并询问用户：B1 只测 Codex 官方模型；B2 只从模型管理中读取当前已验证的 DeepSeek Flash，隔离运行时不携带 DeepSeek Pro、其他自定义平台或 TokenHub。每个 B 都拆成 `test:live:*` 后台组件和 `test:desktop` 真实桌面组件；两者必须绑定同一源码、平台、运行环境和供应商并全部通过，整批才通过。B1、B2 分别授权、分别报告，每次默认读取当前桌面运行环境，也可追加 `--runtime=macos-native|windows-native|wsl-native` 选择一个环境；脚本不切换桌面设置。桌面执行器会先打开实时报告页，再由目标模型的真实 Codex 任务调用 codex_app 的 `list_threads`/`read_thread`、functions.exec、web.run、computer use 和用户补充输入，细节见[桌面入口验收](docs/testing-desktop-host.md)。
+测试固定分为三批。免费回归为 `npm run test:offline` 免费回归，只有用户明确要求时才运行指定范围。免费回归通过后应主动展示后续计划并询问用户：官方模型测试只测 Codex 官方模型；DeepSeek Flash 测试只从模型管理中读取当前已验证的 DeepSeek Flash，隔离运行时不携带 DeepSeek Pro、其他自定义平台或 TokenHub。每个真实模型测试都拆成 `test:live:*` 后台组件和 `test:desktop` 真实桌面组件；两者必须绑定同一源码、平台、运行环境和供应商并全部通过，整批才通过。官方模型测试、DeepSeek Flash 测试分别授权、分别报告，每次默认读取当前桌面运行环境，也可追加 `--runtime=macos-native|windows-native|wsl-native` 选择一个环境；脚本不切换桌面设置。桌面执行器会先打开实时报告页，再由目标模型的真实 Codex 任务调用 codex_app 的 `list_threads`/`read_thread`、functions.exec、web.run、computer use 和用户补充输入，细节见[桌面入口验收](docs/testing-desktop-host.md)。
 
-C 为 `npm run test:lifecycle -- --plan`，只读核对正式包、进程、中继协议、账号条件和计划中的一次官方冒烟；单独获得当次同意后，`--confirm-restart` 才会执行安装、接管、重连、关闭重开和账号往返。Windows 会自动保存原设置，依次切换并验证 Windows 原生 Relay 与 WSL 原生 Relay，随后精确恢复，用户无需手动切换。测试开始前会在独立浏览器页实时显示步骤，macOS 由 launchd 监督，Windows 由带恢复策略的任务计划程序监督，因此 Codex 被关闭后控制程序仍能继续记录和恢复。
+启停恢复测试为 `npm run test:lifecycle -- --plan`，只读核对正式包、进程、中继协议、账号条件和计划中的一次官方冒烟；单独获得当次同意后，`--confirm-restart` 才会执行安装、接管、重连、关闭重开和账号往返。Windows 会自动保存原设置，依次切换并验证 Windows 原生 Relay 与 WSL 原生 Relay，随后精确恢复，用户无需手动切换。测试开始前会在独立浏览器页实时显示步骤，macOS 由 launchd 监督，Windows 由带恢复策略的任务计划程序监督，因此 Codex 被关闭后控制程序仍能继续记录和恢复。
 
 ## 限制
 

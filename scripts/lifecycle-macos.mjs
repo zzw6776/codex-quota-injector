@@ -47,7 +47,8 @@ export async function createMacLifecyclePlan({
     join(root, ".runtime", "test-results", "lifecycle", "latest.json"),
   );
   return {
-    batch: "C-lifecycle",
+    batch: "lifecycle-official",
+    name: "启停恢复测试 - Codex 官方模型",
     mode: "macos-external-supervisor",
     platform: process.platform,
     arch: process.arch,

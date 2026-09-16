@@ -78,7 +78,7 @@ function subscriptionResponse() {
   });
 }
 
-test("[A ACC-03] 临时迁移主动轮换两种 Token 并写回本机，但导出文件不含 refresh token", async (t) => {
+test("[ACC-03] 临时迁移主动轮换两种 Token 并写回本机，但导出文件不含 refresh token", async (t) => {
   const source = await setup(t, "codex-transfer-temporary-source-");
   const original = oauthAccount("temporary", "temporary@example.invalid", "temporary-refresh-old");
   await source.store.upsert(original);
@@ -142,7 +142,7 @@ test("[A ACC-03] 临时迁移主动轮换两种 Token 并写回本机，但导�
   assert.equal(imported.temporaryExpiresAt, transfer.accounts[0].temporary_expires_at);
 });
 
-test("[A ACC-01 ACC-03] 临时迁移不会覆盖目标设备已有的同账号完整凭据", async (t) => {
+test("[ACC-01 ACC-03] 临时迁移不会覆盖目标设备已有的同账号完整凭据", async (t) => {
   const target = await setup(t, "codex-transfer-temporary-existing-");
   const existing = oauthAccount("existing", "existing@example.invalid", "existing-refresh");
   await target.store.upsert(existing);
@@ -188,7 +188,7 @@ test("[A ACC-01 ACC-03] 临时迁移不会覆盖目标设备已有的同账号�
 });
 
 for (const authStatus of ["transferred", "needsReauth"]) {
-  test(`[A ACC-03] 临时导入替换 ${authStatus} 账号后不会把旧 refresh token 写回 Codex`, async (t) => {
+  test(`[ACC-03] 临时导入替换 ${authStatus} 账号后不会把旧 refresh token 写回 Codex`, async (t) => {
     const target = await setup(t, "codex-transfer-temporary-stale-");
     const existing = oauthAccount("stale", "stale@example.invalid", "stale-refresh", { authStatus });
     await target.store.upsert(existing);
@@ -215,7 +215,7 @@ for (const authStatus of ["transferred", "needsReauth"]) {
   });
 }
 
-test("[A ACC-03] 完整转移写回最新 Token、停用源账号并切换当前账号，目标接管后旧设备恢复会安全失败", async (t) => {
+test("[ACC-03] 完整转移写回最新 Token、停用源账号并切换当前账号，目标接管后旧设备恢复会安全失败", async (t) => {
   const source = await setup(t, "codex-transfer-handoff-source-");
   const account = oauthAccount("handoff", "handoff@example.invalid", "handoff-refresh-old", {
     wakeup: { enabled: true, times: ["08:00"], updatedAt: 1 },
@@ -306,7 +306,7 @@ test("[A ACC-03] 完整转移写回最新 Token、停用源账号并切换当前
   assert.match(source.store.get(account.id).quotaError, /需要重新授权/);
 });
 
-test("[A ACC-03] 迁移文件尚未接收时，点击恢复会先刷新保留凭据，成功后才重新启用", async (t) => {
+test("[ACC-03] 迁移文件尚未接收时，点击恢复会先刷新保留凭据，成功后才重新启用", async (t) => {
   const source = await setup(t, "codex-transfer-restore-");
   const account = oauthAccount("restore", "restore@example.invalid", "restore-refresh-old", {
     wakeup: { enabled: true, times: ["08:00"], updatedAt: 1 },
@@ -343,7 +343,7 @@ test("[A ACC-03] 迁移文件尚未接收时，点击恢复会先刷新保留凭
   assert.equal(restored.wakeup.enabled, false, "恢复后不应静默重新开启付费唤醒任务");
 });
 
-test("[A ACC-01 ACC-03] API Key 只允许完整转移，源端退出登录后仍可确认恢复", async (t) => {
+test("[ACC-01 ACC-03] API Key 只允许完整转移，源端退出登录后仍可确认恢复", async (t) => {
   const source = await setup(t, "codex-transfer-api-key-");
   const account = {
     id: "api-key",
@@ -381,7 +381,7 @@ test("[A ACC-01 ACC-03] API Key 只允许完整转移，源端退出登录后仍
   assert.equal(source.store.get(account.id).authStatus, "active");
 });
 
-test("[A ACC-03] 迁移前主动刷新失败时不生成文件，并把永久失效标记为需要重新授权", async (t) => {
+test("[ACC-03] 迁移前主动刷新失败时不生成文件，并把永久失效标记为需要重新授权", async (t) => {
   const source = await setup(t, "codex-transfer-refresh-failure-");
   const account = oauthAccount("failure", "failure@example.invalid", "failure-refresh");
   await source.store.upsert(account);
@@ -396,7 +396,7 @@ test("[A ACC-03] 迁移前主动刷新失败时不生成文件，并把永久失
   assert.equal(source.store.get(account.id).authStatus, "needsReauth");
 });
 
-test("[A ACC-03 ACC-06] 完整转移文件写入失败会恢复源账号与官方登录", async (t) => {
+test("[ACC-03 ACC-06] 完整转移文件写入失败会恢复源账号与官方登录", async (t) => {
   const source = await setup(t, "codex-transfer-write-failure-");
   const account = oauthAccount("write-failure", "write-failure@example.invalid", "write-refresh-old");
   await source.store.upsert(account);

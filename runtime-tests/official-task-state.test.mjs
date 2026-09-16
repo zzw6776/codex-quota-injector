@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { call, message, startRuntime } from "./support/offline-runtime.mjs";
 
-test("[A SES-08 OBS-01] 官方目标实际执行文件任务并完成，完成后不继续生成", { timeout: 30_000 }, async t => {
+test("[SES-08 OBS-01] 官方目标实际执行文件任务并完成，完成后不继续生成", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "configured-responses" });
   const { thread } = await r.thread();
   r.enqueue([call("create_goal", { objective: "在当前临时目录写入 GOAL_EXECUTED", token_budget: 1000 })],
@@ -26,7 +26,7 @@ test("[A SES-08 OBS-01] 官方目标实际执行文件任务并完成，完成�
   assert.equal(r.requests.filter(q => q.method !== "HEAD" && q.body.generate !== false).length, 4);
 });
 
-test("[A SES-04 SES-07 ENV-03] 官方分页时间线、分组管理和删除只影响指定临时任务", { timeout: 30_000 }, async t => {
+test("[SES-04 SES-07 ENV-03] 官方分页时间线、分组管理和删除只影响指定临时任务", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim" });
   const { thread } = await r.thread();
   r.enqueue("TIMELINE_A", "TIMELINE_B");
@@ -65,7 +65,7 @@ test("[A SES-04 SES-07 ENV-03] 官方分页时间线、分组管理和删除只�
   await r.rpc.request("fuzzyFileSearch/sessionStop", { sessionId });
 });
 
-test("[A SES-06 NET-06] 官方自动压缩阈值触发后使用压缩状态继续下一轮", { timeout: 30_000 }, async t => {
+test("[SES-06 NET-06] 官方自动压缩阈值触发后使用压缩状态继续下一轮", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "router", config: "model_auto_compact_token_limit = 20" });
   const { thread } = await r.thread();
   let compactions = 0;

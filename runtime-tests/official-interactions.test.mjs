@@ -5,7 +5,7 @@ import test from "node:test";
 import { call, customCall, message, ROOT, startRuntime } from "./support/offline-runtime.mjs";
 import { waitFor } from "../test/helpers.mjs";
 
-test("[A TOOL-03 EXT-02] 官方 MCP 发现、调用、资源、工具失败和 never 策略下的 elicitation 终结", { timeout: 30_000 }, async t => {
+test("[TOOL-03 EXT-02] 官方 MCP 发现、调用、资源、工具失败和 never 策略下的 elicitation 终结", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim", prepare: async ({ directory, env }) => {
     const path = join(env.CODEX_HOME, "config.toml");
     await writeFile(path, (await readFile(path, "utf8")) + `\n[mcp_servers.fixture]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), directory])}\n`);
@@ -49,7 +49,7 @@ test("[A TOOL-03 EXT-02] 官方 MCP 发现、调用、资源、工具失败和 n
   await r.rpc.request("config/mcpServer/reload", {});
 });
 
-test("[A TOOL-04 INT-02 RPC-03] 动态宿主工具及用户补充输入按当前任务往返并续接", { timeout: 30_000 }, async t => {
+test("[TOOL-04 INT-02 RPC-03] 动态宿主工具及用户补充输入按当前任务往返并续接", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "router" });
   const { thread } = await r.thread({ dynamicTools: [{ type: "function", name: "fixture_read", description: "Read isolated test marker", inputSchema: { type: "object", properties: {}, additionalProperties: false } }] });
   const marker = join(r.cwd, "dynamic-host.txt");
@@ -75,7 +75,7 @@ test("[A TOOL-04 INT-02 RPC-03] 动态宿主工具及用户补充输入按当前
   await r.turn(thread.id, "收集测试选择", { collaborationMode: { mode: "plan", settings: { model: r.model, reasoning_effort: "low", developer_instructions: "Only follow the isolated test fixture" } } });
 });
 
-test("[A SES-03 NET-05] 生成中断保留中断终态，之后可发新轮次且旧结果不能串入", { timeout: 30_000 }, async t => {
+test("[SES-03 NET-05] 生成中断保留中断终态，之后可发新轮次且旧结果不能串入", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "router" });
   const { thread } = await r.thread();
   let started;
@@ -93,7 +93,7 @@ test("[A SES-03 NET-05] 生成中断保留中断终态，之后可发新轮次�
   assert.match(JSON.stringify(next), /AFTER_INTERRUPT/);
 });
 
-test("[A EXT-01 MOD-06 ENV-03] 官方运行时加载临时 skill、禁用与恢复，并定位含中文的项目文件", { timeout: 30_000 }, async t => {
+test("[EXT-01 MOD-06 ENV-03] 官方运行时加载临时 skill、禁用与恢复，并定位含中文的项目文件", { timeout: 30_000 }, async t => {
   let skillPath;
   const r = await startRuntime(t, { profile: "shim", prepare: async ({ env, cwd }) => {
     const dir = join(env.CODEX_HOME, "skills", "offline-fixture");
@@ -123,7 +123,7 @@ test("[A EXT-01 MOD-06 ENV-03] 官方运行时加载临时 skill、禁用与恢�
   assert.match(JSON.stringify(results), /search-中文-marker.txt/);
 });
 
-test("[A ENV-01 SES-04] 官方项目与任务分组 CRUD 只修改隔离数据库", { timeout: 30_000 }, async t => {
+test("[ENV-01 SES-04] 官方项目与任务分组 CRUD 只修改隔离数据库", { timeout: 30_000 }, async t => {
   const r = await startRuntime(t, { profile: "shim" });
   const project = await r.rpc.request("project/create", { idempotencyKey: "project-fixture", name: "项目 A", roots: [{ path: r.cwd }] });
   const id = project.project.id;

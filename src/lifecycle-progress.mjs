@@ -38,6 +38,14 @@ const STATUS_LABELS = new Map([
   ["prepared", "已准备"],
 ]);
 
+const COMPONENT_LABELS = new Map([
+  ["lifecycle-package-common", "正式包与公共准备"],
+  ["lifecycle-windows-native", "Windows 原生：启动、重连与恢复"],
+  ["lifecycle-wsl-native", "WSL 原生：启动、重连与恢复"],
+  ["lifecycle-runtime-switch", "运行环境切换与恢复"],
+  ["lifecycle-account-roundtrip", "账号切换与恢复"],
+]);
+
 export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {}) {
   const currentIndex = report.steps.findIndex((step) => step.status === "running");
   const failed = report.steps.find((step) => step.status === "failed");
@@ -85,7 +93,7 @@ export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {})
     </li>`;
   }).join("\n");
   const componentRows = (report.components ?? []).map((component) =>
-    `<tr><td>${escapeHtml(component.id)}</td><td class="component-status ${escapeHtml(component.status)}">${escapeHtml(statusLabel(component.status))}</td></tr>`
+    `<tr><td>${escapeHtml(COMPONENT_LABELS.get(component.id.replace(/^C-/, "lifecycle-")) ?? component.id)}</td><td class="component-status ${escapeHtml(component.status)}">${escapeHtml(statusLabel(component.status))}</td></tr>`
   ).join("\n");
   const components = componentRows
     ? `<section class="components"><h2>分项结果</h2><table><tbody>${componentRows}</tbody></table></section>`
@@ -101,14 +109,14 @@ export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {})
 ${finished ? "" : `<meta http-equiv="refresh" content="${Number(refreshSeconds) || 1}">`}
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codex 生命周期测试 · ${escapeHtml(report.runId)}</title>
+<title>启停恢复测试 - Codex 官方模型 · ${escapeHtml(report.runId)}</title>
 <style>
 :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f5f7;color:#1e2329}
 body{margin:0;padding:32px}main{max-width:860px;margin:auto;background:#fff;border-radius:18px;padding:28px;box-shadow:0 12px 40px #1112}
 h1{font-size:24px;margin:0 0 8px}.sub{color:#667085;margin-bottom:24px}.banner{padding:16px 18px;border-radius:12px;background:#eef4ff;border-left:5px solid #4f7cff;margin-bottom:22px}.banner.passed{background:#ecfdf3;border-color:#18a558}.banner.failed{background:#fff1f1;border-color:#d92d20}.summary{display:flex;gap:18px;flex-wrap:wrap;color:#475467;font-size:14px}.components{margin-top:22px}.components h2{font-size:16px;margin:0 0 8px}.components table{width:100%;border-collapse:collapse}.components td{padding:8px;border-top:1px solid #eaecf0}.component-status{text-align:right}.component-status.passed{color:#067647}.component-status.failed,.component-status.rollback-failed{color:#b42318}.steps{list-style:none;padding:0;margin:24px 0 0}.step{display:flex;gap:14px;padding:15px 0;border-top:1px solid #eaecf0}.index{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#eaecf0;font-weight:700;flex:none}.step.running .index{background:#4f7cff;color:#fff}.step.passed .index{background:#18a558;color:#fff}.step.failed .index{background:#d92d20;color:#fff}.step-body{flex:1;min-width:0}.step-title{display:flex;justify-content:space-between;gap:16px}.time,.evidence,.rollback{font-size:13px;color:#667085;margin-top:5px}.error{color:#b42318;margin-top:7px;white-space:pre-wrap}.rollback.failed{color:#b42318}.rollback.passed{color:#067647}.footer{margin-top:24px;color:#667085;font-size:13px}.failure{white-space:pre-wrap;margin-top:10px;color:#b42318}
 @media(prefers-color-scheme:dark){:root{background:#111318;color:#f5f6f7}main{background:#1b1e24}.sub,.summary,.time,.evidence,.rollback,.footer{color:#aab2c0}.step{border-color:#323741}.index{background:#343a46}.banner{background:#18233b}.banner.passed{background:#102c20}.banner.failed{background:#35191a}}
 </style></head><body><main>
-<h1>Codex 生命周期测试</h1>
+<h1>启停恢复测试 - Codex 官方模型</h1>
 <div class="sub">运行编号 ${escapeHtml(report.runId)} · 正式版本 ${escapeHtml(report.projectVersion)} · 目标中继协议 ${escapeHtml(report.targetRelayProtocol)}</div>
 <section class="banner ${tone}"><strong>${escapeHtml(headline)}</strong>${failure ? `<div class="failure">${escapeHtml(failure)}</div>` : ""}</section>
 <div class="summary"><span>已通过 ${passedCount}/${report.steps.length}</span><span>总体状态：${escapeHtml(statusLabel(report.status))}</span>${report.ownerPid ? `<span>监督器 PID：${escapeHtml(report.ownerPid)}</span>` : ""}${completionNotification}<span>最近更新：${escapeHtml(report.updatedAt ?? report.createdAt ?? "未知")}</span></div>

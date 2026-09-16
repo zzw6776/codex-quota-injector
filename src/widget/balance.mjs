@@ -1,8 +1,6 @@
-function createBalance(dependencies) {
-  const { state } = dependencies;
-  const escapeHtml = (...args) => dependencies.escapeHtml(...args);
-
-function currentDeepSeekBalanceView() {
+// Browser-serializable factory: all external values arrive through this explicit boundary.
+function createBalance({ state, escapeHtml }) {
+  function currentDeepSeekBalanceView() {
     const extraModels = state.data.extraModels ?? {};
     const managed = extraModels.platforms?.find?.((platform) =>
       platform?.preset === "deepseek" && platform?.apiKey);
@@ -16,7 +14,7 @@ function currentDeepSeekBalanceView() {
     };
   }
 
-function renderPanelBalance() {
+  function renderPanelBalance() {
     const accounts = Array.isArray(state.data.accounts) ? state.data.accounts : [];
     const currentAccount = accounts.find((account) => account.current) ?? accounts[0] ?? null;
     const credits = currentAccount?.credits ?? state.data.credits ?? null;
@@ -37,18 +35,20 @@ function renderPanelBalance() {
       : "";
   }
 
-function patchPanelBalance(wrap) {
+  function patchPanelBalance(wrap) {
     const current = wrap.querySelector(".panel-balance");
     const next = renderPanelBalance();
     if (current) {
-      if (next) current.outerHTML = next;
+      if (next) {
+        if (current.outerHTML !== next) current.outerHTML = next;
+      }
       else current.remove();
     } else if (next) {
       wrap.querySelector(".panel-version-text")?.insertAdjacentHTML("beforebegin", next);
     }
   }
 
-  return { currentDeepSeekBalanceView, renderPanelBalance, patchPanelBalance };
+  return { renderPanelBalance, patchPanelBalance };
 }
 
 export { createBalance };
