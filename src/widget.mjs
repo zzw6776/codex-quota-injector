@@ -1,4 +1,4 @@
-export const WIDGET_RUNTIME_VERSION = 156;
+export const WIDGET_RUNTIME_VERSION = 166;
 
 export function paginateGenerationDetails(details, visibleCount = 20) {
   const ordered = Array.isArray(details)
@@ -525,7 +525,11 @@ export function installQuotaWidget(
     accountTooltipTimer: null,
     contextEditingSlug: null,
     extraPlatformDraft: null,
+    extraPlatformDrafts: new Map(),
     extraModelDiscoveryRevision: 0,
+    extraModelDetectionRequests: new Map(),
+    extraPlatformSaveRequest: null,
+    panelScrollPosition: null,
     extraModelOperationDraft: null,
     detailPanelBaseSize: null,
     detailPanelSize: null,
@@ -577,6 +581,7 @@ export function installQuotaWidget(
     .is-critical { color: #dc4c3f !important; }
     .quota-popover {
       position: fixed; inset: auto auto 58px 12px; margin: 0;
+      display: flex; flex-direction: column;
       width: min(430px, calc(100vw - 24px)); max-height: 720px; overflow: hidden;
       padding: 0; border-radius: 16px;
       color: var(--token-foreground, #f4f4f7); background: var(--token-main-surface-primary, #191923);
@@ -588,12 +593,12 @@ export function installQuotaWidget(
       transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
     }
     .panel-scroll {
-      width: 100%; max-height: inherit; overflow: auto; overflow-anchor: none;
-      padding: 14px; border-radius: inherit;
+      width: 100%; min-height: 0; flex: 1 1 auto; overflow: auto; overflow-anchor: none;
+      padding: 0 14px 14px; border-radius: 0 0 16px 16px;
     }
     .detail-popover { padding: 6px 6px 0 0; }
     .detail-popover .panel-scroll {
-      height: 100%; padding: 8px 8px 14px 14px;
+      padding: 0 8px 14px 14px;
     }
     .panel-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
     .panel-scroll::-webkit-scrollbar-track { margin-block: 12px; background: transparent; }
@@ -607,7 +612,8 @@ export function installQuotaWidget(
     .quota-wrap.is-dismissed .quota-popover {
       opacity: 0; visibility: hidden; transform: translateY(5px) scale(.985); pointer-events: none;
     }
-    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 1px 2px 10px; }
+    .panel-head { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 16px 10px; }
+    .detail-popover > .panel-head { padding: 9px 10px 10px 16px; }
     .panel-title { font-size: 14px; font-weight: 700; }
     .panel-title-wrap { display: flex; align-items: baseline; min-width: 0; gap: 7px; }
     .panel-subtitle { margin-top: 3px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
@@ -790,8 +796,19 @@ export function installQuotaWidget(
     .extra-model-capabilities { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; }
     .extra-model-capabilities .model-label { margin-right: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
     .extra-model-capabilities .badge.pending { color: #e5b86a; }
-    .extra-platform-model-status { display: grid; gap: 5px; margin-top: 7px; }
-    .extra-platform-progress:empty, .extra-model-feedback:empty { display: none; }
+    .extra-model-settings { display: grid; gap: 8px; min-width: 0; }
+    .extra-model-settings summary { cursor: pointer; font-size: 11px; }
+    .extra-model-settings-body { display: grid; gap: 8px; padding-top: 8px; }
+    .extra-model-detection-error { color: #dc4941; font-size: 11px; overflow-wrap: anywhere; white-space: normal; margin: 6px 0; }
+    .extra-model-detection-detail { color: var(--token-text-secondary, #aaaab5); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+    .extra-model-main-status.detection-failed { color: #b42318; background: #b4231810; }
+    .extra-model-unsaved { display: inline-flex; align-items: center; padding: 2px 7px; border: 1px solid rgba(251,191,36,.4); border-radius: 999px; color: #fbbf24; background: rgba(251,191,36,.14); font-size: 10px; font-weight: 700; line-height: 16px; white-space: nowrap; }
+    .quota-wrap.is-light .extra-model-unsaved { color: #9a4d00; background: #fff1d6; border-color: rgba(217,119,6,.4); }
+    .extra-model-detect { justify-self: start; }
+    .extra-platform-model-status { display: grid; gap: 12px; margin-top: 7px; }
+    .extra-platform-model-status > [data-model-index] { display: grid; gap: 8px; min-width: 0; }
+    .extra-model-status { display: grid; gap: 6px; }
+    .extra-model-inline-progress:empty, .extra-platform-progress:empty, .extra-model-feedback:empty { display: none; }
     .extra-platform-progress .operation, .extra-model-feedback .operation { margin-top: 7px; white-space: normal; overflow-wrap: anywhere; }
     .extra-model-progress { display: flex; align-items: flex-start; gap: 7px; }
     .extra-model-progress::before { content: ""; width: 10px; height: 10px; flex: 0 0 auto; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: extra-model-spin .8s linear infinite; }
@@ -932,8 +949,9 @@ export function installQuotaWidget(
     cancelDetailPanelResize();
     hideAccountTooltip();
     const previousScroller = wrap.querySelector(".panel-scroll");
-    const previousScrollTop = previousScroller?.scrollTop ?? 0;
-    const previousScrollLeft = previousScroller?.scrollLeft ?? 0;
+    const retainedScroll = state.panelScrollPosition?.page === state.page ? state.panelScrollPosition : null;
+    const previousScrollTop = state.dismissed ? retainedScroll?.top ?? 0 : previousScroller?.scrollTop ?? retainedScroll?.top ?? 0;
+    const previousScrollLeft = state.dismissed ? retainedScroll?.left ?? 0 : previousScroller?.scrollLeft ?? retainedScroll?.left ?? 0;
     const wakeupFocus = state.shadow.activeElement?.closest?.(".wakeup-popover")
       ? state.shadow.activeElement.id : null;
     wrap.classList.toggle("is-light", isLightTheme());
@@ -1043,8 +1061,10 @@ export function installQuotaWidget(
       <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${versionFooter}</div></section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
-      nextPopover.showPopover();
       const nextScroller = nextPopover.querySelector(".panel-scroll");
+      const header = nextScroller.querySelector(".panel-head");
+      if (header) nextPopover.prepend(header);
+      nextPopover.showPopover();
       nextScroller.scrollTop = previousScrollTop;
       nextScroller.scrollLeft = previousScrollLeft;
     }
@@ -1946,17 +1966,17 @@ export function installQuotaWidget(
       : `<div class="extra-platform-toolbar"><span>DeepSeek 已内置；其他兼容平台仍可手动添加</span><button class="btn primary extra-platform-add" type="button" ${supported && !operationBusy ? "" : "disabled"}>添加平台</button></div>
         <div class="extra-platform-list">${platforms.length
           ? platforms.map((platform) => `<article class="extra-platform-card" data-platform-id="${escapeHtml(platform.id)}">
-              <div class="extra-platform-head"><div class="extra-platform-name">${escapeHtml(platform.name)}</div><div class="badges">${platform.preset === "deepseek" ? '<span class="badge">官方预设</span>' : ""}<span class="badge ${platform.enabled ? "current" : ""}">${platform.enabled ? "已启用" : "未启用"}</span><button class="btn extra-platform-detect" type="button" data-platform-id="${escapeHtml(platform.id)}" ${operationBusy || !platform.enabled ? "disabled" : ""}>${modelOperation?.platformId === platform.id && modelOperation?.phase === "detecting" ? "检测中…" : "重新检测"}</button><button class="btn extra-platform-edit" type="button" data-platform-id="${escapeHtml(platform.id)}" ${operationBusy ? "disabled" : ""}>${platform.preset === "deepseek" ? "设置" : "编辑"}</button></div></div>
+              <div class="extra-platform-head"><div class="extra-platform-name">${escapeHtml(platform.name)}</div><div class="badges">${platform.preset === "deepseek" ? '<span class="badge">官方预设</span>' : ""}<span class="badge ${platform.enabled ? "current" : ""}">${platform.enabled ? "已启用" : "未启用"}</span><button class="btn extra-platform-edit" type="button" data-platform-id="${escapeHtml(platform.id)}" ${supported ? "" : "disabled"}>${platform.preset === "deepseek" ? "设置" : "编辑"}</button></div></div>
               <div class="extra-platform-url">${escapeHtml(platform.baseUrl)}</div>
-              <div class="extra-platform-meta">${platform.models.filter((model) => model.selected !== false).length} / ${platform.models.length} 个模型已选 · 自动检测连接方式和模型能力</div>
-              <div class="extra-platform-progress">${modelOperation?.platformId === platform.id ? renderExtraModelProgress(modelOperation) : ""}</div>
-              <div class="extra-platform-model-status">${platform.models.filter((model) => model.selected !== false).map((model) => renderExtraModelCompatibility(model, true)).join("")}</div>
+              <div class="extra-platform-meta">${platform.models.filter((model) => model.selected !== false).length} / ${platform.models.length} 个模型已选 · 可逐个检测或手动配置</div>
+              <div class="extra-platform-progress">${renderPlatformDetectionProgress(platform, modelOperation)}</div>
+              <div class="extra-platform-model-status">${extraPlatformDisplayModels(platform).map((model, index) => renderExtraModelCardStatus(model, index, modelDetectionOperation(model, platform.id))).join("")}</div>
               ${platform.preset === "deepseek" ? renderManagedDeepSeekBalance(data, platform) : ""}
             </article>`).join("")
           : '<div class="context-empty">尚未添加额外模型平台</div>'}</div>`;
     return `
-      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn extra-models-back" type="button" aria-label="返回账号额度">←</button><div><div class="panel-title">模型管理</div><div class="panel-subtitle">平台、模型与兼容能力</div></div></div>${renderPanelControls()}</header>
-      <section class="provider-summary"><div class="provider-status"><span class="${platforms.some((platform) => platform.enabled) ? "enabled" : "disabled"}">${platforms.some((platform) => platform.enabled) ? "已配置启用平台" : "暂无启用平台"}</span><span class="badge">${platforms.length} 个平台</span>${pendingRestart ? '<span class="badge pending-restart">等待重启生效</span>' : ""}</div><div class="provider-note">启用平台时会发送少量真实模型请求，自动验证连接方式、流式输出、工具续接、推理与推理强度、模型内置联网和图片输入。上下文由你按 K 填写，不参与自动探测。检测和模型请求会产生少量 Token。</div></section>
+      <header class="panel-head"><div class="panel-title-wrap"><button class="icon-btn extra-models-back" type="button" aria-label="${state.extraPlatformDraft ? "返回模型管理" : "返回账号额度"}">←</button><div><div class="panel-title">模型管理</div><div class="panel-subtitle">平台、模型与兼容能力</div></div></div>${renderPanelControls()}</header>
+      <section class="provider-summary"><div class="provider-status"><span class="${platforms.some((platform) => platform.enabled) ? "enabled" : "disabled"}">${platforms.some((platform) => platform.enabled) ? "已配置启用平台" : "暂无启用平台"}</span><span class="badge">${platforms.length} 个平台</span>${pendingRestart ? '<span class="badge pending-restart">等待重启生效</span>' : ""}</div><div class="provider-note">保存不检测、不消耗模型 Token。可在每个模型下单独检测并填入参数，也可手动配置。只有点击检测才发送真实模型请求。</div></section>
       ${content}
       ${catalogConflictMessage}
       ${supported ? "" : '<div class="quota-error">额外模型共存当前仅支持 macOS 和 Windows。</div>'}
@@ -1964,7 +1984,9 @@ export function installQuotaWidget(
   }
 
   function renderExtraModelFeedback(data, operation = data?.operation) {
-    if (operation?.state === "loading") return renderExtraModelProgress(operation);
+    if (operation?.state === "loading") {
+      return operation.phase === "detecting" ? "" : renderExtraModelProgress(operation);
+    }
     return data?.message
       ? `<div class="operation ${data.messageState === "error" ? "error" : "success"}">${escapeHtml(data.message)}</div>`
       : "";
@@ -1993,13 +2015,22 @@ export function installQuotaWidget(
     </div>`;
   }
 
+  function setExtraPlatformDraft(draft) {
+    state.extraPlatformDraft = draft;
+    if (draft) state.extraPlatformDrafts.set(draft.id, draft);
+  }
+
+  function extraPlatformDisplayModels(platform) {
+    return (state.extraPlatformDrafts.get(platform.id) ?? platform).models;
+  }
+
   function applyExtraModelDiscovery(extraModels) {
     const discovery = extraModels?.modelDiscovery;
     if (state.extraPlatformDraft?.preset !== "deepseek" ||
       discovery?.platformId !== state.extraPlatformDraft.id ||
       Number(discovery.revision) <= state.extraModelDiscoveryRevision) return false;
     state.extraModelDiscoveryRevision = Number(discovery.revision);
-    state.extraPlatformDraft = {
+    setExtraPlatformDraft({
       ...state.extraPlatformDraft,
       models: Array.isArray(discovery.models)
         ? discovery.models.map((model) => ({
@@ -2008,12 +2039,33 @@ export function installQuotaWidget(
           }))
         : state.extraPlatformDraft.models,
       modelsUpdatedAt: discovery.modelsUpdatedAt ?? state.extraPlatformDraft.modelsUpdatedAt,
-    };
+    });
     return true;
   }
 
   function patchExtraModelsDom(extraModels, { clearDraftOperation = false } = {}) {
+    const saving = state.extraPlatformSaveRequest;
+    if (saving && extraModels?.platformSave?.requestId === saving.requestId) {
+      const previousId = saving.draft.id;
+      const draft = state.extraPlatformDrafts.get(previousId);
+      if (draft) {
+        const savedModels = JSON.parse(saving.snapshot);
+        for (const model of draft.models) {
+          if (savedModels.some(saved => saved.id === model.id && JSON.stringify(saved) === JSON.stringify(model))) {
+            delete model.configurationUnsaved;
+          }
+        }
+        state.extraPlatformDrafts.delete(previousId);
+        draft.id = extraModels.platformSave.platformId;
+        state.extraPlatformDrafts.set(draft.id, draft);
+        for (const pending of state.extraModelDetectionRequests.values()) {
+          if (pending.platformId === previousId) pending.platformId = draft.id;
+        }
+      }
+      state.extraPlatformSaveRequest = null;
+    }
     const discoveryChanged = applyExtraModelDiscovery(extraModels);
+    const detectionIndices = applyExtraModelDetection(extraModels);
     state.data = { ...state.data, extraModels: extraModels ?? { platforms: [] } };
     if (clearDraftOperation) state.extraModelOperationDraft = null;
     const wrap = state.shadow?.querySelector(".quota-wrap");
@@ -2038,42 +2090,117 @@ export function installQuotaWidget(
       const platform = platforms.find((item) => item.id === card.dataset.platformId);
       if (!platform) continue;
       const progress = card.querySelector(".extra-platform-progress");
-      if (progress) progress.innerHTML = operation?.platformId === platform.id
-        ? renderExtraModelProgress(operation)
-        : "";
+      if (progress) progress.innerHTML = renderPlatformDetectionProgress(platform, operation);
       const status = card.querySelector(".extra-platform-model-status");
-      if (status) status.innerHTML = platform.models
-        .filter((model) => model.selected !== false)
-        .map((model) => renderExtraModelCompatibility(model, true))
+      if (status) status.innerHTML = extraPlatformDisplayModels(platform)
+        .map((model, index) => renderExtraModelCardStatus(model, index, modelDetectionOperation(model, platform.id)))
         .join("");
       if (platform.preset === "deepseek") {
         const balance = card.querySelector(".managed-deepseek-balance");
         if (balance) balance.outerHTML = renderManagedDeepSeekBalance(data, platform);
       }
       const meta = card.querySelector(".extra-platform-meta");
-      if (meta) meta.textContent = `${platform.models.filter((model) => model.selected !== false).length} / ${platform.models.length} 个模型已选 · 自动检测连接方式和模型能力`;
-      const detect = card.querySelector(".extra-platform-detect");
-      if (detect) {
-        detect.disabled = busy || !platform.enabled;
-        detect.textContent = operation?.platformId === platform.id && operation?.phase === "detecting"
-          ? "检测中…"
-          : "重新检测";
-      }
+      if (meta) meta.textContent = `${platform.models.filter((model) => model.selected !== false).length} / ${platform.models.length} 个模型已选 · 可逐个检测或手动配置`;
       const edit = card.querySelector(".extra-platform-edit");
-      if (edit) edit.disabled = busy;
+      if (edit) edit.disabled = data.supported === false;
     }
     const form = wrap.querySelector(".extra-platform-form");
+    if (form && state.extraPlatformDraft) form.dataset.platformId = state.extraPlatformDraft.id;
     form?.querySelector('button[type="submit"]')?.toggleAttribute("disabled", busy);
     form?.querySelector(".preset-model-refresh")?.toggleAttribute("disabled", busy);
     if (discoveryChanged && state.extraPlatformDraft?.preset === "deepseek") {
       const picker = form?.querySelector(".preset-model-picker");
       if (picker) picker.outerHTML = renderDeepSeekModelPicker(state.extraPlatformDraft.models, !busy);
     }
+    for (const detectionIndex of form ? detectionIndices : []) {
+      const row = form.querySelector(`[data-model-index="${detectionIndex}"]`);
+      const model = state.extraPlatformDraft.models[detectionIndex];
+      if (row) {
+        const status = row.querySelector(".extra-model-status");
+        if (status) status.outerHTML = renderExtraModelCompatibility(model);
+        const settings = row.querySelector(".extra-model-settings");
+        if (settings && model.lastDetection?.status === "passed") {
+          const open = settings.open;
+          settings.outerHTML = renderExtraModelReasoning(model, !busy);
+          row.querySelector(".extra-model-settings").open = open;
+        }
+      }
+    }
+    for (const row of form?.querySelectorAll("[data-model-index]") ?? []) {
+      const status = row.querySelector(".extra-model-status");
+      const model = state.extraPlatformDraft?.models[Number(row.dataset.modelIndex)];
+      if (status && model) status.outerHTML = renderExtraModelCompatibility(model);
+      const progress = row.querySelector(".extra-model-inline-progress");
+      if (progress && model) progress.innerHTML = renderExtraModelProgress(modelDetectionOperation(model));
+    }
+    for (const input of form?.querySelectorAll("input, select, button") ?? []) {
+      input.disabled = busy || input.classList.contains("extra-model-remove") && state.extraPlatformDraft?.models?.length <= 1;
+    }
+    bindExtraModelDetectButtons(wrap);
     bindManagedDeepSeekBalanceButtons(wrap);
   }
 
-  function showExtraModelOperation({ message, platformId = null, phase = "starting" }) {
-    state.extraModelOperationDraft = { state: "loading", message, platformId, phase };
+  function applyExtraModelDetection(extraModels) {
+    const changed = [];
+    for (const result of extraModels?.modelDetections ?? []) {
+      if (result.status === "loading") continue;
+      const pending = state.extraModelDetectionRequests.get(result.requestId);
+      if (!pending) continue;
+      state.extraModelDetectionRequests.delete(result.requestId);
+      const draft = state.extraPlatformDrafts.get(pending.platformId);
+      if (!draft || draft.baseUrl !== pending.baseUrl || draft.apiKey !== pending.apiKey) continue;
+      const index = draft.models.findIndex(model => model.id === pending.modelId);
+      const model = draft.models[index];
+      if (!model) continue;
+      draft.models[index] = { ...model, ...(result.model ? {
+        compatibility: result.model.compatibility,
+        reasoningEfforts: result.model.reasoningEfforts,
+        defaultReasoningEffort: result.model.defaultReasoningEffort,
+      } : {}), lastDetection: result,
+        configurationUnsaved: result.status === "passed" || model.configurationUnsaved };
+      if (draft === state.extraPlatformDraft) changed.push(index);
+    }
+    return changed;
+  }
+
+  function forgetModelDetection(platformId, modelId = null) {
+    for (const [id, pending] of state.extraModelDetectionRequests) {
+      if (pending.platformId === platformId && (modelId == null || pending.modelId === modelId)) {
+        state.extraModelDetectionRequests.delete(id);
+      }
+    }
+  }
+
+  function bindExtraModelDetectButtons(scope) {
+    for (const button of scope.querySelectorAll(".extra-model-detect")) {
+      if (button.dataset.bound === "true") continue;
+      button.dataset.bound = "true";
+      button.addEventListener("click", () => {
+        const form = button.closest("form");
+        if (!form) return;
+        const draft = readExtraPlatformForm(form);
+        const index = Number(button.closest("[data-model-index]").dataset.modelIndex);
+        const model = draft.models[index];
+        if (!model?.id || !draft.apiKey || !draft.baseUrl) {
+          const feedback = scope.querySelector(".extra-model-feedback");
+          if (feedback) feedback.innerHTML = '<div class="operation error">检测前请填写模型 ID、API 地址和 Key</div>';
+          return;
+        }
+        const requestId = crypto.randomUUID();
+        setExtraPlatformDraft(draft);
+        forgetModelDetection(draft.id, model.id);
+        state.extraModelDetectionRequests.set(requestId, { requestId, platformId: draft.id, modelId: model.id,
+          baseUrl: draft.baseUrl, apiKey: draft.apiKey,
+          operation: { state: "loading", phase: "detecting", platformId: draft.id, modelId: model.id,
+            message: `正在检测 ${model.displayName || model.id}` } });
+        enqueue({ type: "extra-model-detect", platform: draft, modelId: model.id, requestId });
+        patchExtraModelsDom(state.data.extraModels);
+      });
+    }
+  }
+
+  function showExtraModelOperation({ message, platformId = null, modelId = null, phase = "starting" }) {
+    state.extraModelOperationDraft = { state: "loading", message, platformId, modelId, phase };
     patchExtraModelsDom(state.data.extraModels);
   }
 
@@ -2083,6 +2210,25 @@ export function installQuotaWidget(
       button.dataset.bound = "true";
       button.addEventListener("click", () => enqueue({ type: "extra-deepseek-refresh-balance" }));
     }
+  }
+
+  function modelDetectionOperation(model, platformId = state.extraPlatformDraft?.id) {
+    const pending = [...state.extraModelDetectionRequests.values()].find(item =>
+      item.platformId === platformId && item.modelId === model.id);
+    const detection = (state.data.extraModels?.modelDetections ?? []).find(item => pending
+      ? item.requestId === pending.requestId
+      : item.platformId === platformId && item.modelId === model.id);
+    return detection ? detection.operation : pending?.operation ?? null;
+  }
+
+  function renderPlatformDetectionProgress(platform, operation) {
+    return (operation?.platformId === platform.id ? renderExtraModelProgress(operation) : "") +
+      extraPlatformDisplayModels(platform).map(model =>
+        renderExtraModelProgress(modelDetectionOperation(model, platform.id))).join("");
+  }
+
+  function renderModelDetectionProgress(model) {
+    return `<div class="extra-model-inline-progress" aria-live="polite">${renderExtraModelProgress(modelDetectionOperation(model))}</div>`;
   }
 
   function renderExtraPlatformForm(platform, editable) {
@@ -2102,10 +2248,11 @@ export function installQuotaWidget(
         <div class="provider-field"><label>上下文（K）</label><input name="contextWindow" type="number" min="1" step="0.001" value="${escapeHtml(contextTokensToK(model.contextWindow ?? 128000))}" required ${editable ? "" : "disabled"}></div>
         <button class="btn extra-model-remove" type="button" ${editable && models.length > 1 ? "" : "disabled"}>移除</button>
         ${renderExtraModelCompatibility(model)}
+        <button class="btn extra-model-detect" type="button" ${editable ? "" : "disabled"}>检测此模型（消耗 Token）</button>${renderModelDetectionProgress(model)}
         ${renderExtraModelReasoning(model, editable)}
       </div>`).join("")}</div>
-      <div class="provider-warning">Key 保存在 ${escapeHtml(state.data.extraModels?.settingsPath ?? "本地 extra-model-settings.json")}；不写入系统安全存储。启用时将自动检测每个模型并产生少量 Token；检测通过后保存，重启 Codex 后生效。</div>
-      <div class="provider-actions">${platform.id ? '<button class="btn extra-platform-remove" type="button">删除平台</button>' : ""}<button class="btn extra-platform-cancel" type="button">取消</button><button class="btn primary" type="submit" ${editable ? "" : "disabled"}>${platform.enabled ? "检测并保存" : "保存停用配置"}</button></div>
+      <div class="provider-warning">Key 保存在 ${escapeHtml(state.data.extraModels?.settingsPath ?? "本地 extra-model-settings.json")}；不写入系统安全存储。保存不会执行检测；可以手动填写参数，重启 Codex 后生效。</div>
+      <div class="provider-actions">${platform.id ? '<button class="btn extra-platform-remove" type="button">删除平台</button>' : ""}<button class="btn extra-platform-cancel" type="button">取消</button><button class="btn primary" type="submit" ${editable ? "" : "disabled"}>保存配置</button></div>
     </form>`;
   }
 
@@ -2113,27 +2260,65 @@ export function installQuotaWidget(
     const models = Array.isArray(platform.models) ? platform.models : [];
     const refreshed = platform.modelsUpdatedAt
       ? `最近读取：${escapeHtml(formatUpdatedAt(platform.modelsUpdatedAt))}`
-      : "首次保存时读取当前 Key 可用模型";
+      : "可点击“读取最新模型”更新列表";
     return `<form class="extra-platform-form preset-platform-form" data-platform-id="${escapeHtml(platform.id ?? "")}" data-platform-preset="deepseek">
       <label class="provider-toggle"><input name="enabled" type="checkbox" ${platform.enabled ? "checked" : ""} ${editable ? "" : "disabled"}>在模型列表中启用 DeepSeek</label>
       <div class="provider-field"><label>DeepSeek API Key（本地明文保存并完整回显）</label><input class="provider-key" name="apiKey" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(platform.apiKey ?? "")}" placeholder="sk-..." ${editable ? "" : "disabled"}></div>
-      <div class="preset-platform-note"><span>官方地址：${escapeHtml(platform.baseUrl)}</span><span>模型列表由 DeepSeek 官方 /models 接口读取；连接、工具、推理、内置联网和图片能力自动检测。上下文由你按 K 填写。</span><span>${refreshed}</span></div>
+      <div class="preset-platform-note"><span>官方地址：${escapeHtml(platform.baseUrl)}</span><span>模型列表由 DeepSeek 官方 /models 接口读取；各模型可独立检测，也可手动配置；上下文按 K 填写。</span><span>${refreshed}</span></div>
       ${renderDeepSeekModelPicker(models, editable)}
-      <div class="provider-warning">启用并保存时会先读取可用模型，再对已选模型发送少量真实请求完成能力检测，因此会产生少量 Token。Key 保存在 ${escapeHtml(state.data.extraModels?.settingsPath ?? "本地 extra-model-settings.json")}。保存后等待重启 Codex 生效。</div>
-      <div class="provider-actions"><button class="btn preset-model-refresh" type="button" ${editable ? "" : "disabled"}>读取最新模型</button><button class="btn extra-platform-cancel" type="button">取消</button><button class="btn primary" type="submit" ${editable ? "" : "disabled"}>${platform.enabled ? "检测并保存" : "保存停用配置"}</button></div>
+      <div class="provider-warning">保存不读取模型列表，也不执行检测。点击模型下的检测按钮才消耗 Token；检测结果填入后仍需保存。Key 保存在 ${escapeHtml(state.data.extraModels?.settingsPath ?? "本地 extra-model-settings.json")}。保存后等待重启 Codex 生效。</div>
+      <div class="provider-actions"><button class="btn preset-model-refresh" type="button" ${editable ? "" : "disabled"}>读取最新模型</button><button class="btn extra-platform-cancel" type="button">取消</button><button class="btn primary" type="submit" ${editable ? "" : "disabled"}>保存配置</button></div>
     </form>`;
   }
 
   function renderDeepSeekModelPicker(models, editable) {
     const selectedCount = models.filter((model) => model.selected !== false).length;
-    return `<details class="preset-model-picker" ${models.length <= 3 ? "open" : ""}><summary><span>可用模型</span><span class="badge current preset-model-count">已选 ${selectedCount} / ${models.length}</span></summary><div class="preset-model-options">${models.map((model) => `<div class="preset-model-option"><label class="preset-model-option-select"><input name="presetModel" type="checkbox" value="${escapeHtml(model.id)}" ${model.selected !== false ? "checked" : ""} ${editable ? "" : "disabled"}><div class="preset-model-option-main"><div class="preset-model-option-name">${escapeHtml(model.displayName || model.id)}</div><div class="preset-model-option-id">${escapeHtml(model.id)}</div>${renderExtraModelCompatibility(model)}</div></label><label class="preset-model-context"><span>上下文</span><input name="presetContextWindow" data-model-id="${escapeHtml(model.id)}" type="number" min="1" step="0.001" value="${escapeHtml(contextTokensToK(model.contextWindow ?? 128000))}" required ${editable ? "" : "disabled"}><span>K</span></label></div>`).join("")}</div></details>`;
+    return `<details class="preset-model-picker" ${models.length <= 3 ? "open" : ""}><summary><span>可用模型</span><span class="badge current preset-model-count">已选 ${selectedCount} / ${models.length}</span></summary><div class="preset-model-options">${models.map((model, index) => `<div class="preset-model-option" data-model-index="${index}"><label class="preset-model-option-select"><input name="presetModel" type="checkbox" value="${escapeHtml(model.id)}" ${model.selected !== false ? "checked" : ""} ${editable ? "" : "disabled"}><div class="preset-model-option-main"><div class="preset-model-option-name">${escapeHtml(model.displayName || model.id)}</div><div class="preset-model-option-id">${escapeHtml(model.id)}</div>${renderExtraModelCompatibility(model)}</div></label><label class="preset-model-context"><span>上下文</span><input name="presetContextWindow" data-model-id="${escapeHtml(model.id)}" type="number" min="1" step="0.001" value="${escapeHtml(contextTokensToK(model.contextWindow ?? 128000))}" required ${editable ? "" : "disabled"}><span>K</span></label><button class="btn extra-model-detect" type="button" ${editable ? "" : "disabled"}>检测此模型（消耗 Token）</button>${renderModelDetectionProgress(model)}${renderExtraModelReasoning(model, editable)}</div>`).join("")}</div></details>`;
   }
 
-  function renderExtraModelCompatibility(model, compact = false) {
+  function extraModelStatus(model, operation) {
+    const c = model?.compatibility ?? {};
+    if (operation?.state === "loading" && operation.modelId === model.id) return "检测中…";
+    if (model.lastDetection?.status === "failed") return "检测失败";
+    if (c.status === "manual") return "手动配置";
+    if (c.status === "pending" && Number(c.probeVersion) > 0) return "检测规则已更新";
+    if (c.status !== "verified") return "未检测";
+    const caps = c.capabilities ?? {};
+    const warnings = model.lastDetection?.warnings ?? c.warnings ?? [];
+    return warnings.length || c.imageStatus === "inconclusive" ||
+      [caps.reasoning, caps.reasoningToolChoice].includes("inconclusive")
+      ? "部分可用" : "检测通过";
+  }
+
+  function renderExtraModelCardStatus(model, index, operation) {
+    const status = extraModelStatus(model, operation);
+    return `<div data-model-index="${index}"><div class="extra-model-capabilities"><span class="model-label">${escapeHtml(model.displayName || model.id)}</span>${renderExtraModelStatusBadge(status)}${model.configurationUnsaved ? '<span class="extra-model-unsaved">未保存</span>' : ""}</div>${renderExtraModelConfiguration(model)}</div>`;
+  }
+
+  function renderExtraModelStatusBadge(status) {
+    const tone = status === "检测通过" ? " current" : status === "检测失败" ? " detection-failed" : "";
+    return `<span class="badge extra-model-main-status${tone}">${status}</span>`;
+  }
+
+  function renderExtraModelCompatibility(model) {
+    const status = extraModelStatus(model, modelDetectionOperation(model));
+    const report = model?.lastDetection;
+    const c = model?.compatibility ?? {};
+    const warnings = report?.warnings ?? c.warnings ?? [];
+    const failure = report?.status === "failed"
+      ? `<div class="extra-model-detection-error">${escapeHtml(report.message)}<br>本次检测未更新参数，原配置保留。</div>` : "";
+    const partial = status === "部分可用"
+      ? `<div class="extra-model-detection-detail">对话和工具可用，部分附加能力未完成检测。${warnings.length ? `<br>${warnings.map(escapeHtml).join("<br>")}` : ""}</div>` : "";
+    const success = status === "检测通过" ? '<div class="extra-model-detection-detail">参数由检测自动填写。</div>' : "";
+    const manual = status === "手动配置" ? '<div class="extra-model-detection-detail">使用你填写的参数，未验证实际效果。</div>' : "";
+    const updated = c.status === "pending" && Number(c.probeVersion) > 0
+      ? '<div class="extra-model-detection-detail">检测规则已更新，可重新检测或手动配置。</div>' : "";
+    return `<div class="extra-model-status" role="status"><div class="extra-model-capabilities">${renderExtraModelStatusBadge(status)}${model.configurationUnsaved ? '<span class="extra-model-unsaved">未保存</span>' : ""}</div>${failure}${partial}${success}${manual}${updated}${renderExtraModelConfiguration(model)}</div>`;
+  }
+
+  function renderExtraModelConfiguration(model) {
     const compatibility = model?.compatibility ?? {};
-    const modelLabel = compact
-      ? `<span class="model-label" title="${escapeHtml(model?.displayName || model?.id || "模型")}">${escapeHtml(model?.displayName || model?.id || "模型")}</span>`
-      : '<span class="model-label">自动检测</span>';
+    const modelLabel = '<span class="model-label">当前参数</span>';
     if (compatibility.status === "verified") {
       const capabilities = compatibility.capabilities ?? {};
       const bridgedTools = capabilities.customTools === "bridged" ||
@@ -2147,9 +2332,9 @@ export function installQuotaWidget(
       const imageProtocol = compatibility.routes?.imageInput === "chat" ? "chat" : protocolId;
       const image = imageSupported
         ? imageProtocol === protocolId ? "支持图片" : "支持图片 · Chat"
-        : "不支持图片";
+        : compatibility.imageStatus === "inconclusive" ? "图片暂不可用（检测未完成）" : "不支持图片";
       const reasoningSupported = capabilities.reasoning === "native";
-      const reasoning = reasoningSupported ? "推理：支持" : "推理：不支持";
+      const reasoning = reasoningSupported ? "推理：支持" : capabilities.reasoning === "inconclusive" ? "推理暂不可用" : "推理：不支持";
       const reasoningEfforts = Array.isArray(model.reasoningEfforts)
         ? model.reasoningEfforts.filter((effort) => CUSTOM_REASONING_EFFORTS.includes(effort))
         : [];
@@ -2161,31 +2346,53 @@ export function installQuotaWidget(
         : "";
       return `<div class="extra-model-capabilities"${checkedAt}>${modelLabel}<span class="badge current">${protocol}</span><span class="badge current">${tools}</span><span class="badge${reasoningSupported ? " current" : ""}">${reasoning}</span>${effortBadge}<span class="badge${hostedSearch ? " current" : ""}" title="由模型供应商在请求内执行的联网搜索；Codex 独立 web.run 属于另一项能力">${search}</span><span class="badge${imageSupported ? " current" : ""}">${image}</span></div>`;
     }
-    const legacy = compatibility.status === "legacy";
-    const outdated = compatibility.status === "pending" && Number(compatibility.probeVersion) > 0;
-    const pendingLabel = legacy
-      ? "沿用旧设置 · 待重新检测"
-      : outdated ? "检测规则已更新 · 需重新检测" : "待检测";
-    return `<div class="extra-model-capabilities">${modelLabel}<span class="badge pending">${pendingLabel}</span></div>`;
+    return "";
   }
 
   function renderExtraModelReasoning(model, editable) {
-    const selectedEfforts = Array.isArray(model.reasoningEfforts)
-      ? model.reasoningEfforts.filter((effort) => CUSTOM_REASONING_EFFORTS.includes(effort))
-      : [];
-    const defaultEffort = selectedEfforts.includes(model.defaultReasoningEffort)
-      ? model.defaultReasoningEffort
-      : selectedEfforts[0] ?? "";
-    if (model?.compatibility?.status !== "verified") {
-      return '<div class="extra-model-reasoning"><span class="extra-model-efforts-label">推理能力和可用强度将在保存时自动检测</span></div>';
-    }
-    if (selectedEfforts.length === 0) return "";
-    const options = selectedEfforts.length
-      ? selectedEfforts.map((effort) => `<option value="${effort}" ${effort === defaultEffort ? "selected" : ""}>${effort}</option>`).join("")
-      : '<option value="">平台默认</option>';
-    return `<div class="extra-model-reasoning">
-      <div class="provider-field"><label>默认强度</label><select name="defaultReasoningEffort" ${editable && selectedEfforts.length ? "" : "disabled"}>${options}</select></div>
-    </div>`;
+    const c = model.compatibility ?? {};
+    const caps = c.capabilities ?? {};
+    const select = (name, label, value, options) => `<div class="provider-field"><label>${label}</label><select name="${name}" ${editable ? "" : "disabled"}>${options.map(([id, text]) => `<option value="${id}" ${id === value ? "selected" : ""}>${text}</option>`).join("")}</select></div>`;
+    const check = (name, label, enabled) => `<label class="provider-toggle"><input name="${name}" type="checkbox" ${enabled ? "checked" : ""} ${editable ? "" : "disabled"}>${label}</label>`;
+    const choiceOptions = [["native", "支持指定工具"], ["auto-only", "仅自动选择"], ["unsupported", "不发送该参数"]];
+    return `<details class="extra-model-settings extra-model-reasoning"><summary>手动配置参数（可跳过检测）</summary><div class="extra-model-settings-body">
+      ${select("modelProtocol", "接口类型", c.protocol ?? "responses", [["responses", "Responses"], ["chat", "Chat Completions（自动转换）"]])}
+      ${select("historyMode", "推理历史", c.historyMode === "reasoning-text-only" ? c.historyMode : "responses-full", [["responses-full", "保留完整历史"], ["reasoning-text-only", "仅保留推理正文"]])}
+      ${select("toolFormat", "Codex 工具格式", caps.customTools === "native" && caps.namespaceTools === "native" ? "native" : "bridged", [["bridged", "转换为普通函数工具"], ["native", "平台原生支持 Codex 工具"]])}
+      ${check("supportsImage", "支持图片", c.supportsImage === true)}
+      ${check("supportsReasoning", "支持推理", caps.reasoning === "native" || model.reasoningEfforts?.length > 0)}
+      <div class="provider-field"><label>推理强度（逗号分隔，可留空）</label><input name="reasoningEfforts" value="${escapeHtml((model.reasoningEfforts ?? []).join(", "))}" placeholder="low, medium, high, xhigh, max" ${editable ? "" : "disabled"}></div>
+      <div class="provider-field"><label>默认推理强度（可留空）</label><input name="defaultReasoningEffort" value="${escapeHtml(model.defaultReasoningEffort ?? "")}" ${editable ? "" : "disabled"}></div>
+      ${check("parallelTools", "支持并行工具", caps.parallelTools === "native")}
+      ${check("hostedSearch", "支持平台内置联网", caps.hostedTools?.web_search === "native")}
+      ${select("toolChoice", "普通对话选择工具", caps.toolChoice ?? "unsupported", choiceOptions.filter(([id]) => id !== "auto-only"))}
+      ${select("reasoningToolChoice", "推理时选择工具", caps.reasoningToolChoice ?? "unsupported", choiceOptions)}
+    </div></details>`;
+  }
+
+  function readExtraModelSettings(row, model, forSave = false) {
+    const settings = row?.querySelector(".extra-model-settings");
+    if (!settings || !settings.dataset.changed &&
+      (!forSave || ["verified", "manual", "legacy"].includes(model?.compatibility?.status))) return model;
+    const value = name => settings.querySelector(`[name="${name}"]`)?.value;
+    const checked = name => Boolean(settings.querySelector(`[name="${name}"]`)?.checked);
+    const protocol = value("modelProtocol");
+    const image = checked("supportsImage");
+    const reasoning = checked("supportsReasoning");
+    const efforts = reasoning ? (value("reasoningEfforts") ?? "").split(/[,，\s/]+/).filter(Boolean) : [];
+    const toolFormat = protocol === "chat" ? "bridged" : value("toolFormat");
+    return { ...model, configurationUnsaved: true, lastDetection: null, reasoningEfforts: efforts,
+      defaultReasoningEffort: reasoning ? value("defaultReasoningEffort") : "",
+      compatibility: { status: "manual", protocol, routes: { default: protocol, imageInput: protocol },
+        historyMode: protocol === "chat" ? "chat" : value("historyMode"),
+        supportsImage: image, imageStatus: image ? "supported" : "unsupported",
+        checkedAt: null, probeVersion: 0, targetFingerprint: null, codexConformance: "inconclusive",
+        capabilities: { transport: { [protocol]: "native" }, streaming: "native", functionTools: "native",
+          customTools: toolFormat, namespaceTools: toolFormat, nativeCustomTools: toolFormat === "native" ? ["*"] : [],
+          reasoning: reasoning ? "native" : "unsupported", imageInput: image ? "native" : "unsupported",
+          parallelTools: checked("parallelTools") ? "native" : "unsupported",
+          hostedTools: { web_search: checked("hostedSearch") ? "native" : "unsupported" },
+          toolChoice: value("toolChoice"), reasoningToolChoice: value("reasoningToolChoice") } } };
   }
 
   function blankExtraModel() {
@@ -2199,7 +2406,7 @@ export function installQuotaWidget(
     };
   }
 
-  function readExtraPlatformForm(form) {
+  function readExtraPlatformForm(form, forSave = false) {
     if (!form) return state.extraPlatformDraft;
     if (form.dataset.platformPreset === "deepseek") {
       const selected = new Set([...form.querySelectorAll('[name="presetModel"]:checked')]
@@ -2214,8 +2421,8 @@ export function installQuotaWidget(
         baseUrl: "https://api.deepseek.com/",
         apiKey: form.querySelector('[name="apiKey"]')?.value ?? "",
         enabled: Boolean(form.querySelector('[name="enabled"]')?.checked),
-        models: (state.extraPlatformDraft?.models ?? []).map((model) => ({
-          ...model,
+        models: (state.extraPlatformDraft?.models ?? []).map((model, index) => ({
+          ...readExtraModelSettings(form.querySelector(`[data-model-index="${index}"]`), model, forSave),
           selected: selected.has(model.id),
           contextWindow: contexts.get(model.id) ?? model.contextWindow,
         })),
@@ -2228,15 +2435,11 @@ export function installQuotaWidget(
       apiKey: form.querySelector('[name="apiKey"]')?.value ?? "",
       enabled: Boolean(form.querySelector('[name="enabled"]')?.checked),
       models: [...form.querySelectorAll(".extra-model-row")].map((row, index) => ({
+        ...readExtraModelSettings(row, state.extraPlatformDraft?.models?.[index] ?? blankExtraModel(), forSave),
         id: row.querySelector('[name="modelId"]')?.value ?? "",
         displayName: row.querySelector('[name="displayName"]')?.value ?? "",
         contextWindow: contextKToTokens(row.querySelector('[name="contextWindow"]')?.value),
         selected: true,
-        compatibility: state.extraPlatformDraft?.models?.[index]?.compatibility
-          ? { ...state.extraPlatformDraft.models[index].compatibility }
-          : { status: "pending" },
-        reasoningEfforts: [...(state.extraPlatformDraft?.models?.[index]?.reasoningEfforts ?? [])],
-        defaultReasoningEffort: row.querySelector('[name="defaultReasoningEffort"]')?.value ?? "",
       })),
     };
   }
@@ -2729,9 +2932,17 @@ export function installQuotaWidget(
     }));
     const chip = wrap.querySelector(".quota-chip");
     chip?.addEventListener("click", () => {
+      if (state.pinned && !state.dismissed) { dismissPanel(); return; }
       state.dismissed = false;
-      state.pinned = !state.pinned;
-      render();
+      state.pinned = true;
+      wrap.classList.remove("is-dismissed");
+      wrap.classList.add("is-open");
+      positionPopover(wrap);
+      const scroller = wrap.querySelector(".panel-scroll");
+      if (scroller && state.panelScrollPosition?.page === state.page) {
+        scroller.scrollTop = state.panelScrollPosition.top;
+        scroller.scrollLeft = state.panelScrollPosition.left;
+      }
     });
     wrap.querySelector(".close-panel")?.addEventListener("click", () => {
       dismissPanel();
@@ -2747,7 +2958,7 @@ export function installQuotaWidget(
     wrap.querySelector(".extra-models-open")?.addEventListener("click", () => {
       captureDetailPanelBaseSize(wrap);
       state.page = "extra-models";
-      state.extraPlatformDraft = null;
+      setExtraPlatformDraft(null);
       state.extraModelOperationDraft = null;
       state.pinned = true;
       state.dismissed = false;
@@ -2760,49 +2971,38 @@ export function installQuotaWidget(
       render();
     });
     wrap.querySelector(".extra-models-back")?.addEventListener("click", () => {
-      state.page = "accounts";
-      resetDetailPanelSize();
-      state.extraPlatformDraft = null;
+      if (state.extraPlatformDraft) {
+        setExtraPlatformDraft(null);
+      } else {
+        state.page = "accounts";
+        resetDetailPanelSize();
+      }
       state.extraModelOperationDraft = null;
       render();
     });
     bindManagedDeepSeekBalanceButtons(wrap);
     wrap.querySelector(".extra-platform-add")?.addEventListener("click", () => {
-      state.extraPlatformDraft = {
+      setExtraPlatformDraft(state.extraPlatformDrafts.get("") ?? {
         id: "",
         name: "",
         baseUrl: "",
         apiKey: "",
         enabled: true,
         models: [blankExtraModel()],
-      };
+      });
       render();
     });
     wrap.querySelectorAll(".extra-platform-edit").forEach((button) => button.addEventListener("click", () => {
       const platform = state.data.extraModels?.platforms?.find((item) => item.id === button.dataset.platformId);
       if (!platform) return;
-      state.extraPlatformDraft = {
-        ...platform,
-        models: platform.models.map((model) => ({
-          ...model,
-          compatibility: model.compatibility ? { ...model.compatibility } : { status: "pending" },
-        })),
-      };
+      setExtraPlatformDraft(state.extraPlatformDrafts.get(platform.id) ?? structuredClone(platform));
       render();
     }));
-    wrap.querySelectorAll(".extra-platform-detect").forEach((button) => button.addEventListener("click", () => {
-      button.disabled = true;
-      enqueue({ type: "extra-platform-detect", platformId: button.dataset.platformId });
-      showExtraModelOperation({
-        message: "正在准备模型能力检测",
-        platformId: button.dataset.platformId,
-        phase: "detecting",
-      });
-    }));
+    bindExtraModelDetectButtons(wrap);
     const extraPlatformForm = wrap.querySelector(".extra-platform-form");
     wrap.querySelector(".preset-model-refresh")?.addEventListener("click", (event) => {
       const platform = readExtraPlatformForm(extraPlatformForm);
-      state.extraPlatformDraft = platform;
+      setExtraPlatformDraft(platform);
       event.currentTarget.disabled = true;
       enqueue({ type: "extra-platform-models-refresh", platform });
       showExtraModelOperation({
@@ -2811,48 +3011,79 @@ export function installQuotaWidget(
         phase: "models",
       });
     });
-    extraPlatformForm?.addEventListener("input", () => {
-      state.extraPlatformDraft = readExtraPlatformForm(extraPlatformForm);
+    extraPlatformForm?.addEventListener("input", (event) => {
+      const settings = event.target.closest(".extra-model-settings");
+      if (settings) settings.dataset.changed = "true";
+      const draft = readExtraPlatformForm(extraPlatformForm);
+      if (settings || event.target.name === "modelId") {
+        const index = Number(event.target.closest("[data-model-index]")?.dataset.modelIndex);
+        forgetModelDetection(draft.id, state.extraPlatformDraft?.models[index]?.id);
+      } else if (["apiKey", "baseUrl"].includes(event.target.name)) {
+        forgetModelDetection(draft.id);
+      }
+      if (settings) delete settings.dataset.changed;
+      if (["apiKey", "baseUrl", "modelId"].includes(event.target.name)) {
+        const changedIndex = event.target.name === "modelId"
+          ? Number(event.target.closest("[data-model-index]")?.dataset.modelIndex) : null;
+        draft.models = draft.models.map((model, index) => changedIndex != null && index !== changedIndex ? model : {
+          ...model, configurationUnsaved: true, lastDetection: null,
+          compatibility: model.compatibility?.status === "verified" ? { ...model.compatibility,
+            status: "manual", checkedAt: null, probeVersion: 0, targetFingerprint: null, codexConformance: "inconclusive" }
+            : model.compatibility,
+        });
+      }
+      setExtraPlatformDraft(draft);
+      for (const row of extraPlatformForm.querySelectorAll("[data-model-index]")) {
+        const status = row.querySelector(".extra-model-status");
+        if (status) status.outerHTML = renderExtraModelCompatibility(draft.models[Number(row.dataset.modelIndex)]);
+      }
     });
     extraPlatformForm?.addEventListener("change", (event) => {
       const draft = readExtraPlatformForm(extraPlatformForm);
       if (event.target?.name === "presetModel") {
-        state.extraPlatformDraft = draft;
+        setExtraPlatformDraft(draft);
         const selectedCount = draft.models.filter((model) => model.selected !== false).length;
         const count = extraPlatformForm.querySelector(".preset-model-count");
         if (count) count.textContent = `已选 ${selectedCount} / ${draft.models.length}`;
         return;
       }
-      state.extraPlatformDraft = draft;
+      setExtraPlatformDraft(draft);
     });
     wrap.querySelector(".extra-model-add")?.addEventListener("click", () => {
       const draft = readExtraPlatformForm(extraPlatformForm);
       draft.models.push(blankExtraModel());
-      state.extraPlatformDraft = draft;
+      setExtraPlatformDraft(draft);
       render();
     });
     wrap.querySelectorAll(".extra-model-remove").forEach((button) => button.addEventListener("click", () => {
       const draft = readExtraPlatformForm(extraPlatformForm);
       const index = Number(button.closest(".extra-model-row")?.dataset.modelIndex);
-      if (Number.isInteger(index) && draft.models.length > 1) draft.models.splice(index, 1);
-      state.extraPlatformDraft = draft;
+      if (Number.isInteger(index) && draft.models.length > 1) {
+        forgetModelDetection(draft.id, draft.models[index]?.id);
+        draft.models.splice(index, 1);
+      }
+      setExtraPlatformDraft(draft);
       render();
     }));
     wrap.querySelector(".extra-platform-cancel")?.addEventListener("click", () => {
+      forgetModelDetection(state.extraPlatformDraft?.id);
+      state.extraPlatformDrafts.delete(state.extraPlatformDraft?.id);
       state.extraModelOperationDraft = null;
-      state.extraPlatformDraft = null;
+      setExtraPlatformDraft(null);
       render();
     });
     extraPlatformForm?.addEventListener("submit", (event) => {
       event.preventDefault();
-      const platform = readExtraPlatformForm(event.currentTarget);
-      state.extraPlatformDraft = platform;
-      enqueue({ type: "extra-platform-save", platform });
+      const platform = readExtraPlatformForm(event.currentTarget, true);
+      setExtraPlatformDraft(platform);
+      const requestId = crypto.randomUUID();
+      state.extraPlatformSaveRequest = { requestId, draft: platform, snapshot: JSON.stringify(platform.models) };
+      enqueue({ type: "extra-platform-save", platform, requestId });
       event.currentTarget.querySelector('button[type="submit"]')?.setAttribute("disabled", "");
       showExtraModelOperation({
-        message: platform.enabled ? "正在准备模型能力检测" : "正在保存停用配置",
+        message: "正在保存配置（不执行检测）",
         platformId: platform.id,
-        phase: platform.enabled ? "detecting" : "saving",
+        phase: "saving",
       });
     });
     wrap.querySelector(".extra-platform-remove")?.addEventListener("click", () => {
@@ -2949,16 +3180,15 @@ export function installQuotaWidget(
 
   function dismissPanel() {
     hideAccountTooltip();
+    const wrap = state.shadow?.querySelector(".quota-wrap");
+    const scroller = wrap?.querySelector(".panel-scroll");
+    if (!state.dismissed && scroller) state.panelScrollPosition = {
+      page: state.page, top: scroller.scrollTop, left: scroller.scrollLeft,
+    };
     state.pinned = false;
     state.dismissed = true;
-    state.page = "accounts";
-    resetDetailPanelSize();
-    state.migrationSelectedIds.clear();
-    state.wakeupDrafts.clear();
-    state.contextEditingSlug = null;
-    state.extraPlatformDraft = null;
-    state.extraModelOperationDraft = null;
-    const wrap = state.shadow?.querySelector(".quota-wrap");
+    cancelDetailPanelResize();
+    state.detailPanelSize = null;
     wrap?.classList.remove("is-open");
     wrap?.classList.add("is-dismissed");
   }
@@ -3235,11 +3465,10 @@ export function installQuotaWidget(
       state.dataJson = json;
       state.dataRevision = revision;
       state.tokenUsageRevision = revision;
-      applyExtraModelDiscovery(data?.extraModels);
       state.data = data ?? state.data;
       ensureMounted();
+      patchExtraModelsDom(data?.extraModels, { clearDraftOperation: true });
       if (patchOpenExtraModelsPage) {
-        patchExtraModelsDom(data?.extraModels, { clearDraftOperation: true });
         scheduleConversationTokenUsageRender();
         return;
       }

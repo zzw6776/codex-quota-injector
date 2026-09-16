@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -175,7 +175,7 @@ export async function prepareWindowsNativeRelay({
     "--node", nodeExecutable,
     "--output", relayPath,
   ], { cwd: root, stdio: "inherit", windowsHide: true });
-  const code = await childExit(child);
+  const code = await waitForTestProcess(child);
   if (code !== 0) throw new Error(`Windows 原生 Relay 构建失败，退出码 ${code}`);
   return {
     path: relayPath,
@@ -212,7 +212,7 @@ export async function runWslTestSuite({
   ]);
   const guestCodexHome = liveProfile ? await toWslPath(join(homedir(), ".codex")) : null;
   const guestDataDir = liveProfile ? await toWslPath(defaultAccountDataDir()) : null;
-  const manifestName = `wsl-${safeName(kind)}-manifest.json`;
+  const manifestName = `wsl-${safeName(kind)}-${randomUUID()}-manifest.json`;
   const guestNode = await wslCommandPath("node");
   const encodedStages = Buffer.from(JSON.stringify(stages), "utf8").toString("base64url");
   const guestArgs = [
@@ -240,11 +240,11 @@ export async function runWslTestSuite({
     stdio: "inherit",
     windowsHide: true,
   });
-  const code = await childExit(child);
+  const code = await waitForTestProcess(child);
   const manifestPath = join(resultDirectory, manifestName);
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8").catch(() => {
-    throw new Error(`WSL 测试执行器退出 (${code}) 且没有生成清单 ${manifestPath}`);
-  }));
+  const manifest = await readWslTestManifest(manifestPath, {
+    exitCode: code, sourceSha256, stages,
+  });
   if (manifest.runtimeSnapshot?.relay) {
     const hostRelayPath = existingRelayPath ?? join(
       resultDirectory,
@@ -258,6 +258,21 @@ export async function runWslTestSuite({
     };
   }
   return { ...manifest, exitCode: code, manifestPath };
+}
+
+export async function readWslTestManifest(path, { exitCode, sourceSha256, stages }) {
+  const manifest = JSON.parse(await readFile(path, "utf8").catch(() => {
+    throw new Error(`WSL 测试执行器退出 (${exitCode}) 且没有生成本次清单 ${path}`);
+  }));
+  if (manifest.sourceSha256 !== sourceSha256 || manifest.runtimeTarget !== WSL_NATIVE) {
+    throw new Error("WSL 测试清单不属于本次源码或运行环境");
+  }
+  if (manifest.status === "passed" && (exitCode !== 0 ||
+    manifest.stages?.length !== stages.length || stages.some((stage, index) =>
+      manifest.stages[index]?.id !== stage.id || manifest.stages[index]?.code !== 0))) {
+    throw new Error("WSL 测试执行器或阶段未完整成功退出，不能使用通过清单");
+  }
+  return manifest;
 }
 
 export async function hashFile(path) {
@@ -300,12 +315,12 @@ function safeName(value) {
   return name.slice(0, 80);
 }
 
-function childExit(child) {
+export function waitForTestProcess(child) {
   return new Promise((resolveExit, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (signal) reject(new Error(`测试子进程被信号 ${signal} 终止`));
-      else resolveExit(Number(code));
+      else resolveExit(code ?? 1);
     });
   });
 }

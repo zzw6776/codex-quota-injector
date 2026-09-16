@@ -1471,7 +1471,7 @@ test("自定义模型能力约束和同任务供应商锁在访问上游前生�
     input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
   });
   assert.equal(image.status, 400);
-  assert.match((await image.json()).error.message, /自动检测结果不支持图片输入/);
+  assert.match((await image.json()).error.message, /当前配置未启用图片输入/);
 
   const effort = await post({ model: "custom-model", input: "hi", reasoning: { effort: "max" } });
   assert.equal(effort.status, 400);
@@ -2086,4 +2086,32 @@ test("自定义模型 WebSocket 成功连接中的失败事件仍记录脱敏请
   assert.match(diagnostics[0], /"type":"reasoning_text"/);
   assert.match(diagnostics[0], /"keys":\["text","type"\]/);
   assert.doesNotMatch(diagnostics[0], /PRIVATE_UPSTREAM_ERROR|PRIVATE_REASONING_ID|PRIVATE_REASONING_TEXT|custom-secret/);
+});
+
+
+test("手动配置经过 Router 保留图片、推理强度并转换 Codex 工具", async t => {
+  const received = [];
+  const upstream = await startHttpServer(t, async (request, response) => {
+    received.push(await readJsonRequest(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "manual-reply", status: "completed", output: [] }));
+  });
+  const manager = new ModelRouterManager();
+  t.after(() => manager.close());
+  const config = await manager.configure(routerSettings(upstream.origin, {
+    compatibility: { status: "manual", probeVersion: 0, protocol: "responses", supportsImage: true,
+      historyMode: "reasoning-text-only", capabilities: { customTools: "bridged", namespaceTools: "bridged",
+        nativeCustomTools: [], toolChoice: "unsupported", reasoningToolChoice: "unsupported",
+        parallelTools: "unsupported", hostedTools: { web_search: "unsupported" } } },
+  }));
+  const response = await fetch(new URL("responses", config.baseUrl), { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "custom-model",
+      input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
+      reasoning: { effort: "high" }, tools: [{ type: "custom", name: "fixture_tool", description: "fixture" }],
+    }) });
+  assert.equal(response.status, 200);
+  assert.equal(received.length, 1);
+  assert.equal(received[0].reasoning.effort, "high");
+  assert.equal(received[0].input[0].content[0].type, "input_image");
+  assert.equal(received[0].tools[0].type, "function");
 });

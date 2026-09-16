@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
+import { useTempDir } from "./helpers.mjs";
 
 import {
   COMMON_COMPONENT,
@@ -13,10 +18,43 @@ import {
   resolveRuntimeSelection,
   runtimeComponentId,
   runtimeTargetsForPlatform,
+  readWslTestManifest,
+  waitForTestProcess,
   summarizeFinalStageEvents,
   summarizeSelectedRuntimeComponents,
   summarizeRuntimeComponents,
 } from "../scripts/test-runtime-targets.mjs";
+
+test("验收子进程被中断不能被当成退出码 0", async (t) => {
+  const child = spawn(process.execPath, ["-e", 'setInterval(() => {}, 1000); console.log("ready")'],
+    { stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => child.kill());
+  const rejected = assert.rejects(waitForTestProcess(child), /信号 SIGTERM/);
+  await once(child.stdout, "data");
+  child.kill("SIGTERM");
+  await rejected;
+});
+
+test("WSL 报告不能覆盖失败退出、遗漏阶段或复用其他源码的通过结论", async (t) => {
+  const directory = await useTempDir(t, "wsl-manifest-");
+  const path = join(directory, "current-run.json");
+  const options = { exitCode: 0, sourceSha256: "current", stages: [{ id: "tools" }, { id: "history" }] };
+  const passed = { status: "passed", runtimeTarget: WSL_NATIVE, sourceSha256: "current",
+    stages: [{ id: "tools", code: 0 }, { id: "history", code: 0 }] };
+  await writeFile(join(directory, "previous-run.json"), JSON.stringify(passed));
+  await assert.rejects(readWslTestManifest(path, options), /没有生成本次清单/);
+  for (const invalid of [
+    { ...passed, sourceSha256: "old-source" },
+    { ...passed, stages: [{ id: "tools", code: 0 }] },
+    { ...passed, stages: [{ id: "tools", code: 0 }, { id: "history", code: 1 }] },
+  ]) {
+    await writeFile(path, JSON.stringify(invalid));
+    await assert.rejects(readWslTestManifest(path, options), /不属于|未完整成功/);
+  }
+  await writeFile(path, JSON.stringify(passed));
+  await assert.rejects(readWslTestManifest(path, { ...options, exitCode: 1 }), /未完整成功/);
+  assert.deepEqual(await readWslTestManifest(path, options), passed);
+});
 
 test("[A HAR-01] 平台契约必须显式标记，标题提到其他平台仍属于公共逻辑", () => {
   const source = [

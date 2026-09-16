@@ -302,6 +302,30 @@ test("[platform:windows-native] [A HAR-03 LCH-02] Windows 运行方式恢复保�
   assert.equal(await readFile(configPath, "utf8"), external);
 });
 
+test("[platform:windows-native] Windows 多次切换后恢复仍保留已经合并的外部配置", async (t) => {
+  for (const existed of [true, false]) {
+    const directory = await useTempDir(t, "codex-runtime-merged-");
+    const configPath = join(directory, "config.toml");
+    const original = 'model = "gpt-5"\n[desktop]\nrunCodexInWindowsSubsystemForLinux = false\n';
+    if (existed) await writeFile(configPath, original);
+    const configuration = await captureWindowsRuntimeConfiguration({ runDirectory: directory, configPath });
+    await setWindowsRuntimeConfiguration(configuration, "wsl-native");
+    const updated = `${await readFile(configPath, "utf8")}\n[notice]\nhide_usage_warning = true\n`;
+    await writeFile(configPath, updated);
+    await setWindowsRuntimeConfiguration(configuration, "windows-native");
+    await setWindowsRuntimeConfiguration(configuration, "wsl-native");
+    // No further external write: the file now matches lastAppliedSha256, but
+    // that hash includes settings added after the original backup.
+    const expected = updated.replace("runCodexInWindowsSubsystemForLinux = true",
+      "runCodexInWindowsSubsystemForLinux = false");
+    const restored = await restoreWindowsRuntimeConfiguration(configuration);
+    assert.equal(restored.externalChangesPreserved, true);
+    assert.equal(await readFile(configPath, "utf8"), expected);
+    await restoreWindowsRuntimeConfiguration(configuration);
+    assert.equal(await readFile(configPath, "utf8"), expected, "重复恢复必须保留已恢复内容");
+  }
+});
+
 test("[platform:windows-native] [A LCH-03] Windows 首次初始化切换 PID 后达到稳定状态才建立重复启动基线", async () => {
   const first = readyHost({ injectorPid: 101, codexPids: [201], relayPid: 301 });
   const initialized = readyHost({ injectorPid: 101, codexPids: [202], relayPid: 301 });

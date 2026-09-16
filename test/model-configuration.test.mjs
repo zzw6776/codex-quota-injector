@@ -141,6 +141,18 @@ function extraModelManager(dataDir, overrides = {}) {
   });
 }
 
+async function detectAndSave(manager, input) {
+  const platform = structuredClone(input);
+  for (let index = 0; index < platform.models.length; index += 1) {
+    if (platform.models[index].selected === false) continue;
+    const result = await manager.detectModel(platform, platform.models[index].id);
+    const detection = result.modelDetections.find(item => item.modelId === platform.models[index].id && item.platformId === (platform.id ?? ""));
+    assert.equal(detection.status, "passed");
+    platform.models[index] = detection.model;
+  }
+  return manager.savePlatform(platform);
+}
+
 test("模型配置平台统一持久化 DeepSeek 预设、余额和停用状态", async (t) => {
   const dataDir = await useTempDir(t);
   const requests = [];
@@ -169,7 +181,7 @@ test("模型配置平台统一持久化 DeepSeek 预设、余额和停用状态"
     manager.savePlatform({ ...preset, enabled: true, apiKey: "" }),
     /必须填写 API Key/,
   );
-  const saved = await manager.savePlatform({ ...preset, enabled: true, apiKey: " ds-key " });
+  const saved = await detectAndSave(manager, { ...preset, enabled: true, apiKey: " ds-key " });
   assert.equal(saved.platforms[0].enabled, true);
   assert.equal(saved.platforms[0].apiKey, "ds-key");
   assert.ok(saved.platforms[0].models.every((model) =>
@@ -328,7 +340,7 @@ test("额外模型目录准确映射上下文、图片和推理能力并隔离�
     }),
   });
   await manager.initialize();
-  const saved = await manager.savePlatform(customPlatform());
+  const saved = await detectAndSave(manager, customPlatform());
   assert.equal(saved.pendingRestart, true);
   assert.match(saved.message, /等待重启 Codex 后生效/);
   const savedPlatform = saved.platforms.find((platform) => platform.name === "Local Provider");
@@ -370,7 +382,7 @@ test("额外模型目录准确映射上下文、图片和推理能力并隔离�
   );
 });
 
-test("模型管理自动检测并缓存连接、工具续接和图片能力，目标变化后重新检测", async (t) => {
+test("逐模型检测填回参数后单独保存，保存和修改目标不隐式检测", async (t) => {
   const dataDir = await useTempDir(t);
   const probes = [];
   const operations = [];
@@ -407,9 +419,10 @@ test("模型管理自动检测并缓存连接、工具续接和图片能力，�
   });
   manager.onChange((view) => {
     if (view.operation) operations.push(view.operation);
+    operations.push(...view.modelDetections.map(item => item.operation).filter(Boolean));
   });
   await manager.initialize();
-  const first = await manager.savePlatform(customPlatform());
+  const first = await detectAndSave(manager, customPlatform());
   const platform = first.platforms.find((item) => item.name === "Local Provider");
   assert.equal(platform.models[0].compatibility.historyMode, "reasoning-text-only");
   assert.equal(platform.models[0].compatibility.supportsImage, true);
@@ -436,7 +449,10 @@ test("模型管理自动检测并缓存连接、工具续接和图片能力，�
     apiKey: "replacement-key",
     models: platform.models.map((model) => ({ ...model, compatibility: { ...model.compatibility } })),
   };
-  const second = await manager.savePlatform(changed);
+  const unverified = await manager.savePlatform(changed);
+  assert.equal(probes.length, 1, "修改 Key 后保存也不得隐式检测");
+  assert.equal(unverified.platforms.find(item => item.id === platform.id).models[0].compatibility.status, "manual");
+  const second = await detectAndSave(manager, changed);
   assert.equal(probes.length, 2);
   const secondPlatform = second.platforms.find((item) => item.name === "Local Provider");
   assert.equal(secondPlatform.models[0].compatibility.protocol, "chat");
@@ -444,7 +460,7 @@ test("模型管理自动检测并缓存连接、工具续接和图片能力，�
   assert.deepEqual(secondPlatform.models[0].compatibility.capabilities.nativeCustomTools, []);
   assert.deepEqual(secondPlatform.models[0].reasoningEfforts, ["low", "high", "max"]);
 
-  await manager.redetectPlatform(secondPlatform.id);
+  await manager.detectModel(secondPlatform, secondPlatform.models[0].id);
   assert.equal(probes.length, 3, "用户重新检测必须忽略缓存");
 });
 
@@ -536,7 +552,7 @@ test("DeepSeek 预设实时读取官方模型并只检测和发布用户选中�
     "deepseek-v4-pro",
   ]);
   assert.deepEqual(probes, [], "读取模型列表本身不得发送推理请求或消耗模型 Token");
-  const saved = await manager.savePlatform({ ...configuredPreset, enabled: true });
+  const saved = await detectAndSave(manager, { ...configuredPreset, enabled: true });
   const enabledPreset = saved.platforms.find((platform) => platform.preset === "deepseek");
   assert.deepEqual(enabledPreset.models.map((model) => [model.id, model.selected]), [
     ["deepseek-flash", true],
@@ -544,7 +560,6 @@ test("DeepSeek 预设实时读取官方模型并只检测和发布用户选中�
   ]);
   assert.deepEqual(probes, ["deepseek-flash"]);
   assert.deepEqual(requests.map((request) => request.url), [
-    "https://api.deepseek.com/models",
     "https://api.deepseek.com/models",
   ]);
   assert.ok(requests.every((request) => request.authorization === "Bearer ds-live-key"));
@@ -953,4 +968,136 @@ for await (const line of createInterface({ input: process.stdin })) {
   primary.child.stdin.end();
   assert.equal(await primary.closed, 0, primary.stderr());
   await assert.rejects(readFile(ownedStatePath, "utf8"), { code: "ENOENT" });
+});
+
+
+test("保存手动参数不联网；逐模型失败持久展示且不阻止保存其他模型", async t => {
+  const dataDir = await useTempDir(t);
+  const requests = [];
+  const manager = extraModelManager(dataDir, {
+    fetchImpl: async () => { throw new Error("保存不能联网"); },
+    probeModel: async ({ modelId }) => {
+      requests.push(modelId);
+      if (modelId === "broken") throw new Error("图片能力检测超时 secret");
+      return detectedCompatibility();
+    },
+  });
+  await manager.initialize();
+  const input = customPlatform({ models: [
+    { id: "broken", contextWindow: 64000, reasoningEfforts: [], compatibility: {
+      status: "manual", protocol: "chat", historyMode: "chat", supportsImage: false,
+      capabilities: { customTools: "bridged", namespaceTools: "bridged" } } },
+    { id: "working", contextWindow: 128000 },
+  ] });
+  const saved = await manager.savePlatform(input);
+  assert.deepEqual(requests, []);
+  const platform = saved.platforms.find(item => item.name === "Local Provider");
+  const before = structuredClone(manager.settings.platforms);
+  manager.markRestarted();
+  const failed = await manager.detectModel(platform, "broken", { requestId: "failure-request" });
+  assert.equal(failed.modelDetections.find(item => item.requestId === "failure-request").requestId, "failure-request");
+  assert.equal(failed.modelDetections.find(item => item.requestId === "failure-request").status, "failed");
+  assert.match(failed.platforms.find(item => item.id === platform.id).models[0].lastDetection.message, /超时/);
+  assert.ok(!failed.modelDetections.find(item => item.requestId === "failure-request").message.includes("secret"));
+  assert.deepEqual(manager.settings.platforms, before, "检测不能保存或改写模型参数");
+  assert.equal(failed.pendingRestart, false);
+  const result = await manager.detectModel(platform, "working");
+  assert.equal(result.modelDetections.find(item => item.modelId === "working").status, "passed");
+  assert.deepEqual(requests, ["broken", "working"], "每次只检测指定模型");
+  assert.deepEqual(manager.settings.platforms, before, "成功也要等待用户保存");
+  const reloaded = extraModelManager(dataDir);
+  const restored = (await reloaded.initialize()).platforms.find(item => item.id === platform.id);
+  assert.equal(restored.models[0].lastDetection.status, "failed", "重启后外层仍能显示失败");
+  assert.equal(restored.models[0].compatibility.status, "manual");
+  const runtime = await reloaded.writeRuntimeCatalog(baseCatalog());
+  assert.deepEqual(runtime.catalog.models.find(item => item.slug === "broken").input_modalities, ["text"]);
+  await reloaded.savePlatform({ ...restored, models: restored.models.map(model =>
+    model.id === "working" ? result.modelDetections.find(item => item.modelId === "working").model : model) });
+  assert.equal(reloaded.settings.platforms.find(item => item.id === platform.id).models[1].compatibility.status, "verified");
+});
+
+test("检测日志关联请求且重载后保留独立图片结论，不误记整体通过为图片通过", async t => {
+  const logs = [];
+  t.mock.method(console, "log", (...args) => logs.push(args));
+  const dataDir = await useTempDir(t);
+  const manager = extraModelManager(dataDir, { probeModel: async ({ onDiagnostic }) => {
+    onDiagnostic({ event: "request-start", sequence: 1, stage: "image", protocol: "responses" });
+    onDiagnostic({ event: "request-end", sequence: 1, stage: "image", ok: true, answerChars: 0 });
+    return detectedCompatibility({ supportsImage: null, imageStatus: "inconclusive",
+      imageDetail: "图片检测未完成：未返回完整的最终答案" });
+  } });
+  await manager.initialize();
+  await manager.savePlatform(customPlatform());
+  const platform = manager.getViewModel().platforms.find(item => item.name === "Local Provider");
+  await manager.detectModel(platform, "custom-model", { requestId: "diagnostic-round" });
+  const records = logs.filter(args => args[0] === "[model-probe]").map(args => args[1]);
+  assert.deepEqual(records.map(item => item.event), ["detection-start", "request-start", "request-end", "detection-end"]);
+  assert.ok(records.every(item => item.requestId === "diagnostic-round" && item.platformId === platform.id && item.modelId === "custom-model"));
+  const reloaded = extraModelManager(dataDir);
+  const restored = (await reloaded.initialize()).platforms.find(item => item.id === platform.id);
+  const report = restored.models[0].lastDetection;
+  assert.equal(report.status, "passed");
+  assert.equal(report.requestCount, 1);
+  assert.equal(report.requestId, "diagnostic-round");
+  assert.equal(report.probeVersion, MODEL_CAPABILITY_PROBE_VERSION);
+  assert.deepEqual(report.image, { status: "inconclusive", supportsImage: null,
+    protocol: "responses", detail: "图片检测未完成：未返回完整的最终答案" });
+});
+
+test("并行检测独立推进且同时保存、乱序完成不会覆盖配置或报告", async t => {
+  const controls = new Map();
+  const manager = extraModelManager(await useTempDir(t), { probeModel: ({ modelId, onProgress }) =>
+    new Promise((resolve, reject) => controls.set(modelId, { resolve, reject, onProgress })) });
+  await manager.initialize();
+  await manager.savePlatform(customPlatform({ enabled: false, models: ['alpha', 'beta', 'gamma'].map(id => ({
+    ...customPlatform().models[0], id,
+  })) }));
+  const platform = manager.getViewModel().platforms.find(item => item.name === 'Local Provider');
+  const probes = platform.models.map(model => manager.detectModel(platform, model.id, { requestId: model.id }));
+  assert.equal(controls.size, 3, '三个请求都必须在任何一个结束前启动');
+  controls.get('alpha').onProgress({ stage: 'image', message: 'alpha image', current: 7, total: 8 });
+  controls.get('beta').onProgress({ stage: 'reasoning', message: 'beta reasoning', current: 4, total: 8 });
+  const running = manager.getViewModel().modelDetections;
+  assert.equal(running.find(item => item.modelId === 'alpha').operation.detail, 'alpha image');
+  assert.equal(running.find(item => item.modelId === 'beta').operation.detail, 'beta reasoning');
+  const save = manager.savePlatform({ ...platform, name: 'Edited while probing', models: platform.models.map(model => ({
+    ...model, contextWindow: 256000,
+  })) });
+  controls.get('beta').reject(new Error('beta unavailable'));
+  controls.get('gamma').resolve(detectedCompatibility());
+  controls.get('alpha').resolve(detectedCompatibility());
+  await Promise.all([save, ...probes]);
+  const view = manager.getViewModel();
+  assert.equal(view.modelDetections.filter(item => item.status === 'passed').length, 2);
+  assert.equal(view.modelDetections.find(item => item.modelId === 'beta').status, 'failed');
+  const reloaded = extraModelManager(manager.dataDir);
+  await reloaded.initialize();
+  const restored = reloaded.getViewModel().platforms.find(item => item.id === platform.id);
+  assert.equal(restored.name, 'Edited while probing');
+  assert.ok(restored.models.every(model => model.contextWindow === 256000));
+  assert.ok(restored.models.every(model => model.compatibility.status !== 'verified'), '检测不能自动保存参数');
+  assert.deepEqual(restored.models.map(model => model.lastDetection.status), ['passed', 'failed', 'passed']);
+});
+
+test("同一模型再次检测后旧请求的进度和失败不能覆盖新结果", async t => {
+  const controls = [];
+  const manager = extraModelManager(await useTempDir(t), { probeModel: ({ onProgress }) =>
+    new Promise((resolve, reject) => controls.push({ resolve, reject, onProgress })) });
+  await manager.initialize();
+  await manager.savePlatform(customPlatform());
+  const platform = manager.getViewModel().platforms.find(item => item.name === 'Local Provider');
+  const old = manager.detectModel(platform, 'custom-model', { requestId: 'old' });
+  const latest = manager.detectModel(platform, 'custom-model', { requestId: 'latest' });
+  assert.equal(controls.length, 2);
+  controls[1].resolve(detectedCompatibility());
+  await latest;
+  controls[0].onProgress({ stage: 'image', message: 'stale progress', current: 7, total: 8 });
+  controls[0].reject(new Error('stale failure'));
+  await old;
+  const detection = manager.getViewModel().modelDetections[0];
+  assert.equal(detection.requestId, 'latest');
+  assert.equal(detection.status, 'passed');
+  assert.equal(detection.operation, null);
+  const persisted = JSON.parse(await readFile(manager.settingsPath, 'utf8'));
+  assert.equal(persisted.detectionReports.find(item => item.modelId === 'custom-model').status, 'passed');
 });

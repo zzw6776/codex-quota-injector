@@ -533,7 +533,7 @@ function rewriteClientLine(line, state) {
       }
       const selectedModel = state.customModels.get(requestedModel ?? threadContext?.model);
       if (containsImageInput(params.input) && !selectedModel?.supportsImage) {
-        return jsonRpcError(message.id, "该模型的自动检测结果不支持图片输入");
+        return jsonRpcError(message.id, "该模型的当前配置未启用图片输入");
       }
       if (method === "turn/start") {
         if (selectedModel?.reasoningEfforts.length) {
@@ -1147,7 +1147,7 @@ function readCustomPlatforms(settings) {
           const compatibility = model?.compatibility && typeof model.compatibility === "object"
             ? model.compatibility
             : null;
-          const currentCompatibility = compatibility?.status === "verified" &&
+          const currentCompatibility = compatibility?.status === "manual" || compatibility?.status === "verified" &&
             compatibility?.probeVersion === MODEL_CAPABILITY_PROBE_VERSION;
           const protocol = ["responses", "chat"].includes(compatibility?.protocol)
             ? compatibility.protocol

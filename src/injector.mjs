@@ -86,6 +86,7 @@ export async function runInjector({
   let removeNetworkListener = () => {};
   let removeExtraModelListener = () => {};
   let activeAction = null;
+  const activeModelDetections = new Set();
   let restartingCodex = false;
   let hasSeenCodexProcess = false;
   let stopped = false;
@@ -649,22 +650,16 @@ export async function runInjector({
         case "extra-platform-save": {
           await extraModelManager.savePlatform(action.platform, {
             reservedModelIds: contextManager.getViewModel().models.map((model) => model.slug),
+            requestId: action.requestId,
           });
-          if (action.platform?.preset === "deepseek" && action.platform?.apiKey) {
-            await extraModelManager.refreshDeepSeekBalance().catch((error) => {
-              console.error(`[deepseek-balance] ${error.message}`);
-            });
-            scheduleDeepSeekBalanceRefresh();
-          }
+          scheduleDeepSeekBalanceRefresh();
           break;
         }
         case "extra-platform-models-refresh":
           await extraModelManager.refreshPresetModels(action.platform);
           break;
-        case "extra-platform-detect": {
-          await extraModelManager.redetectPlatform(action.platformId, {
-            reservedModelIds: contextManager.getViewModel().models.map((model) => model.slug),
-          });
+        case "extra-model-detect": {
+          await extraModelManager.detectModel(action.platform, action.modelId, { requestId: action.requestId });
           break;
         }
         case "extra-platform-remove":
@@ -686,7 +681,7 @@ export async function runInjector({
       if (String(action?.type ?? "").startsWith("context-")) {
         contextManager.setError(error.message);
       }
-      if (String(action?.type ?? "").startsWith("extra-platform-") &&
+      if ((String(action?.type ?? "").startsWith("extra-platform-") || action?.type === "extra-model-detect") &&
         action?.type !== "extra-deepseek-refresh-balance") {
         extraModelManager.setError(error.message);
       }
@@ -771,7 +766,7 @@ export async function runInjector({
 
   async function runModelCatalogRefresh({ manual = false } = {}) {
     if (modelCatalogRefreshPromise) return modelCatalogRefreshPromise;
-    if (!manual && (activeAction || restartingCodex)) {
+    if (!manual && (activeAction || activeModelDetections.size > 0 || restartingCodex)) {
       scheduleModelCatalogRefresh(MODEL_CATALOG_BUSY_RETRY_MS);
       return undefined;
     }
@@ -900,7 +895,7 @@ export async function runInjector({
   }
   let _loopCount = 0;
   while (!stopped) {
-    if (pendingWidgetReload && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
+    if (pendingWidgetReload && !activeAction && activeModelDetections.size === 0 && !restartingCodex && !modelCatalogRefreshPromise) {
       widgetReloading = true;
       try {
         await widgetUpdatePromise?.catch(() => {});
@@ -922,7 +917,7 @@ export async function runInjector({
     }
     _loopCount++;
     debugLog(`[DEBUG] loop#${_loopCount} cdp=${!!cdp} cdp.isConnected=${cdp?.isConnected} restartingCodex=${restartingCodex} hasSeenCodexProcess=${hasSeenCodexProcess} stopped=${stopped} deadline=${Date.now() >= startupDeadline}`);
-    if (launchRecoveryRequested && !activeAction && !restartingCodex && !modelCatalogRefreshPromise) {
+    if (launchRecoveryRequested && !activeAction && activeModelDetections.size === 0 && !restartingCodex && !modelCatalogRefreshPromise) {
       launchRecoveryRequested = false;
       restartingCodex = true;
       try {
@@ -959,7 +954,18 @@ export async function runInjector({
         if (Array.isArray(actions) && actions.length > 0) {
           activeAction = (async () => {
             await modelCatalogRefreshPromise;
-            for (const action of actions) await startAction(action);
+            for (const action of actions) {
+              if (action.type !== "extra-model-detect") {
+                await startAction(action);
+                continue;
+              }
+              const pending = startAction(action).finally(() => {
+                activeModelDetections.delete(pending);
+                markWidgetDataDirty();
+                void requestWidgetUpdate().catch(error => console.error(`[widget] 检测后刷新失败: ${error.message}`));
+              });
+              activeModelDetections.add(pending);
+            }
           })().finally(() => {
             activeAction = null;
             markWidgetDataDirty();

@@ -224,10 +224,10 @@ test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模�
   await b.fill('.extra-platform-form [name="apiKey"]', "fixture-key");
   await b.fill('[name="modelId"]', "fixture-extra");
   await b.fill('[name="displayName"]', "测试模型");
-  assert.equal(await b.value('[name="supportsImage"]'), null);
+  assert.notEqual(await b.value('[name="supportsImage"]'), null);
   assert.equal(await b.value('[name="chatCompatibility"]'), null);
-  assert.match(await b.value(".extra-model-capabilities"), /待检测/);
-  assert.match(await b.value(".extra-model-reasoning"), /自动检测/);
+  assert.match(await b.value(".extra-model-capabilities"), /未检测/);
+  assert.match(await b.value(".extra-model-reasoning"), /手动配置/);
   assert.equal(await b.value('[name="contextWindow"]', "value"), "128");
   await b.fill('[name="contextWindow"]', "256");
   await b.click(".extra-model-add");
@@ -237,6 +237,7 @@ test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模�
   const [action] = await b.drain();
   assert.equal(action.type, "extra-platform-save");
   assert.equal(action.platform.models[0].contextWindow, 256_000);
+  assert.equal(action.platform.models[0].compatibility.status, "manual", "未检测时直接保存默认参数应标为手动配置");
   const manager = new ExtraModelManager({
     dataDir: b.directory,
     now: () => 1234,
@@ -271,7 +272,8 @@ test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模�
     }),
   });
   await manager.initialize();
-  await manager.savePlatform(action.platform);
+  const detected = await manager.detectModel(action.platform, action.platform.models[0].id);
+  await manager.savePlatform({ ...action.platform, models: [detected.modelDetections.find(item => item.modelId === action.platform.models[0].id).model] }, { requestId: action.requestId });
   assert.equal(manager.getViewModel().pendingRestart, true);
   assert.match(manager.getViewModel().message, /等待重启 Codex 后生效/);
   const platform = manager.getViewModel().platforms.find((item) => item.name === "本地平台");
@@ -283,17 +285,19 @@ test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模�
   await b.update(fixtureData({ extraModels: manager.getViewModel() }));
   assert.equal(await b.value(".extra-platform-form") == null, false,
     "保存结果回传时必须保留正在查看的配置表单");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.extra-platform-form').dataset.platformId`), platform.id,
+    "新平台首次保存后必须绑定服务器分配的 ID，后续保存不能重复添加");
   assert.match(await b.value(".pending-restart"), /等待重启生效/);
   await b.click(".extra-platform-cancel");
   assert.equal(await b.value(".extra-platform-form"), null);
   assert.deepEqual(await b.drain(), []);
   const platformStatus = `.extra-platform-card[data-platform-id="${platform.id}"] .extra-platform-model-status`;
-  assert.match(await b.value(platformStatus), /Responses/);
-  assert.match(await b.value(platformStatus), /工具已自动适配/);
-  assert.match(await b.value(platformStatus), /推理：支持/);
-  assert.match(await b.value(platformStatus), /推理强度：low \/ high \/ max（实测接受）/);
-  assert.match(await b.value(platformStatus), /内置联网不可用/);
-  assert.match(await b.value(platformStatus), /支持图片/);
+  assert.match(await b.value(platformStatus), /检测通过/);
+  for (const parameter of [/Responses/, /工具已自动适配/, /推理：支持/,
+    /推理强度：low \/ high \/ max（实测接受）/, /内置联网不可用/, /支持图片/]) {
+    assert.match(await b.value(platformStatus), parameter, "外层检测状态不能取代已有参数展示");
+  }
+  assert.equal(await b.value(`${platformStatus} .extra-model-detect`), null);
   const originalCard = await b.client.evaluate(`(() => {
     const card = ${SHADOW}.querySelector('.extra-platform-card[data-platform-id="${platform.id}"]');
     const scroller = ${SHADOW}.querySelector('.panel-scroll');
@@ -307,7 +311,8 @@ test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模�
   assert.ok(originalCard.scrollTop > 0, "测试必须先建立真实滚动位置");
   const progressView = {
     ...manager.getViewModel(),
-    operation: {
+    modelDetections: [{ requestId: "progress-only", status: "loading", platformId: platform.id,
+      modelId: "fixture-extra", operation: {
       state: "loading",
       phase: "detecting",
       platformId: platform.id,
@@ -320,7 +325,7 @@ test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模�
       steps: 8,
       probeStage: "reasoning",
       retry: false,
-    },
+    } }],
   };
   await b.client.evaluate(widgetExtraModelsUpdateExpressionJson(JSON.stringify(progressView), 901));
   assert.equal(await b.client.evaluate(`window.__extraModelCard === ${SHADOW}.querySelector('.extra-platform-card[data-platform-id="${platform.id}"]')`), true,
@@ -334,15 +339,23 @@ test("[A UI-02 MOD-03 MOD-04] 页面平台配置的输入、能力、增删模�
   assert.equal(await b.client.evaluate(`window.__extraModelCard === ${SHADOW}.querySelector('.extra-platform-card[data-platform-id="${platform.id}"]')`), true,
     "检测期间即使收到完整后台数据，也不能重绘模型管理页面");
   assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.panel-scroll').scrollTop`), originalCard.scrollTop);
-  const failedView = { ...progressView, operation: null, messageState: "error", message: "fixture 检测失败" };
+  const failedView = { ...progressView, modelDetections: [], operation: null, messageState: "error", message: "fixture 检测失败" };
   await b.client.evaluate(widgetExtraModelsUpdateExpressionJson(JSON.stringify(failedView), 902));
   assert.equal(await b.client.evaluate(`window.__extraModelCard === ${SHADOW}.querySelector('.extra-platform-card[data-platform-id="${platform.id}"]')`), true);
   assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.panel-scroll').scrollTop`), originalCard.scrollTop);
   assert.match(await b.value(".extra-model-feedback"), /fixture 检测失败/);
-  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.extra-platform-detect[data-platform-id="${platform.id}"]').disabled`), false,
+  await b.click(`.extra-platform-edit[data-platform-id="${platform.id}"]`);
+  assert.match(await b.value('.extra-platform-form .extra-model-status'), /参数由检测自动填写/);
+  assert.match(await b.value('.extra-platform-form .extra-model-capabilities'), /检测通过/);
+  assert.match(await b.value('.extra-platform-form .extra-model-status'), /支持图片/);
+  const detectButton = '.extra-platform-form .extra-model-detect';
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('${detectButton}').disabled`), false,
     "存在待重启配置时仍必须允许继续检测");
-  await b.click(`.extra-platform-detect[data-platform-id="${platform.id}"]`);
-  assert.equal((await b.drain())[0].type, "extra-platform-detect");
+  await b.click(detectButton);
+  const [detect] = await b.drain();
+  assert.equal(detect.type, "extra-model-detect");
+  assert.equal(detect.modelId, "fixture-extra");
+
 });
 
 test("[A UI-02 MOD-05] DeepSeek 预设在窄布局只暴露开关、Key 和模型选择", { timeout: 30_000 }, async t => {
@@ -393,7 +406,7 @@ test("[A UI-02 MOD-05] DeepSeek 预设在窄布局只暴露开关、Key 和模�
   assert.equal(await b.value(".provider-open"), null,
     "账号页不能再保留独立 DeepSeek 入口");
   await b.click(".extra-models-open");
-  assert.match(await b.value(".extra-platform-model-status"), /检测规则已更新 · 需重新检测/,
+  assert.match(await b.value(".extra-platform-model-status"), /检测规则已更新/,
     "旧探测结果应说明版本已更新，不能伪装成从未检测");
   await b.click('.extra-platform-edit[data-platform-id="d33f5ee0-0000-4000-8000-000000000001"]');
   assert.equal(await b.value('.preset-platform-form [name="name"]'), null);
@@ -422,6 +435,34 @@ test("[A UI-02 MOD-05] DeepSeek 预设在窄布局只暴露开关、Key 和模�
   assert.equal(action.platform.preset, "deepseek");
   assert.equal(action.platform.baseUrl, "https://api.deepseek.com/");
   assert.equal(action.platform.models.find((model) => model.id === "deepseek-flash").selected, true);
+});
+
+test("[A UI-02 MOD-03] 模型发现与其他状态一起更新时也必须更新下拉列表并保留表单", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const manager = new ExtraModelManager({ dataDir: b.directory });
+  const view = await manager.initialize();
+  const preset = view.platforms.find(platform => platform.preset === "deepseek");
+  const discoveredModels = structuredClone(preset.models);
+  preset.models = preset.models.slice(0, 1);
+  await b.update(fixtureData({ extraModels: view }));
+  await b.click(".quota-chip");
+  await b.click(".extra-models-open");
+  await b.click(`.extra-platform-edit[data-platform-id="${preset.id}"]`);
+  await b.fill('[name="apiKey"]', "draft-fixture-key");
+  await b.client.evaluate(`window.__modelForm = ${SHADOW}.querySelector('.extra-platform-form')`);
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelectorAll('[name="presetModel"]').length`), 1);
+  await b.update(fixtureData({
+    windows: [{ label: "5h", remainingPercent: 64 }],
+    extraModels: { ...view, modelDiscovery: { revision: 1, platformId: preset.id,
+      models: discoveredModels, modelsUpdatedAt: 1234 } },
+  }));
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelectorAll('[name="presetModel"]').length`), 2);
+  assert.equal(await b.client.evaluate(`window.__modelForm === ${SHADOW}.querySelector('.extra-platform-form')`), true);
+  assert.equal(await b.value('[name="apiKey"]', "value"), "draft-fixture-key");
+  await b.click('.preset-platform-form button[type="submit"]');
+  const [action] = await b.drain();
+  assert.deepEqual(action.platform.models.map(model => model.id), discoveredModels.map(model => model.id));
+  assert.ok(action.platform.models.every(model => model.selected));
 });
 
 test("[A UI-02 MOD-05] DeepSeek 余额位于模型卡片内且异步刷新不移动底部汇总栏", { timeout: 30_000 }, async t => {
@@ -593,6 +634,8 @@ test("[A UI-02 WK-01 MOD-03] 唤醒和模型管理页面在刷新后保留草稿
   assert.equal(action.type, "extra-platform-save");
   assert.equal(action.platform.apiKey, "changed-fixture-key");
   assert.equal(action.platform.preset, "deepseek");
+  await b.click(".extra-models-back");
+  assert.notEqual(await b.value(".extra-platform-list"), null);
   await b.click(".extra-models-back");
   await b.click(".wakeup-open");
   await b.click(".wakeup-time-add");
@@ -770,4 +813,324 @@ test("[A UI-03] 二级页面继承主窗口尺寸、可临时拖大且返回后�
   const compactAccountSize = await size();
   await b.click(".extra-models-open");
   assert.deepEqual(await size(), compactAccountSize, "小窗口中的二级页面也必须继承主窗口实际尺寸");
+});
+
+
+test("[A UI-02 MOD-03] 逐模型检测失败显示在外层，保存不检测，收起保留编辑状态", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const probed = [];
+  const manager = new ExtraModelManager({ dataDir: b.directory,
+    probeModel: async ({ modelId }) => { probed.push(modelId); throw new Error("图片请求连续超时"); },
+    fetchImpl: async () => { throw new Error("保存不能发送请求"); },
+  });
+  const view = await manager.initialize();
+  const preset = view.platforms.find(platform => platform.preset === "deepseek");
+  await manager.savePlatform({ ...preset, apiKey: "fixture-key", enabled: true });
+  await b.update(fixtureData({ extraModels: manager.getViewModel() }));
+  await b.click(".quota-chip");
+  await b.click(".extra-models-open");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelectorAll('.extra-model-detect').length`), 0);
+  await b.click(".extra-platform-edit");
+  await b.fill('[name="apiKey"]', "fixture-key");
+  await b.click('[data-model-index="1"] .extra-model-detect');
+  const [action] = await b.drain();
+  assert.equal(action.type, "extra-model-detect");
+  assert.equal(action.modelId, "deepseek-v4-pro");
+  await manager.detectModel(action.platform, action.modelId, { requestId: action.requestId });
+  await b.update(fixtureData({ extraModels: manager.getViewModel() }));
+  assert.deepEqual(probed, ["deepseek-v4-pro"]);
+  assert.match(await b.value('[data-model-index="1"] .extra-model-detection-error'), /连续超时/);
+  await b.fill('[name="presetContextWindow"][data-model-id="deepseek-v4-pro"]', "256");
+  await b.client.evaluate(`(() => {
+    window.__savedModelForm = ${SHADOW}.querySelector('.extra-platform-form');
+    const panel = ${SHADOW}.querySelector('.panel-scroll');
+    panel.scrollTop = panel.scrollHeight;
+    window.__savedModelScroll = panel.scrollTop;
+  })()`);
+  await b.click(".close-panel");
+  await b.update(fixtureData({ version: "background-refresh", extraModels: manager.getViewModel() }));
+  await b.click(".quota-chip");
+  assert.equal(await b.client.evaluate(`window.__savedModelForm === ${SHADOW}.querySelector('.extra-platform-form')`), true);
+  assert.equal(await b.value('[name="presetContextWindow"][data-model-id="deepseek-v4-pro"]', "value"), "256");
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.panel-scroll').scrollTop`),
+    await b.client.evaluate('window.__savedModelScroll'));
+  await b.click('.extra-platform-form button[type="submit"]');
+  const [save] = await b.drain();
+  assert.equal(save.type, "extra-platform-save");
+  await manager.savePlatform(save.platform, { requestId: save.requestId });
+  assert.deepEqual(probed, ["deepseek-v4-pro"], "保存不能隐式再检测");
+  await b.update(fixtureData({ extraModels: manager.getViewModel() }));
+  await b.click(".extra-platform-cancel");
+  assert.equal(await b.value('.extra-platform-card [data-model-index="1"] .extra-model-main-status'), "检测失败");
+  assert.equal(await b.value('.extra-platform-card .extra-model-detection-error'), null);
+  await b.click('.extra-platform-edit');
+  assert.match(await b.value('[data-model-index="1"] .extra-model-detection-error'), /连续超时/);
+  assert.match(await b.value('[data-model-index="1"] .extra-model-detection-error'), /原配置保留/);
+  await b.click('.extra-platform-cancel');
+  await b.click(".close-panel");
+  await b.click(".quota-chip");
+  assert.notEqual(await b.value(".extra-platform-card"), null, "重新打开必须仍在模型管理");
+});
+
+
+test("[A UI-02 MOD-03] 模型状态区分手动与部分可用，检测详情只在设置中显示", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const manager = new ExtraModelManager({ dataDir: b.directory });
+  const view = await manager.initialize();
+  const platform = view.platforms.find(item => item.preset === "deepseek");
+  platform.models[0].compatibility = { status: "manual", protocol: "responses" };
+  platform.models[1].compatibility = {
+    status: "verified", protocol: "responses", imageStatus: "inconclusive",
+    warnings: ["图片请求连续超时，暂不可用"],
+    capabilities: { functionTools: "native", reasoning: "native" },
+  };
+  await b.update(fixtureData({ extraModels: view }));
+  await b.click('.quota-chip');
+  await b.click('.extra-models-open');
+  assert.equal(await b.value('[data-model-index="0"] .extra-model-main-status'), "手动配置");
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-main-status'), "部分可用");
+  assert.doesNotMatch(await b.value('.extra-platform-model-status'), /超时|对话和工具/);
+  assert.equal(await b.value('.extra-platform-model-status button'), null);
+  await b.click('.extra-platform-edit');
+  assert.match(await b.value('[data-model-index="0"] .extra-model-status'), /使用你填写的参数/);
+  assert.match(await b.value('[data-model-index="1"] .extra-model-status'), /对话和工具可用/);
+  assert.match(await b.value('[data-model-index="1"] .extra-model-status'), /图片请求连续超时/);
+  assert.equal(await b.client.evaluate(`${SHADOW}.querySelectorAll('.extra-model-detect').length`), 2);
+  const progress = { ...view, modelDetections: [{ requestId: "progress-fixture", status: "loading", platformId: platform.id,
+    modelId: platform.models[1].id, operation: { state: "loading", phase: "detecting", platformId: platform.id,
+    modelId: platform.models[1].id, message: "正在重试图片检测", detail: "第 2 次尝试", step: 2, steps: 8 } }] };
+  await b.client.evaluate(widgetExtraModelsUpdateExpressionJson(JSON.stringify(progress), 910));
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-main-status'), "检测中…");
+  assert.equal(await b.value('[data-model-index="0"] .extra-model-main-status'), "手动配置");
+  assert.match(await b.value('[data-model-index="1"] .extra-model-inline-progress'), /第 2 次尝试/);
+  assert.equal(await b.value('.extra-model-feedback .extra-model-progress'), null);
+  await b.client.evaluate(widgetExtraModelsUpdateExpressionJson(JSON.stringify(view), 911));
+  await b.fill('[name="apiKey"]', 'fixture-key');
+  await b.click('[data-model-index="1"] .extra-model-detect');
+  const [detect] = await b.drain();
+  const result = { requestId: detect.requestId, platformId: platform.id,
+    modelId: platform.models[1].id, status: "passed", warnings: [],
+    model: { ...platform.models[1], compatibility: { status: "verified", protocol: "responses",
+      imageStatus: "supported", capabilities: { reasoning: "native" }, warnings: [] } } };
+  await b.update(fixtureData({ extraModels: { ...view, modelDetections: [result] } }));
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-main-status'), "检测通过");
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-unsaved'), "未保存");
+  assert.deepEqual(await b.drain(), [], "检测完成不得自动触发保存");
+  await b.click('.extra-platform-form button[type="submit"]');
+  const [save] = await b.drain();
+  assert.equal(save.type, "extra-platform-save");
+  await b.update(fixtureData({ extraModels: { ...view, platformSave: { requestId: save.requestId, platformId: platform.id } } }));
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-unsaved'), null);
+});
+
+
+test("[A UI-02 MOD-03] 平台设置和新增平台逐层返回模型列表，再返回首页", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const manager = new ExtraModelManager({ dataDir: b.directory });
+  const view = await manager.initialize();
+  view.platforms.push({ id: "fixture-platform", name: "自定义平台", baseUrl: "https://example.invalid/",
+    apiKey: "", enabled: false, models: [{ id: "fixture-model", displayName: "测试模型",
+      contextWindow: 128000, compatibility: { status: "pending" } }] });
+  await b.update(fixtureData({ extraModels: view }));
+  await b.click('.quota-chip');
+  await b.click('.extra-models-open');
+  for (const enter of [
+    '.extra-platform-edit[data-platform-id="d33f5ee0-0000-4000-8000-000000000001"]',
+    '.extra-platform-edit[data-platform-id="fixture-platform"]',
+    '.extra-platform-add',
+  ]) {
+    await b.click(enter);
+    assert.notEqual(await b.value('.extra-platform-form'), null);
+    assert.equal(await b.value('.extra-models-back', 'ariaLabel'), "返回模型管理");
+    await b.click('.extra-models-back');
+    assert.equal(await b.value('.extra-platform-form'), null);
+    assert.notEqual(await b.value('.extra-platform-list'), null, "退出表单不能跳过模型列表");
+    assert.equal(await b.value('.extra-models-back', 'ariaLabel'), "返回账号额度");
+    assert.deepEqual(await b.drain(), [], "返回不能自动保存或触发检测");
+  }
+  await b.click('.extra-models-back');
+  assert.equal(await b.value('.extra-platform-list'), null);
+  assert.notEqual(await b.value('.extra-models-open'), null);
+});
+
+for (const destination of ["home", "other-platform"]) {
+  test(`[A UI-02 MOD-03] 检测退出到 ${destination} 后结果仍回填对应草稿，保存保留检测参数`, { timeout: 30_000 }, async t => {
+    const b = await startBrowser(t);
+    let finishProbe;
+    const manager = new ExtraModelManager({ dataDir: b.directory,
+      probeModel: async ({ onProgress }) => {
+        onProgress({ stage: "image", message: "图片检测，第 2 次尝试", current: 4, total: 8, retry: true });
+        return new Promise(resolve => { finishProbe = resolve; });
+      },
+    });
+    await manager.initialize();
+    const preset = manager.getViewModel().platforms.find(item => item.preset === "deepseek");
+    await manager.savePlatform({ ...preset, apiKey: "fixture-key", enabled: false });
+    await manager.savePlatform({ name: "另一平台", baseUrl: "https://example.invalid/", apiKey: "other-key", enabled: false,
+      models: [{ id: preset.models[0].id, displayName: "同名模型", contextWindow: 64000 }] });
+    const other = manager.getViewModel().platforms.find(item => item.name === "另一平台");
+    await b.update(fixtureData({ extraModels: manager.getViewModel() }));
+    await b.click('.quota-chip');
+    await b.click('.extra-models-open');
+    const openPreset = `.extra-platform-edit[data-platform-id="${preset.id}"]`;
+    await b.click(openPreset);
+    await b.fill(`[name="presetContextWindow"][data-model-id="${preset.models[0].id}"]`, '256');
+    await b.click('[data-model-index="0"] .extra-model-detect');
+    const [action] = await b.drain();
+    const pending = manager.detectModel(action.platform, action.modelId, { requestId: action.requestId });
+    await b.update(fixtureData({ extraModels: manager.getViewModel() }));
+    assert.match(await b.value('[data-model-index="0"] .extra-model-detect + .extra-model-inline-progress'), /第 2 次尝试/);
+    assert.equal(await b.value('[data-model-index="1"] .extra-model-inline-progress'), "");
+    assert.equal(await b.value('.extra-model-feedback .extra-model-progress'), null);
+    await b.click('.extra-models-back');
+    assert.equal(await b.value(openPreset, 'disabled'), false, "检测期间必须允许重新进入设置");
+    await b.click(openPreset);
+    assert.equal(await b.value('[data-model-index="0"] .extra-model-main-status'), "检测中…");
+    assert.equal(await b.value('[data-model-index="0"] .extra-model-detect', 'disabled'), false);
+    assert.match(await b.value('[data-model-index="0"] .extra-model-inline-progress'), /第 2 次尝试/);
+    await b.click('.extra-models-back');
+    if (destination === "home") await b.click('.extra-models-back');
+    else await b.click(`.extra-platform-edit[data-platform-id="${other.id}"]`);
+    finishProbe({ status: "verified", protocol: "responses", historyMode: "reasoning-text-only",
+      toolContinuation: true, supportsImage: true, imageStatus: "supported", reasoningEfforts: ["low", "high"],
+      capabilities: { transport: { responses: "native" }, streaming: "native", functionTools: "native",
+        customTools: "bridged", namespaceTools: "bridged", reasoning: "native", reasoningToolChoice: "auto-only" },
+      warnings: [], codexConformance: "passed", probeVersion: MODEL_CAPABILITY_PROBE_VERSION, checkedAt: Date.now() });
+    await pending;
+    // Full updates while on the homepage must consume results too, not only the model delta path.
+    await b.update(fixtureData({ extraModels: manager.getViewModel() }));
+    assert.deepEqual(await b.drain(), [], "后台检测完成不能自动保存");
+    if (destination === "home") await b.click('.extra-models-open');
+    else {
+      assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.extra-platform-form').dataset.platformId`), other.id);
+      assert.notEqual(await b.value('.extra-model-main-status'), "检测通过", "同名模型不能收到其他平台的检测结果");
+      await b.click('.extra-models-back');
+    }
+    assert.equal(await b.value(`.extra-platform-card[data-platform-id="${preset.id}"] [data-model-index="0"] .extra-model-main-status`), "检测通过");
+    assert.equal(await b.value(`.extra-platform-card[data-platform-id="${preset.id}"] .extra-model-unsaved`), "未保存");
+    const layout = await b.client.evaluate(`(() => {
+      const row = ${SHADOW}.querySelector('.extra-platform-card[data-platform-id="${preset.id}"] [data-model-index="0"]');
+      const [heading, parameters] = row.children;
+      const unsaved = row.querySelector('.extra-model-unsaved');
+      return { gap: parameters.getBoundingClientRect().top - heading.getBoundingClientRect().bottom,
+        color: getComputedStyle(unsaved).color, labelColor: getComputedStyle(heading.querySelector('.model-label')).color,
+        background: getComputedStyle(unsaved).backgroundColor };
+    })()`);
+    assert.ok(layout.gap >= 8, "状态行与参数区须留出可见间距，不能紧贴或重叠");
+    assert.notEqual(layout.color, layout.labelColor, "未保存必须与次要文字区分");
+    assert.notEqual(layout.background, "rgba(0, 0, 0, 0)", "未保存应有显眼的标签背景");
+    await b.click(openPreset);
+    assert.equal(await b.value('[data-model-index="0"] .extra-model-main-status'), "检测通过");
+    assert.equal(await b.value('[data-model-index="0"] .extra-model-unsaved'), "未保存");
+    assert.equal(await b.value(`[name="presetContextWindow"][data-model-id="${preset.models[0].id}"]`, 'value'), '256');
+    await b.click('.extra-platform-form button[type="submit"]');
+    const [save] = await b.drain();
+    assert.equal(save.type, "extra-platform-save");
+    assert.equal(save.platform.models[0].compatibility.status, "verified");
+    assert.equal(save.platform.models[0].compatibility.targetFingerprint,
+      manager.getViewModel().modelDetections.find(item => item.requestId === action.requestId).model.compatibility.targetFingerprint);
+    await manager.savePlatform(save.platform, { requestId: save.requestId });
+    assert.equal(manager.getViewModel().platforms.find(item => item.id === preset.id).models[0].compatibility.status, "verified");
+    await b.update(fixtureData({ extraModels: manager.getViewModel() }));
+    assert.equal(await b.value('.extra-model-unsaved'), null);
+    await b.click('.extra-models-back');
+    await b.click(openPreset);
+    assert.equal(await b.value('[data-model-index="0"] .extra-model-main-status'), "检测通过");
+    assert.equal(await b.value('.extra-model-unsaved'), null);
+  });
+}
+
+test("[A UI-02 MOD-03] 多模型并行进度独立，迟到结果不覆盖手动参数，保存确认不吞掉新结果", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const manager = new ExtraModelManager({ dataDir: b.directory });
+  await manager.initialize();
+  const preset = manager.getViewModel().platforms.find(item => item.preset === 'deepseek');
+  await manager.savePlatform({ ...preset, apiKey: 'fixture-key', enabled: false });
+  const view = manager.getViewModel();
+  const platform = view.platforms.find(item => item.id === preset.id);
+  await b.update(fixtureData({ extraModels: view }));
+  await b.click('.quota-chip');
+  await b.click('.extra-models-open');
+  await b.click(`.extra-platform-edit[data-platform-id="${platform.id}"]`);
+  await b.click('[data-model-index="0"] .extra-model-detect');
+  await b.click('[data-model-index="1"] .extra-model-detect');
+  const requests = await b.drain();
+  assert.equal(requests.length, 2, '第二个检测不能等待第一个结束');
+  assert.ok(requests.every(item => item.type === 'extra-model-detect'));
+  const loading = requests.map((request, index) => ({ requestId: request.requestId, platformId: platform.id,
+    modelId: request.modelId, status: 'loading', operation: { state: 'loading', phase: 'detecting',
+      modelId: request.modelId, platformId: platform.id, step: index + 2, steps: 8,
+      message: `model ${index}`, detail: `independent ${index}` } }));
+  await b.update(fixtureData({ extraModels: { ...view, modelDetections: loading } }));
+  assert.match(await b.value('[data-model-index="0"] .extra-model-inline-progress'), /independent 0/);
+  assert.match(await b.value('[data-model-index="1"] .extra-model-inline-progress'), /independent 1/);
+  assert.equal(await b.value('.extra-platform-form button[type="submit"]', 'disabled'), false);
+  // A local edit made after the request must win over its eventual detection result.
+  await b.client.evaluate(`${SHADOW}.querySelector('[data-model-index="0"] .extra-model-settings').open = true`);
+  if (!await b.value('[data-model-index="0"] [name="supportsReasoning"]', 'checked')) {
+    await b.click('[data-model-index="0"] [name="supportsReasoning"]');
+  }
+  await b.fill('[data-model-index="0"] [name="reasoningEfforts"]', 'low');
+  const makeResult = (index) => ({ ...loading[index], status: 'passed', operation: null, warnings: [],
+    model: { ...platform.models[index], reasoningEfforts: ['high'], defaultReasoningEffort: 'high',
+      compatibility: { status: 'verified', protocol: 'responses', imageStatus: 'supported',
+        capabilities: { reasoning: 'native' }, warnings: [] } } });
+  const changed = { ...view, modelDetections: [makeResult(0), loading[1]] };
+  await b.update(fixtureData({ extraModels: changed }));
+  assert.equal(await b.value('[data-model-index="0"] [name="reasoningEfforts"]', 'value'), 'low');
+  assert.match(await b.value('[data-model-index="1"] .extra-model-inline-progress'), /independent 1/);
+  await b.click('.extra-platform-form button[type="submit"]');
+  const [save] = await b.drain();
+  assert.equal(save.type, 'extra-platform-save');
+  // The second model completes between Save being sent and its acknowledgement.
+  await b.update(fixtureData({ extraModels: { ...view, modelDetections: [makeResult(0), makeResult(1)] } }));
+  await b.update(fixtureData({ extraModels: { ...view, modelDetections: [makeResult(0), makeResult(1)],
+    platformSave: { requestId: save.requestId, platformId: platform.id } } }));
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-main-status'), '检测通过');
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-unsaved'), '未保存', '旧保存确认不能清除新检测结果的未保存状态');
+  await b.click('.extra-platform-form button[type="submit"]');
+  const [latest] = await b.drain();
+  assert.deepEqual(latest.platform.models[0].reasoningEfforts, ['low']);
+  assert.deepEqual(latest.platform.models[1].reasoningEfforts, ['high']);
+  assert.equal(await b.value('[data-model-index="0"] .extra-model-inline-progress'), '');
+  assert.equal(await b.value('[data-model-index="1"] .extra-model-inline-progress'), '');
+});
+
+test("[A UI-02] 标题与返回状态关闭按钮固定在滚动内容之外", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const data = fixtureData();
+  data.accounts = Array.from({ length: 12 }, (_, index) => ({ ...data.accounts[0], id: `account-${index}` }));
+  data.extraModels.platforms = Array.from({ length: 12 }, (_, index) => ({
+    id: `platform-${index}`, name: `平台 ${index}`, enabled: false, baseUrl: 'https://example.invalid/',
+    models: [{ id: `model-${index}`, displayName: `模型 ${index}`, compatibility: { status: 'pending' } }],
+  }));
+  await b.update(data);
+  await b.click('.quota-chip');
+  for (const page of ['accounts', 'models']) {
+    if (page === 'models') await b.click('.extra-models-open');
+    const before = await b.client.evaluate(`(() => {
+      const panel=${SHADOW}.querySelector('.quota-popover');
+      const head=panel.querySelector(':scope > .panel-head');
+      const scroller=panel.querySelector('.panel-scroll');
+      return {headTop:head.getBoundingClientRect().top, headBottom:head.getBoundingClientRect().bottom,
+        bodyTop:scroller.getBoundingClientRect().top, height:panel.getBoundingClientRect().height};
+    })()`);
+    assert.ok(before.headBottom <= before.bodyTop + 1, '标题独立占位，不遮挡正文');
+    await b.client.evaluate(`${SHADOW}.querySelector('.panel-scroll').scrollTop = 100000`);
+    const after = await b.client.evaluate(`(() => {
+      const panel=${SHADOW}.querySelector('.quota-popover');
+      const head=panel.querySelector(':scope > .panel-head');
+      return {headTop:head.getBoundingClientRect().top, height:panel.getBoundingClientRect().height,
+        scrollTop:panel.querySelector('.panel-scroll').scrollTop,
+        controls:head.contains(panel.querySelector('.close-panel')) && head.contains(panel.querySelector('.host-health-status'))};
+    })()`);
+    assert.ok(after.scrollTop > 0, '必须实际产生正文滚动');
+    assert.equal(after.headTop, before.headTop);
+    assert.equal(after.height, before.height, '固定标题不能放大外层窗口');
+    assert.equal(after.controls, true);
+  }
+  await b.click('.extra-models-back');
+  assert.notEqual(await b.value('.accounts-head'), null, '滚动到底后仍能直接返回');
+  await b.click('.close-panel');
+  assert.match(await b.value('.quota-wrap', 'className'), /is-dismissed/);
 });

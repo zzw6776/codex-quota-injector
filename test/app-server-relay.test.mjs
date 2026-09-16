@@ -582,7 +582,7 @@ test("app-server relay 端到端保留原生请求并只改写扩展模型相关
   assert.equal("summary" in turnRequest.params, false);
   assert.equal("serviceTier" in turnRequest.params, false);
   assert.equal(output.find((message) => message.id === 5).error.code, -32602);
-  assert.match(output.find((message) => message.id === 5).error.message, /自动检测结果不支持图片输入/);
+  assert.match(output.find((message) => message.id === 5).error.message, /当前配置未启用图片输入/);
 
   const events = (await readFile(usagePath, "utf8")).trim()
     .split(/\r?\n/).map((line) => JSON.parse(line));
@@ -594,7 +594,7 @@ test("app-server relay 端到端保留原生请求并只改写扩展模型相关
     event.status === "completed" && event.model === "custom-text"));
 });
 
-test("模型管理 DeepSeek 预设在 Router 后保持供应商并隔离上游凭据", async (t) => {
+for (const compatibilityStatus of ["verified", "manual"]) test(`模型管理 ${compatibilityStatus} 配置在 Relay 后保持图片和供应商行为`, async (t) => {
   const directory = await useTempDir(t, "codex-relay-router-");
   const fakeCodexPath = join(directory, "fake-codex.mjs");
   const upstreamExecutable = join(
@@ -619,11 +619,11 @@ test("模型管理 DeepSeek 预设在 Router 后保持供应商并隔离上游�
         id: "deepseek-flash",
         displayName: "DeepSeek Flash",
         compatibility: {
-          status: "verified",
+          status: compatibilityStatus,
           protocol: "responses",
           historyMode: "responses-full",
           supportsImage: true,
-          probeVersion: MODEL_CAPABILITY_PROBE_VERSION,
+          probeVersion: compatibilityStatus === "verified" ? MODEL_CAPABILITY_PROBE_VERSION : 0,
           capabilities: {
             customTools: "bridged",
             namespaceTools: "bridged",

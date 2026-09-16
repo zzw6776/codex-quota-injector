@@ -250,7 +250,9 @@ export async function restoreWindowsRuntimeConfiguration(configuration) {
   if (currentHash != null && currentHash === configuration.restoredSha256) {
     restored = current;
     externalChangesPreserved = configuration.externalChangesPreserved === true;
-  } else if (currentHash != null && !allowedHashes.has(currentHash)) {
+  } else if (currentHash != null && (!allowedHashes.has(currentHash) ||
+    currentHash === configuration.lastAppliedSha256 &&
+      configuration.externalChangesPreserved === true)) {
     if (!configuration.mutationStarted ||
       parseConfigRuntime(current.toString("utf8")) !== configuration.activeRuntime) {
       throw new Error("Codex 运行方式被外部修改或不属于本次测试，拒绝覆盖");

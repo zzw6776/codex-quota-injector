@@ -17,7 +17,7 @@ import {
 } from "./model-capability-probe.mjs";
 import { defaultAccountDataDir } from "./platform.mjs";
 
-const STORE_VERSION = 14;
+const STORE_VERSION = 16;
 const SETTINGS_FILE = "extra-model-settings.json";
 const RUNTIME_CATALOG_FILE = "runtime-model-catalog-extra.json";
 const RUNTIME_SETTINGS_FILE = "runtime-extra-model-settings.json";
@@ -55,6 +55,9 @@ export class ExtraModelManager {
     this.modelDiscovery = null;
     this.modelDiscoveryRevision = 0;
     this.operation = null;
+    this.modelDetections = new Map();
+    this.settingsWrite = Promise.resolve();
+    this.platformSave = null;
     this.deepSeekBalance = null;
     this.deepSeekBalanceUpdatedAt = null;
     this.deepSeekBalanceError = null;
@@ -83,7 +86,11 @@ export class ExtraModelManager {
       settingsPath: this.settingsPath,
       platforms: this.settings.platforms.map((platform) => ({
         ...platform,
-        models: platform.models.map(cloneModel),
+        models: platform.models.map(model => ({ ...cloneModel(model),
+          lastDetection: this.settings.detectionReports?.find(report =>
+            report.platformId === platform.id &&
+            report.targetFingerprint === compatibilityTargetFingerprint(platform, model)) ?? null,
+        })),
       })),
       message: this.message,
       messageState: this.messageState,
@@ -96,6 +103,8 @@ export class ExtraModelManager {
           }
         : null,
       operation: this.operation ? { ...this.operation } : null,
+      modelDetections: [...this.modelDetections.values()],
+      platformSave: this.platformSave,
       deepSeekBalance: {
         balance: this.deepSeekBalance,
         updatedAt: this.deepSeekBalanceUpdatedAt,
@@ -128,8 +137,12 @@ export class ExtraModelManager {
     return this.getViewModel();
   }
 
-  async savePlatform(input, { reservedModelIds = [], forceProbe = false } = {}) {
-    let platform = normalizePlatformInput(input);
+  savePlatform(input, options = {}) {
+    return this.#withSettingsWrite(() => this.#savePlatform(input, options));
+  }
+
+  async #savePlatform(input, { reservedModelIds = [], requestId = null } = {}) {
+    const platform = normalizePlatformInput(input);
     const currentIndex = platform.id
       ? this.settings.platforms.findIndex((item) => item.id === platform.id)
       : -1;
@@ -138,9 +151,6 @@ export class ExtraModelManager {
       ...platform,
       id: platform.id || randomUUID(),
     };
-    if (normalized.preset === "deepseek" && normalized.enabled) {
-      normalized = await this.#refreshDeepSeekModels(normalized);
-    }
     const reserved = new Set(reservedModelIds);
     for (const model of normalized.models) {
       if (normalized.enabled && model.selected !== false && reserved.has(model.id)) {
@@ -151,32 +161,106 @@ export class ExtraModelManager {
     if (currentIndex >= 0) candidatePlatforms[currentIndex] = normalized;
     else candidatePlatforms.push(normalized);
     assertUniqueModelIds(candidatePlatforms);
-    normalized = await this.#detectCapabilities(normalized, {
-      forceProbe,
-      shouldProbe: normalized.enabled,
+    normalized.models = normalized.models.map(model => {
+      if (model.compatibility.status === "verified" &&
+        !isCurrentDetection(model.compatibility, compatibilityTargetFingerprint(normalized, model))) {
+        return { ...model, compatibility: normalizeCompatibility({ ...model.compatibility,
+          status: "manual", checkedAt: null, probeVersion: 0, targetFingerprint: null,
+          codexConformance: "inconclusive" }) };
+      }
+      return model;
     });
     const nextPlatforms = this.settings.platforms.map((item) => clonePlatform(item));
     if (currentIndex >= 0) nextPlatforms[currentIndex] = normalized;
     else nextPlatforms.push(normalized);
-    await this.#replaceSettings(nextPlatforms);
+    await this.#replaceSettings(nextPlatforms, currentIndex < 0 ? normalized : null);
+    this.platformSave = { requestId, platformId: normalized.id };
     this.pendingRestart = true;
     this.message = normalized.enabled
-      ? `${normalized.name} 已完成兼容检测并保存，等待重启 Codex 后生效`
+      ? `${normalized.name} 配置已保存，等待重启 Codex 后生效；保存不会执行检测`
       : `${normalized.name} 已保存为停用状态，等待重启 Codex 后生效`;
     this.messageState = "success";
     this.#setOperation(null);
     return this.getViewModel();
   }
 
-  async redetectPlatform(id, { reservedModelIds = [] } = {}) {
-    const platformId = String(id ?? "").trim();
-    const platform = this.settings.platforms.find((item) => item.id === platformId);
-    if (!platform) throw new Error("要重新检测的平台已不存在，请刷新后重试");
-    if (!platform.apiKey) throw new Error("重新检测前必须填写 API Key");
-    return this.savePlatform(clonePlatform(platform), {
-      reservedModelIds,
-      forceProbe: true,
-    });
+  async detectModel(input, modelId, { requestId = randomUUID() } = {}) {
+    const platform = normalizePlatformInput({ ...input, enabled: false,
+      models: (input?.models ?? []).filter(model => model.id === modelId) });
+    const model = platform.models.find(item => item.id === modelId);
+    if (!model) throw new Error("要检测的模型不存在");
+    if (!platform.apiKey) throw new Error("检测前必须填写 API Key");
+    const targetFingerprint = compatibilityTargetFingerprint(platform, model);
+    const key = JSON.stringify([platform.id, modelId]);
+    const detection = { requestId, platformId: platform.id, modelId, status: "loading", operation: null };
+    this.modelDetections.set(key, detection);
+    let stage = "starting";
+    let requestCount = 0;
+    const logDiagnostic = event => {
+      try {
+        console.log("[model-probe]", { ...event, requestId, platformId: platform.id, modelId,
+          probeVersion: MODEL_CAPABILITY_PROBE_VERSION });
+      } catch { /* A log sink failure must not interrupt detection or saving. */ }
+    };
+    logDiagnostic({ event: "detection-start", startedAt: this.now() });
+    const progress = detail => {
+      if (this.modelDetections.get(key) !== detection) return;
+      stage = detail?.stage ?? stage;
+      detection.operation = { state: "loading", phase: "detecting", platformId: platform.id,
+        modelId, current: 1, total: 1, message: `正在检测 ${model.displayName}`,
+        detail: detail?.message, step: detail?.current, steps: detail?.total,
+        probeStage: stage, retry: detail?.retry === true };
+      this.#notifyChange();
+    };
+    progress();
+    let result;
+    try {
+      const detected = await this.probeModel({ baseUrl: platform.baseUrl, apiKey: platform.apiKey,
+        modelId, fetchImpl: this.fetchImpl, now: this.now, onProgress: progress,
+        onDiagnostic: event => {
+          if (event.event === "request-start") requestCount += 1;
+          logDiagnostic(event);
+        } });
+      const reasoningEfforts = normalizeDetectedReasoningEfforts(detected.reasoningEfforts);
+      result = { status: "passed", message: "检测完成，结果已填入；点击保存后应用",
+        model: { ...model, reasoningEfforts,
+          defaultReasoningEffort: selectDetectedDefaultReasoningEffort(reasoningEfforts, model.defaultReasoningEffort),
+          compatibility: normalizeCompatibility({ ...detected, targetFingerprint }) } };
+    } catch (error) {
+      result = { status: "failed", message: redactSecret(error.message, platform.apiKey) };
+    }
+    const compatibility = result.model?.compatibility;
+    const report = { platformId: platform.id, modelId, targetFingerprint, requestId,
+      probeVersion: MODEL_CAPABILITY_PROBE_VERSION, requestCount,
+      status: result.status, message: result.message, stage, checkedAt: this.now(),
+      warnings: compatibility?.warnings ?? [],
+      image: compatibility ? { status: compatibility.imageStatus, supportsImage: compatibility.supportsImage,
+        protocol: compatibility.routes?.imageInput ?? compatibility.protocol, detail: compatibility.imageDetail } : null };
+    logDiagnostic({ event: "detection-end", ...report });
+    try {
+      await this.#withSettingsWrite(async () => {
+        if (this.modelDetections.get(key) !== detection) return;
+        if (!report.platformId) {
+          const matches = this.settings.platforms.filter(item => item.models.some(candidate =>
+            candidate.id === modelId && compatibilityTargetFingerprint(item, candidate) === targetFingerprint));
+          if (matches.length === 1) report.platformId = matches[0].id;
+        }
+        const next = { ...this.settings, detectionReports: [
+          ...(this.settings.detectionReports ?? []).filter(item =>
+            !(item.platformId === report.platformId && item.modelId === modelId)), report,
+        ].slice(-100) };
+        await this.#persist(next);
+        this.settings = next;
+      });
+    } catch (error) {
+      result = { status: "failed", message: `检测结果保存失败：${redactSecret(error.message, platform.apiKey)}` };
+      logDiagnostic({ event: "report-save-failed", error: result.message });
+    }
+    if (this.modelDetections.get(key) === detection) {
+      this.modelDetections.set(key, { ...report, ...result, requestId, operation: null });
+      this.#notifyChange();
+    }
+    return this.getViewModel();
   }
 
   async refreshDeepSeekBalance() {
@@ -215,7 +299,11 @@ export class ExtraModelManager {
     return this.getViewModel();
   }
 
-  async removePlatform(id) {
+  removePlatform(id) {
+    return this.#withSettingsWrite(() => this.#removePlatform(id));
+  }
+
+  async #removePlatform(id) {
     const platformId = String(id ?? "").trim();
     const removed = this.settings.platforms.find((item) => item.id === platformId);
     if (!removed) throw new Error("要删除的平台已不存在，请刷新后重试");
@@ -303,7 +391,13 @@ export class ExtraModelManager {
     this.changeListeners.clear();
   }
 
-  async #replaceSettings(platforms) {
+  #withSettingsWrite(action) {
+    const task = this.settingsWrite.then(action);
+    this.settingsWrite = task.catch(() => {});
+    return task;
+  }
+
+  async #replaceSettings(platforms, assignedPlatform = null) {
     this.#setOperation({
       state: "loading",
       phase: "saving",
@@ -311,8 +405,13 @@ export class ExtraModelManager {
     });
     const previous = this.settings;
     const next = {
+      ...previous,
       generation: previous.generation + 1,
       platforms,
+      detectionReports: (previous.detectionReports ?? []).map(report =>
+        assignedPlatform && !report.platformId && assignedPlatform.models.some(model =>
+          compatibilityTargetFingerprint(assignedPlatform, model) === report.targetFingerprint)
+          ? { ...report, platformId: assignedPlatform.id } : report),
     };
     try {
       await this.#persist(next);
@@ -324,75 +423,6 @@ export class ExtraModelManager {
       this.settings = previous;
       throw error;
     }
-  }
-
-  async #detectCapabilities(platform, { forceProbe, shouldProbe }) {
-    if (!shouldProbe) return platform;
-    const models = [];
-    const selectedModels = platform.models.filter((model) => model.selected !== false);
-    let selectedIndex = 0;
-    for (const model of platform.models) {
-      if (model.selected === false) {
-        models.push(model);
-        continue;
-      }
-      selectedIndex += 1;
-      this.#setOperation({
-        state: "loading",
-        phase: "detecting",
-        platformId: platform.id,
-        current: selectedIndex,
-        total: selectedModels.length,
-        modelId: model.id,
-        message: `正在检测 ${model.displayName || model.id}（${selectedIndex}/${selectedModels.length}）`,
-      });
-      const targetFingerprint = compatibilityTargetFingerprint(platform, model);
-      if (!forceProbe && isCurrentDetection(model.compatibility, targetFingerprint)) {
-        models.push(model);
-        continue;
-      }
-      let detected;
-      try {
-        detected = await this.probeModel({
-          baseUrl: platform.baseUrl,
-          apiKey: platform.apiKey,
-          modelId: model.id,
-          fetchImpl: this.fetchImpl,
-          now: this.now,
-          onProgress: (progress) => {
-            this.#setOperation({
-              state: "loading",
-              phase: "detecting",
-              platformId: platform.id,
-              current: selectedIndex,
-              total: selectedModels.length,
-              modelId: model.id,
-              message: `正在检测 ${model.displayName || model.id}（${selectedIndex}/${selectedModels.length}）`,
-              detail: progress?.message ?? "正在检测模型能力",
-              step: progress?.current,
-              steps: progress?.total,
-              probeStage: progress?.stage,
-              retry: progress?.retry === true,
-            });
-          },
-        });
-      } catch (error) {
-        throw new Error(`${model.displayName || model.id} 自动检测失败：${error.message}`);
-      }
-      models.push({
-        ...model,
-        reasoningEfforts: normalizeDetectedReasoningEfforts(detected.reasoningEfforts),
-        defaultReasoningEffort: selectDetectedDefaultReasoningEffort(
-          normalizeDetectedReasoningEfforts(detected.reasoningEfforts),
-          model.defaultReasoningEffort,
-        ),
-        compatibility: normalizeCompatibility({
-          ...detected,
-          targetFingerprint,
-        }),
-      });
-    }
-    return { ...platform, models };
   }
 
   async #refreshDeepSeekModels(platform) {
@@ -464,6 +494,7 @@ export class ExtraModelManager {
       version: STORE_VERSION,
       generation: settings.generation,
       platforms: settings.platforms,
+      detectionReports: settings.detectionReports ?? [],
     });
   }
 }
@@ -483,6 +514,8 @@ function normalizeSettings(value) {
       ? value.generation
       : 0,
     platforms,
+    detectionReports: Array.isArray(value?.detectionReports) ? value.detectionReports.filter(report =>
+      report && ["passed", "failed"].includes(report.status) && typeof report.targetFingerprint === "string") : [],
   };
 }
 
@@ -633,7 +666,8 @@ function normalizeBaseUrl(value) {
 
 function createCatalogModel(platform, model, priority) {
   const contextWindow = model.contextWindow;
-  const currentProbe = model.compatibility?.probeVersion === MODEL_CAPABILITY_PROBE_VERSION &&
+  const currentProbe = model.compatibility?.status === "manual" ||
+    model.compatibility?.probeVersion === MODEL_CAPABILITY_PROBE_VERSION &&
     model.compatibility?.status === "verified";
   const currentImageStatus = currentProbe
     ? model.compatibility.imageStatus
@@ -729,7 +763,7 @@ function cloneModel(model) {
 }
 
 function normalizeCompatibility(value, legacyModel = null) {
-  let status = ["pending", "legacy", "verified"].includes(value?.status)
+  let status = ["pending", "legacy", "verified", "manual"].includes(value?.status)
     ? value.status
     : legacyModel && (Object.hasOwn(legacyModel, "supportsImage") || Object.hasOwn(legacyModel, "chatCompatibility"))
       ? "legacy"
@@ -810,6 +844,7 @@ function normalizeCompatibility(value, legacyModel = null) {
     supportsImage,
     imageStatus,
     imageDetail,
+    warnings: Array.isArray(value?.warnings) ? value.warnings.filter(item => typeof item === "string") : [],
     capabilities,
     codexConformance,
     checkedAt,

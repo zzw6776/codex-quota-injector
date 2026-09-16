@@ -1392,7 +1392,7 @@ function normalizeModel(value) {
   const compatibility = value?.compatibility && typeof value.compatibility === "object"
     ? value.compatibility
     : null;
-  const currentProbe = compatibility?.status === "verified" &&
+  const currentProbe = compatibility?.status === "manual" || compatibility?.status === "verified" &&
     compatibility?.probeVersion === MODEL_CAPABILITY_PROBE_VERSION;
   const protocol = ["responses", "chat"].includes(compatibility?.protocol)
     ? compatibility.protocol
@@ -1447,7 +1447,7 @@ function inferOfficialAuthMode(headers) {
 
 function prepareCustomRequest(body, target) {
   if (containsImageInput(body.input) && !target.supportsImage) {
-    throw httpError(400, `${target.displayName} 的自动检测结果不支持图片输入`);
+    throw httpError(400, `${target.displayName} 的当前配置未启用图片输入`);
   }
   const next = structuredClone(body);
   if (target.canonicalModelId) next.model = target.canonicalModelId;

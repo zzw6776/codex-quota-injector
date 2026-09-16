@@ -6,10 +6,11 @@ import {
 } from "./responses-tool-adapter.mjs";
 import { normalizeToolParametersSchema } from "./tool-schema-compat.mjs";
 
-export const MODEL_CAPABILITY_PROBE_VERSION = 13;
-export const MODEL_CAPABILITY_PROBE_TIMEOUT_MS = 30_000;
+export const MODEL_CAPABILITY_PROBE_VERSION = 15;
+export const MODEL_CAPABILITY_PROBE_TIMEOUT_MS = 90_000;
 
 const CONTINUATION_OUTPUT_TOKENS = 1_024;
+const IMAGE_OUTPUT_TOKENS = 256;
 const PROBE_TOOL_NAME = "codex_quota_capability_probe";
 const PROBE_CUSTOM_TOOL_NAME = "codex_quota_custom_probe";
 const PROBE_APPLY_PATCH_TOOL_NAME = "apply_patch";
@@ -52,26 +53,79 @@ export async function probeModelCompatibility({
   modelId,
   fetchImpl = fetch,
   timeoutMs = MODEL_CAPABILITY_PROBE_TIMEOUT_MS,
+  retryDelayMs = 500,
   now = Date.now,
   imageChallenge = null,
   onProgress = null,
+  onDiagnostic = null,
 } = {}) {
   const target = normalizeTarget({ baseUrl, apiKey, modelId });
   const reportProgress = createProbeProgressReporter(onProgress);
-  const request = (path, body) => postJson({
-    url: new URL(path, target.baseUrl),
-    apiKey: target.apiKey,
-    body,
-    fetchImpl,
-    timeoutMs,
+  const warnings = [];
+  let requestSequence = 0;
+  const diagnostic = record => {
+    if (typeof onDiagnostic !== "function") return;
+    try {
+      const safe = JSON.stringify(record, (_key, value) => typeof value === "string"
+        ? value.replaceAll(target.apiKey, "[凭据已隐藏]")
+          .replace(/data:image\/[^\s"<>]+/gi, "[图片内容已隐藏]").slice(0, 512)
+        : value);
+      onDiagnostic(JSON.parse(safe));
+    } catch { /* Diagnostics must not change probe results. */ }
+  };
+  const withRetry = async (send) => {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const response = await send(attempt);
+      if (response.ok || !isRetryableProbeFailure(response)) return response;
+      if (attempt === 3) {
+        warnings.push(`${reportProgress.stage()}：连续 3 次请求失败，暂不可用（${response.message}）`);
+        return { ...response, retryExhausted: true };
+      }
+      reportProgress.retry(`请求失败：${response.message}；正在重试（${attempt + 1}/3，每次最多 ${Math.ceil(timeoutMs / 1000)} 秒）`);
+      diagnostic({ event: "request-retry", sequence: requestSequence, stage: reportProgress.stage(),
+        nextAttempt: attempt + 1, delayMs: attempt * Math.max(0, retryDelayMs), error: response.message });
+      await new Promise(resolve => setTimeout(resolve, attempt * Math.max(0, retryDelayMs)));
+    }
+  };
+  const send = (path, body, stream) => withRetry(async attempt => {
+    const started = Date.now();
+    const info = { sequence: ++requestSequence, stage: reportProgress.stage(),
+      protocol: path === "responses" ? "responses" : "chat", stream, attempt,
+      startedAt: new Date(started).toISOString(), timeoutMs,
+      outputBudget: body.max_output_tokens ?? body.max_tokens ?? null,
+      reasoningEffort: body.reasoning?.effort ?? body.reasoning_effort ?? null,
+      thinkingMode: body.thinking?.type ?? "default" };
+    diagnostic({ event: "request-start", ...info });
+    const response = await (stream ? postStream : postJson)({
+      url: new URL(path, target.baseUrl), apiKey: target.apiKey, body, timeoutMs,
+      fetchImpl: async (...args) => {
+        const reply = await fetchImpl(...args);
+        info.headersMs = Date.now() - started;
+        info.httpStatus = reply.status;
+        info.providerRequestId = reply.headers?.get?.("x-request-id") ?? reply.headers?.get?.("request-id") ?? null;
+        info.contentType = reply.headers?.get?.("content-type") ?? null;
+        diagnostic({ event: "response-headers", ...info });
+        return reply;
+      },
+    });
+    if (typeof onDiagnostic === "function") {
+      // Malformed provider output or diagnostic callbacks cannot affect capability decisions.
+      try {
+        diagnostic({ event: "request-end", ...info, elapsedMs: Date.now() - started,
+          httpStatus: info.httpStatus ?? null, ok: response.ok, error: response.message,
+          failurePhase: response.ok ? null : response.status === 0
+            ? info.headersMs == null ? "connection" : "body" : "provider",
+          ...summarizeProbeResponse(response, info.protocol) });
+      } catch {
+        diagnostic({ event: "request-end", ...info, elapsedMs: Date.now() - started,
+          ok: response.ok, error: response.message, summaryUnavailable: true });
+      }
+    }
+    return response;
   });
-  const requestStream = (path, body) => postStream({
-    url: new URL(path, target.baseUrl),
-    apiKey: target.apiKey,
-    body,
-    fetchImpl,
-    timeoutMs,
-  });
+  const request = (path, body) => send(path, body, false);
+  const requestStream = (path, body) => send(path, body, true);
+  const imageDiagnostic = record => diagnostic({ ...record, stage: reportProgress.stage(), sequence: requestSequence });
 
   reportProgress(1, "responses", "正在验证 Responses 连接与工具续接");
   const responses = await runProtocolProbeWithRetry(
@@ -290,9 +344,9 @@ export async function probeModelCompatibility({
       : createImageChallenge;
   reportProgress(7, "image", "正在检测图片理解能力");
   let imageProtocol = protocol;
-  let image = await probeImage(request, target.modelId, protocol, imageChallengeFactory);
-  if (protocol === "responses" && !image.supportsImage) {
-    reportProgress(7, "image-chat-route", "Responses 图片不可用，正在验证 Chat 图片链路");
+  let image = await probeImage(request, target.modelId, protocol, imageChallengeFactory, imageDiagnostic);
+  if (protocol === "responses" && image.supportsImage !== true) {
+    reportProgress(7, "image-chat-route", "Responses 图片未验证通过，正在验证 Chat 图片链路");
     const alternate = await probeAlternateChatImageRoute({
       request,
       requestStream,
@@ -316,6 +370,7 @@ export async function probeModelCompatibility({
         target.modelId,
         "chat",
         imageChallengeFactory,
+        imageDiagnostic,
       );
       if (chatImage.supportsImage) {
         imageProtocol = "chat";
@@ -325,7 +380,12 @@ export async function probeModelCompatibility({
         };
       } else {
         image = {
-          ...image,
+          ...chatImage,
+          // Neither route succeeded. An unfinished route cannot be turned
+          // into confirmed non-support by the other route's rejection.
+          ...(image.status === "inconclusive"
+            ? { supportsImage: null, status: "inconclusive" }
+            : {}),
           detail: [
             image.detail ? `Responses：${image.detail}` : null,
             chatImage.detail ? `Chat：${chatImage.detail}` : null,
@@ -346,6 +406,7 @@ export async function probeModelCompatibility({
     supportsImage: image.supportsImage,
     imageStatus: image.status,
     imageDetail: image.detail,
+    warnings,
     supportsReasoning: reasoning.state === "native",
     reasoningEfforts: reasoning.efforts,
     capabilities: {
@@ -362,7 +423,7 @@ export async function probeModelCompatibility({
       reasoningHistory,
       imageInput: image.supportsImage
         ? imageProtocol === protocol ? "native" : "bridged"
-        : "unsupported",
+        : image.status === "inconclusive" ? "inconclusive" : "unsupported",
       hostedTools: { web_search: effectiveHostedWebSearch },
     },
     codexConformance: "passed",
@@ -686,6 +747,7 @@ async function probeChat(request, modelId) {
 
 async function probeReasoning(request, modelId, protocol, { onEffort = null } = {}) {
   const efforts = [];
+  let inconclusive = false;
   for (const effort of PROBE_REASONING_EFFORTS) {
     onEffort?.(effort);
     const response = protocol === "responses"
@@ -704,6 +766,7 @@ async function probeReasoning(request, modelId, protocol, { onEffort = null } = 
           stream: false,
         });
     if (!response.ok) {
+      if (response.retryExhausted) { inconclusive = true; continue; }
       if (capabilityFromFailure(response) === "inconclusive") {
         throw probeError(`${effort} 推理强度检测失败`, response);
       }
@@ -712,7 +775,7 @@ async function probeReasoning(request, modelId, protocol, { onEffort = null } = 
     if (hasReasoningEvidence(response.payload, protocol)) efforts.push(effort);
   }
   return {
-    state: efforts.length > 0 ? "native" : "unsupported",
+    state: efforts.length > 0 ? "native" : inconclusive ? "inconclusive" : "unsupported",
     efforts,
   };
 }
@@ -744,6 +807,7 @@ async function probeReasoningToolChoice(request, modelId, protocol, effort) {
     tool_choice: namedChoice,
   });
   if (named.ok && hasProtocolToolCall(named.payload, protocol, PROBE_TOOL_NAME)) return "native";
+  if (named.retryExhausted) return "inconclusive";
   if (!named.ok && !isToolChoiceRejection(named) &&
     capabilityFromFailure(named) === "inconclusive") {
     throw probeError("推理模式工具选择检测失败", named);
@@ -753,6 +817,7 @@ async function probeReasoningToolChoice(request, modelId, protocol, effort) {
     tool_choice: "auto",
   });
   if (!automatic.ok) {
+    if (automatic.retryExhausted) return "inconclusive";
     if (capabilityFromFailure(automatic) === "inconclusive") {
       throw probeError("推理模式自动工具选择检测失败", automatic);
     }
@@ -1016,6 +1081,7 @@ async function probeAlternateChatImageRoute({
     { onRetry },
   );
   if (!chat.ok) {
+    if (chat.failure?.retryExhausted) return { ok: false, failure: chat.failure };
     if (capabilityFromFailure(chat.failure) === "inconclusive") {
       throw probeError("Chat 图片备用链路检测失败", chat.failure);
     }
@@ -1041,6 +1107,9 @@ async function probeAlternateChatImageRoute({
       responsesTools,
     );
   } catch (error) {
+    if (error.probeFailures?.some(failure => failure.retryExhausted)) {
+      return { ok: false, failure: { retryExhausted: true, message: error.message } };
+    }
     if (!canTryAlternateAfterProbeError(error)) throw error;
     return { ok: false, failure: contractFailure(422, error.message) };
   }
@@ -1106,7 +1175,9 @@ async function runProtocolProbeWithRetry(probe, { onRetry = null } = {}) {
 
 function createProbeProgressReporter(onProgress) {
   const notify = typeof onProgress === "function" ? onProgress : null;
-  return (current, stage, message, extra = {}) => {
+  let last = { current: 1, stage: "starting" };
+  const report = (current, stage, message, extra = {}) => {
+    last = { current, stage };
     if (!notify) return;
     try {
       notify({
@@ -1120,9 +1191,13 @@ function createProbeProgressReporter(onProgress) {
       // 展示进度不能中断真实能力检测。
     }
   };
+  report.retry = message => report(last.current, last.stage, message, { retry: true });
+  report.stage = () => last.stage;
+  return report;
 }
 
 function isRetryableProbeFailure(failure) {
+  if (failure?.retryExhausted) return false;
   if (failure?.kind === "contract") return true;
   const status = Number(failure?.status) || 0;
   return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
@@ -1203,15 +1278,16 @@ function hasProtocolToolCall(payload, protocol, name) {
     item?.function?.name === name && item?.id);
 }
 
-async function probeImage(request, modelId, protocol, challengeFactory) {
+async function probeImage(request, modelId, protocol, challengeFactory, onResult) {
   const attempts = [];
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const result = await probeImageOnce(
-      request,
-      modelId,
-      protocol,
-      challengeFactory(),
-    );
+    const challenge = challengeFactory();
+    const result = await probeImageOnce(request, modelId, protocol, challenge);
+    onResult?.({ event: "image-result", protocol, imageAttempt: attempt + 1,
+      expectedAnswer: challenge.expected, status: result.status, detail: result.detail });
+    if (result.status === "inconclusive") {
+      return { supportsImage: null, status: "inconclusive", detail: result.detail };
+    }
     if (result.status === "supported" || result.status === "rejected") {
       return {
         supportsImage: result.status === "supported",
@@ -1236,13 +1312,14 @@ async function probeImage(request, modelId, protocol, challengeFactory) {
 }
 
 async function probeImageOnce(request, modelId, protocol, challenge) {
-  const body = protocol === "chat"
+  const response = protocol === "chat"
     ? await request("chat/completions", {
         model: modelId,
         messages: [{ role: "user", content: [
           { type: "text", text: challenge.prompt },
           { type: "image_url", image_url: { url: challenge.dataUrl } },
         ] }],
+        max_tokens: IMAGE_OUTPUT_TOKENS,
         stream: false,
       })
     : await request("responses", {
@@ -1251,56 +1328,62 @@ async function probeImageOnce(request, modelId, protocol, challenge) {
           { type: "input_text", text: challenge.prompt },
           { type: "input_image", image_url: challenge.dataUrl, detail: "high" },
         ] }],
-        max_output_tokens: 128,
+        max_output_tokens: IMAGE_OUTPUT_TOKENS,
         store: false,
       });
-  let response = body;
-  if (!response.ok && isThinkingModeRejection(response)) {
-    response = protocol === "chat"
-      ? await request("chat/completions", {
-          model: modelId,
-          messages: [{ role: "user", content: [
-            { type: "text", text: challenge.prompt },
-            { type: "image_url", image_url: { url: challenge.dataUrl } },
-          ] }],
-          thinking: { type: "disabled" },
-          max_tokens: 128,
-          stream: false,
-        })
-      : await request("responses", {
-          model: modelId,
-          input: [{ role: "user", content: [
-            { type: "input_text", text: challenge.prompt },
-            { type: "input_image", image_url: challenge.dataUrl, detail: "high" },
-          ] }],
-          reasoning: { effort: "none" },
-          max_output_tokens: 128,
-          store: false,
-        });
-  }
   if (!response.ok) {
     if (isExplicitImageRejection(response)) {
       return { status: "rejected", detail: response.message };
     }
+    if (response.retryExhausted) {
+      return { status: "inconclusive", detail: `图片暂不可用：连续 3 次请求失败（${response.message}），未确认模型不支持图片` };
+    }
     throw new Error(`图片能力检测失败：${response.message}`);
   }
-  const answer = protocol === "chat"
-    ? chatOutputText(response.payload)
-    : responsesOutputText(response.payload);
-  if (matchesImageChallenge(answer, challenge.expected)) {
+  const payload = response.payload;
+  const answer = (protocol === "chat" ? chatOutputText(payload) : responsesOutputText(payload)).trim();
+  const budgetExhausted = protocol === "chat"
+    ? payload?.choices?.[0]?.finish_reason === "length"
+    : payload?.incomplete_details?.reason === "max_output_tokens";
+  const incomplete = budgetExhausted ||
+    (protocol === "responses" && ["incomplete", "failed", "cancelled", "in_progress"].includes(payload?.status));
+  if (!incomplete && matchesImageChallenge(answer, challenge.expected)) {
     return { status: "supported", detail: null };
   }
-  if (/cannot|can't|unable|不支持|无法|不能/i.test(answer) &&
-    /image|picture|vision|图片|图像|视觉/i.test(answer)) {
+  // Reasoning is never a successful answer. Only use an explicit inability
+  // statement when there is no final answer; probeImage requires two denials.
+  const denialText = answer || imageReasoningText(payload, protocol);
+  if (explicitImageDenial(denialText)) {
+    return { status: "denied", detail: "模型明确表示无法识别图片" };
+  }
+  if (incomplete || !answer) {
     return {
-      status: "denied",
-      detail: "模型明确回复无法识别图片",
+      status: "inconclusive",
+      detail: budgetExhausted
+        ? "图片检测未完成：输出预算耗尽（256 Token）"
+        : "图片检测未完成：未返回完整的最终答案",
     };
   }
-  return {
-    status: "mismatch",
-    detail: "图片请求已成功，但回答内容未通过校验",
-  };
+  return { status: "mismatch", detail: "图片请求已成功，但回答内容未通过校验" };
+}
+
+function imageReasoningText(payload, protocol) {
+  if (protocol === "chat") {
+    const text = payload?.choices?.[0]?.message?.reasoning_content;
+    return typeof text === "string" ? text : "";
+  }
+  return responseOutput(payload).filter(item => item?.type === "reasoning")
+    .flatMap(item => Array.isArray(item.content) ? item.content : [])
+    .filter(part => part?.type === "reasoning_text" && typeof part.text === "string")
+    .map(part => part.text).join("\n");
+}
+
+function explicitImageDenial(text) {
+  return String(text).split(/[.!?。！？\n]+/).some(sentence => {
+    // Hypotheses about a possible failure are not evidence of this failure.
+    if (/\b(?:if|whether|maybe|perhaps|might)\b|如果|假如|是否|可能/i.test(sentence)) return false;
+    return /\b(?:cannot|can't|unable to)\s+(?:see|view|read|access|process|recognize)\s+(?:(?:the|this|provided|attached|input)\s+)?(?:image|picture)\b|\b(?:image|picture)(?:\s+is)?\s+unsupported\b|\[unsupported image\]|(?:无法|不能|不支持)(?:读取|查看|识别|处理|访问|看见|看到)?(?:这张|该|输入的|提供的|所附的)?(?:图片|图像)/i.test(sentence);
+  });
 }
 
 function matchesImageChallenge(answer, expected) {
@@ -1399,6 +1482,7 @@ async function postStream({ url, apiKey, body, fetchImpl, timeoutMs }) {
       ok: response.ok && !providerRejected,
       status: response.status,
       raw,
+      payload,
       contentType: response.headers.get("content-type"),
       message: response.ok && !providerRejected
         ? null
@@ -1415,6 +1499,55 @@ async function postStream({ url, apiKey, body, fetchImpl, timeoutMs }) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function summarizeProbeResponse(response, protocol) {
+  let payload = response.payload;
+  const events = [];
+  let deltaText = "";
+  if (!payload && typeof response.raw === "string") {
+    for (const line of response.raw.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      try {
+        const event = JSON.parse(line.slice(5).trim());
+        if (typeof event.type === "string" && events.length < 12 && !events.includes(event.type)) events.push(event.type);
+        const delta = event.type === "response.output_text.delta" ? event.delta : event.choices?.[0]?.delta?.content;
+        if (typeof delta === "string") deltaText += delta;
+        if (event.response) payload = event.response;
+        else if (event.choices || event.usage) payload = { ...payload, ...event,
+          choices: event.choices?.length ? event.choices : payload?.choices };
+      } catch { /* [DONE] and malformed frames are not JSON payloads. */ }
+    }
+  }
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  const choice = payload?.choices?.[0];
+  const text = parts => typeof parts === "string" ? parts : Array.isArray(parts)
+    ? parts.map(part => typeof part?.text === "string" ? part.text : "").join("\n") : "";
+  const answer = protocol === "chat" ? text(choice?.message?.content) || deltaText
+    : typeof payload?.output_text === "string" ? payload.output_text
+      : output.filter(item => item?.type === "message").map(item => text(item.content)).join("\n") || deltaText;
+  const reasoning = imageReasoningText(payload, protocol);
+  const usage = payload?.usage;
+  const number = value => typeof value === "number" && Number.isFinite(value) ? value : null;
+  return {
+    responseStatus: payload?.status ?? null,
+    finishReason: choice?.finish_reason ?? null,
+    incompleteReason: payload?.incomplete_details?.reason ?? null,
+    usage: {
+      inputTokens: number(usage?.input_tokens ?? usage?.prompt_tokens),
+      outputTokens: number(usage?.output_tokens ?? usage?.completion_tokens),
+      reasoningTokens: number(usage?.output_tokens_details?.reasoning_tokens ?? usage?.completion_tokens_details?.reasoning_tokens),
+      totalTokens: number(usage?.total_tokens),
+    },
+    answerChars: answer.length, answerSummary: answer,
+    reasoningChars: reasoning.length, reasoningSummary: reasoning,
+    recognizedAnswerChars: (protocol === "chat" ? chatOutputText(payload) : responsesOutputText(payload)).length,
+    outputShape: output.slice(0, 16).map(item => ({ type: item?.type ?? null, role: item?.role ?? null,
+      status: item?.status ?? null, contentTypes: Array.isArray(item?.content) ? item.content.slice(0, 16).map(part => part?.type ?? null) : typeof item?.content })),
+    chatMessageKeys: choice?.message ? Object.keys(choice.message) : [],
+    streamEvents: events,
+    bodyParsed: payload != null,
+  };
 }
 
 function responseOutput(payload) {
@@ -1464,6 +1597,7 @@ function hasProviderError(payload) {
 
 function isExplicitImageRejection(response) {
   return response?.ok === false
+    && capabilityFromFailure(response) === "unsupported"
     && /image|vision|multimodal|input_image|image_url|modality/i.test(String(response.message ?? ""));
 }
 
@@ -1475,11 +1609,6 @@ function isReasoningEnvelopeRejection(response) {
 function isToolChoiceRejection(response) {
   return response?.ok === false
     && /tool[_ ]choice|thinking mode[^.]*tool/i.test(String(response?.message ?? ""));
-}
-
-function isThinkingModeRejection(response) {
-  return response?.ok === false
-    && /thinking|reasoning|推理/i.test(String(response?.message ?? ""));
 }
 
 function contractFailure(status, message) {
@@ -1512,7 +1641,9 @@ function upstreamMessage(payload, raw, status, apiKey) {
 
 function responsesOutputText(payload) {
   if (typeof payload?.output_text === "string") return payload.output_text;
-  return responseOutput(payload).flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+  return responseOutput(payload).filter(item => item?.type === "message")
+    .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+    .filter(part => part?.type === "output_text")
     .map((part) => part?.text)
     .filter((text) => typeof text === "string")
     .join("\n");

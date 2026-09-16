@@ -15,6 +15,7 @@ import {
   runWslTestSuite,
   runtimeTargetLabel,
   runtimeTargetsForPlatform,
+  waitForTestProcess,
 } from "./test-runtime-targets.mjs";
 import { requireFreeResult, RESULTS, ROOT, sourceSnapshot, writeReport } from "./test-support.mjs";
 import {
@@ -259,10 +260,7 @@ async function runLocalStages(stages, relayExecutable) {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     try {
-      code = await new Promise((resolveExit, reject) => {
-        child.once("error", reject);
-        child.once("exit", resolveExit);
-      });
+      code = await waitForTestProcess(child);
     } finally {
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
