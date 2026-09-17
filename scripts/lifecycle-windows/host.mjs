@@ -4,8 +4,7 @@ import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { WAIT_INTERVAL_MS, delay } from "./io.mjs";
-import { windowsInjectorOwnedByInstalledApp, windowsInjectorOwnedBySource } from "./process-ownership.mjs";
-import { publicHostEvidence, runtimeModeMatches, hostRuntimeTarget, samePids, assertSamePids } from "./evidence.mjs";
+import { runtimeModeMatches, hostRuntimeTarget, samePids, assertSamePids } from "./evidence.mjs";
 
 async function waitForWindowsTargetHost(control, {
   timeoutMs = 90_000,
@@ -29,6 +28,7 @@ async function waitForWindowsTargetHost(control, {
     latest = await inspectHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
+      threadId: taskThreadId,
     });
     const relayChanged = previousRelayPid == null || latest.relay.pid !== previousRelayPid;
     const codexChanged = previousCodexPids == null || !samePids(latest.codexPids, previousCodexPids);
@@ -104,6 +104,7 @@ async function assertStableWindowsHost(control, baseline, durationMs, runtimeTar
     latest = await inspectHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
+      threadId: control.sessionCheckpoint ? bindLifecycleTask(control).threadId : null,
     });
     if (!latest.readiness.ready || runtimeTarget && !runtimeModeMatches(latest, runtimeTarget)) {
       throw new Error("重复启动后的 Codex 不再处于目标运行环境");
@@ -132,6 +133,7 @@ async function waitForSettledWindowsHost(control, initialHost, {
     latest = await inspectHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
+      threadId: control.sessionCheckpoint ? bindLifecycleTask(control).threadId : null,
     });
     const ready = latest.readiness.ready &&
       (expectedRuntimeTarget == null || runtimeModeMatches(latest, expectedRuntimeTarget)) &&

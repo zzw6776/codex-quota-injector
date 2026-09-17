@@ -72,7 +72,6 @@ function installQuotaWidget(
     tokenUsageRevision: null,
     root: null,
     shadow: null,
-    observer: null,
     resizeHandler: null,
     documentPointerHandler: null,
     pinned: false,
@@ -92,6 +91,7 @@ function installQuotaWidget(
     panelScrollPosition: null,
     renderedPanelKey: null,
     renderedPanelCommon: null,
+    renderedChromeKey: null,
     renderedPage: null,
     panelRefreshPending: false,
     extraModelOperationDraft: null,
@@ -111,7 +111,6 @@ function installQuotaWidget(
     conversationTurnNodes: new Map(),
     conversationUsageLines: new Map(),
     conversationDomDirty: true,
-    conversationObserverRoot: null,
     mountObserver: null,
     mountCheckFrame: null,
   };
@@ -326,6 +325,50 @@ function installQuotaWidget(
     state.shadow = null;
   }
 
+  function renderVersionFooter() {
+    const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
+    const injectionRuntime = state.data.injectionMode === "wsl"
+      ? { label: "WSL", title: "注入运行时：WSL" }
+      : state.data.injectionMode === "windows"
+        ? { label: "Windows", title: "注入运行时：Windows" }
+        : null;
+    const balanceHtml = renderPanelBalance();
+    const footerMeta = [injectionRuntime?.label, appVersion ? `v${appVersion}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+    const footerTitle = injectionRuntime?.title ? ` title="${injectionRuntime.title}"` : "";
+    return footerMeta
+      ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text"${footerTitle}>${footerMeta}</span></div>`
+      : "";
+  }
+
+  function patchPanelChrome(wrap, health) {
+    const template = document.createElement("template");
+    template.innerHTML = renderPanelControls(health);
+    const nextStatus = template.content.querySelector(".host-health-status");
+    const status = wrap.querySelector(".host-health-status");
+    if (status && !status.isEqualNode(nextStatus)) {
+      hideAccountTooltip();
+      status.replaceWith(nextStatus);
+      bindGeneralEvents(wrap.querySelector(".panel-controls"));
+    }
+    template.innerHTML = renderHostHealthBanner(health);
+    const nextBanner = template.content.firstElementChild;
+    const banner = wrap.querySelector(".host-health-banner");
+    if (!banner?.isEqualNode(nextBanner)) {
+      if (banner) banner.replaceWith(...(nextBanner ? [nextBanner] : []));
+      else if (nextBanner) wrap.querySelector(".panel-scroll").prepend(nextBanner);
+      if (nextBanner) bindGeneralEvents(nextBanner);
+    }
+    template.innerHTML = renderVersionFooter();
+    const nextFooter = template.content.firstElementChild;
+    const footer = wrap.querySelector(".panel-version");
+    if (!footer?.isEqualNode(nextFooter)) {
+      if (footer) footer.replaceWith(...(nextFooter ? [nextFooter] : []));
+      else if (nextFooter) wrap.querySelector(".panel-scroll").append(nextFooter);
+    }
+  }
+
   function render({ background = false } = {}) {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (!wrap) return;
@@ -378,8 +421,8 @@ function installQuotaWidget(
     }
     // A detail page does not display quota timestamps or live network samples.
     // Compare its actual inputs, not the complete app view or editable DOM.
-    const common = JSON.stringify([state.page, state.data.version, state.data.injectionMode,
-      hostHealth, state.data.operation]);
+    const chromeKey = JSON.stringify([state.data.version, state.data.injectionMode, hostHealth]);
+    const common = JSON.stringify([state.page, state.data.operation]);
     const pageData = state.page === "context" ? state.data.context
       : state.page === "wakeup" ? accounts.map(({ id, email, current, authMode, authStatus, wakeup }) =>
         ({ id, email, current, authMode, authStatus, wakeup }))
@@ -392,7 +435,13 @@ function installQuotaWidget(
         return;
       }
       patchPanelBalance(wrap);
-      if (panelKey === state.renderedPanelKey) {
+      if (chromeKey !== state.renderedChromeKey) {
+        patchPanelChrome(wrap, hostHealth);
+        state.renderedChromeKey = chromeKey;
+      }
+      // Model results patch their own DOM. Public status still updates above,
+      // while the editor keeps its exact nodes, selection and in-progress input.
+      if (state.page === "extra-models" || panelKey === state.renderedPanelKey) {
         state.panelRefreshPending = false;
         scheduleConversationTokenUsageRender();
         return;
@@ -418,6 +467,7 @@ function installQuotaWidget(
     hideAccountTooltip();
     state.renderedPanelKey = panelKey;
     state.renderedPanelCommon = common;
+    state.renderedChromeKey = chromeKey;
     state.renderedPage = state.page;
     state.panelRefreshPending = false;
     const hostHealthBanner = renderHostHealthBanner(hostHealth);
@@ -435,13 +485,6 @@ function installQuotaWidget(
     const extraModelsPage = state.page === "extra-models";
     const wakeupPage = state.page === "wakeup";
     const migrationPage = state.page === "migration";
-    const appVersion = state.data.version ? escapeHtml(String(state.data.version)) : "";
-    const injectionRuntime = state.data.injectionMode === "wsl"
-      ? { label: "WSL", title: "注入运行时：WSL" }
-      : state.data.injectionMode === "windows"
-        ? { label: "Windows", title: "注入运行时：Windows" }
-        : null;
-    const balanceHtml = renderPanelBalance();
     const popoverClass = contextPage
       ? "quota-popover detail-popover context-popover"
       : wakeupPage
@@ -480,16 +523,9 @@ function installQuotaWidget(
             <details><summary>API Key</summary><form class="api-key-form"><input name="name" placeholder="账号名称（可选）" ${busy ? "disabled" : ""}><input name="apiKey" type="password" autocomplete="off" placeholder="OpenAI API Key" required ${busy ? "disabled" : ""}><button class="btn primary" type="submit" ${busy ? "disabled" : ""}>添加 API Key</button></form></details>
           </div>
         </section>`;
-    const footerMeta = [injectionRuntime?.label, appVersion ? `v${appVersion}` : ""]
-      .filter(Boolean)
-      .join(" · ");
-    const footerTitle = injectionRuntime?.title ? ` title="${injectionRuntime.title}"` : "";
-    const versionFooter = footerMeta
-      ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text"${footerTitle}>${footerMeta}</span></div>`
-      : "";
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="${chipLabel}">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${versionFooter}</div></section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${renderVersionFooter()}</div></section>`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       const nextScroller = nextPopover.querySelector(".panel-scroll");
@@ -526,32 +562,17 @@ function installQuotaWidget(
     state.pinned = true;
   }
 
-  state.observer = new MutationObserver((mutations) => {
-    if (mutationTouchesConversation(mutations)) {
-      state.conversationDomDirty = true;
-      scheduleConversationTokenUsageRender();
-    }
-  });
   state.mountObserver = new MutationObserver((mutations) => {
     if (mutationTouchesConversation(mutations)) {
       state.conversationDomDirty = true;
       scheduleConversationTokenUsageRender();
     }
-    if (state.mountCheckFrame != null) return;
+    // This observer already covers the whole document. A second observer on
+    // the conversation and a per-frame root search only duplicate its work.
+    if (state.root?.isConnected || state.mountCheckFrame != null) return;
     state.mountCheckFrame = window.requestAnimationFrame(() => {
       state.mountCheckFrame = null;
-      if (!state.root?.isConnected) ensureMounted();
-      const firstTurn = document.querySelector(conversationTurnSelector);
-      if (firstTurn && state.conversationObserverRoot?.isConnected &&
-        !state.conversationObserverRoot.contains(firstTurn)) {
-        state.observer?.disconnect();
-        state.conversationObserverRoot = null;
-        state.conversationDomDirty = true;
-      }
-      if (!state.conversationObserverRoot?.isConnected) {
-        state.conversationDomDirty = true;
-        scheduleConversationTokenUsageRender();
-      }
+      ensureMounted();
     });
   });
   state.mountObserver.observe(document.documentElement, {
@@ -590,8 +611,6 @@ function installQuotaWidget(
       const json = revision == null ? JSON.stringify(data ?? {}) : `revision:${revision}`;
       if (revision != null && revision === state.dataRevision) return;
       if (json === state.dataJson) return;
-      const patchOpenExtraModelsPage = state.page === "extra-models" &&
-        Boolean(state.shadow?.querySelector(".extra-models-popover"));
       state.dataJson = json;
       state.dataRevision = revision;
       if (data && Object.prototype.hasOwnProperty.call(data, "tokenUsage")) state.tokenUsageRevision = revision;
@@ -599,10 +618,6 @@ function installQuotaWidget(
       ensureMounted();
       if (data && Object.prototype.hasOwnProperty.call(data, "extraModels")) {
         patchExtraModelsDom(data.extraModels, { clearDraftOperation: true });
-      }
-      if (patchOpenExtraModelsPage) {
-        scheduleConversationTokenUsageRender();
-        return;
       }
       render({ background: true });
     },
@@ -659,8 +674,6 @@ function installQuotaWidget(
       themeObserver.disconnect();
       themeQuery?.removeEventListener("change", syncTheme);
       hideAccountTooltip();
-      state.observer?.disconnect();
-      state.observer = null;
       state.mountObserver?.disconnect();
       state.mountObserver = null;
       if (state.mountCheckFrame != null) {
@@ -687,7 +700,6 @@ function installQuotaWidget(
       state.conversationTooltipPointer = null;
       state.conversationTurnNodes.clear();
       state.conversationUsageLines.clear();
-      state.conversationObserverRoot = null;
       document.getElementById(GLOBAL_STYLE_ID)?.remove();
       state.root?.remove();
       delete window[GLOBAL_KEY];

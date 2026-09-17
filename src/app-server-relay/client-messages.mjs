@@ -12,14 +12,17 @@ function rewriteClientLine(line, state) {
   }
   if (!message || typeof message !== "object") return line;
 
-  state.hostHealth?.observeClientMessage(message);
-
   const method = message.method;
   const params = message.params && typeof message.params === "object"
     ? { ...message.params }
     : {};
   if (isMcpStatusListMethod(method)) {
-    if (message.id != null) rememberPendingRequest(state, message.id, { method, threadId: params.threadId ?? null });
+    if (message.id != null) {
+      rememberPendingRequest(state, message.id, {
+        method, threadId: params.threadId ?? null,
+        healthRevision: state.hostHealth?.statusRevision(params.threadId ?? null),
+      });
+    }
     return line;
   }
   if (method === MODEL_LIST_METHOD) {

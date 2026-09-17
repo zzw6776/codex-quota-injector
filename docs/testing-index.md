@@ -84,7 +84,15 @@
 
 该类必须最后执行并取得本次明确重启授权，包括会话安全、正式包、单实例、重连、账号往返与计划披露的官方模型冒烟。普通安全重启不等于完整启停恢复验收。
 
+macOS 定向启停补测使用 `npm run test:lifecycle -- --plan --task-tools-only` 查看计划，执行为 `npm run test:lifecycle -- --confirm-restart --task-tools-only`。保留正式包验证、会话持久化、安装接管、发起任务工具就绪、单实例、中继重连、关闭重开及最终状态检查，共 8 个步骤；不要求两个 OAuth 账号，不切换账号、不发送模型冒烟。报告保存 `scope: task-tools-startup`，只代表所列步骤，不能将未执行的账号往返标为本次通过。查询或恢复沿用报告保存的步骤，不接受该范围参数。
+
 ## 结果总表与证据来源
+
+可随 Git 同步的历史报告见[测试报告归档](test-reports/README.md)。按组件、原生环境和架构各保留最近 5 次执行，关键证据额外保留；执行状态和对当前代码的适用性分列。原始 `.runtime/` 材料不自动上传，归档不触发测试。
+
+2026-09-17 的[状态与协议重构定向验证](test-reports/macos-native/2026-09-17-state-protocol-refactor.md)为 macOS arm64 免费公共组件的局部结果：最后统一执行 67/67 通过，零真实模型请求。此前账号 56/56、子任务 2/2 和 Widget 49/49 分别保留原报告，不合并为完整免费或跨平台验收。
+
+重新注入后完成 [macOS 原生 Relay 定向 2/2](test-reports/macos-native/2026-09-17-native-relay-retest.md)、[DeepSeek Flash 后台 4/4](test-reports/macos-native/2026-09-17-deepseek-backend-retest.md) 与[对应桌面 13/13，3 项不适用](test-reports/macos-native/2026-09-17-deepseek-desktop-retest.md)。实际开发注入为 `0.1.283.dev / Widget 173 / Relay 85`，完整启停恢复最后由独立监督器执行，终态与正式包加载以[归档索引](test-reports/README.md)后续结果为准。
 
 每次汇总必须使用上述6行 × 3列，逐格记录“实际通过数/适用总数、状态、失败或阻断原因、报告链接”。另列源码摘要/项目版本、平台、架构、实际运行环境、运行时版本与实际模型。不支持数量单列；未执行与上游阻断不能隐藏。公共用例数、后台用例数、桌面验收项数和启停恢复步骤数分别统计。
 

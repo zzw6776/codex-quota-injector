@@ -41,8 +41,10 @@ export async function createMacLifecyclePlan({
   projectVersion,
   expectedProtocol,
   installedApp = DEFAULT_INSTALLED_APP,
+  taskToolsOnly = false,
+  inspectHost = inspectLifecycleHost,
 } = {}) {
-  const host = await inspectLifecycleHost({ installedApp, expectedProtocol });
+  const host = await inspectHost({ installedApp, expectedProtocol });
   const unfinishedLifecycle = await readLatestUnfinishedLifecycle(
     join(root, ".runtime", "test-results", "lifecycle", "latest.json"),
   );
@@ -54,19 +56,28 @@ export async function createMacLifecyclePlan({
     arch: process.arch,
     projectVersion,
     expectedRelayProtocol: expectedProtocol,
-    tokenRequests: host.accounts.roundTripAvailable ? 1 : 0,
+    scope: taskToolsOnly ? "task-tools-startup" : "full",
+    steps: [
+      "verify-package", "wait-desktop-idle", "install-update", "launch-updated",
+      "repeat-launch", "relay-reconnect", "close-reopen",
+      ...(taskToolsOnly ? [] : ["switch-account", "restore-account"]),
+      "final-state",
+    ],
+    tokenRequests: taskToolsOnly ? 0 : host.accounts.roundTripAvailable ? 1 : 0,
     actions: [
       "构建、验签并安装当前架构正式包",
       "绑定发起任务与回合，等待活动回合结束并核对历史持久化",
       "正式入口接管现有注入器并等待 Codex 重新启动",
-      "核对中继 generation 已加载目标协议",
+      "核对中继 generation 已加载目标协议，自动打开发起任务并核验其必需工具",
       "重复启动仍保持一个注入器和同一 Codex",
       "终止中继进程并核对自动或入口触发恢复",
       "关闭 Codex 后由正式入口重新启动",
-      "真实账号切换、一次最低价官方模型冒烟、回切原账号",
+      ...(taskToolsOnly ? ["核对最终安装、原账号与进程状态；不执行账号往返或模型冒烟"]
+        : ["真实账号切换、一次最低价官方模型冒烟、回切原账号"]),
     ],
     host: publicLifecycleHost(host),
-    accountRoundTrip: host.accounts.roundTripAvailable ? "ready" : "blocked-less-than-two-oauth-accounts",
+    accountRoundTrip: taskToolsOnly ? "not-run"
+      : host.accounts.roundTripAvailable ? "ready" : "blocked-less-than-two-oauth-accounts",
     unfinishedLifecycle,
     controller: "launchd one-shot job; no UI clicks",
     reportDirectory: join(root, ".runtime", "test-results", "lifecycle"),
@@ -204,6 +215,7 @@ export function createMacLifecycleOperations(controlPath, initialControl, {
     const host = await inspectLifecycleHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
+      threadId: control.sessionCheckpoint ? bindLifecycleTask(control).threadId : null,
     });
     host.launcher = await readSingleInstanceStatus().catch(() => null);
     host.readiness.launcherReady = launcherMatchesHost(host, control.projectVersion);
@@ -586,6 +598,7 @@ export async function waitForTargetHost(control, {
     latest = await inspectHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
+      threadId: taskThreadId,
     });
     if (stableBaseline) assertHostIdentity(stableBaseline, latest);
     if (readLauncherStatus) {
@@ -644,6 +657,7 @@ async function assertStableHost(control, baseline, durationMs) {
     latest = await inspectLifecycleHost({
       installedApp: control.installedApp,
       expectedProtocol: control.expectedProtocol,
+      threadId: control.sessionCheckpoint ? bindLifecycleTask(control).threadId : null,
     });
     latest.launcher = await readSingleInstanceStatus();
     if (latest.launcher.phase !== "ready" || latest.launcher.pid !== baseline.launcher.pid ||

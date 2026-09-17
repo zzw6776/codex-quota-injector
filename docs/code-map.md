@@ -25,7 +25,7 @@
 | 平台识别与生命周期 | `src/platform.mjs` | `platform/executables.mjs`、`windows-discovery.mjs`；`processes.mjs`、`process-parsing.mjs`；`lifecycle.mjs`、`macos-lifecycle.mjs`、`readiness.mjs` |
 | WSL 配置与平台材料 | 同上 | `wsl-settings.mjs`、`windows-artifacts.mjs`；平台范围的共享原语在 `contract.mjs` |
 | Responses / Chat 转换 | `src/chat-compat-proxy.mjs` | `chat-compat-proxy/request.mjs` 请求；`responses-bridge.mjs` 桥接；`response.mjs` 响应状态；`history.mjs` 历史；`policy.mjs` 能力策略；`transport.mjs`、`chat-transport.mjs` |
-| Windows 生命周期验收实现 | `scripts/lifecycle-windows.mjs` | `lifecycle-windows/operations.mjs` 编排；`runtime-configuration.mjs` 切换与恢复；`installation.mjs` 回滚；`history.mjs`、`history-rebuild.mjs`、`wsl-history-store.mjs` 历史门禁 |
+| Windows 生命周期验收实现 | `scripts/lifecycle-windows.mjs` | `lifecycle-windows/operations.mjs` 编排；`runtime-configuration.mjs` 切换与恢复；`installation.mjs` 安装；`history.mjs`、`history-rebuild.mjs`、`wsl-history-store.mjs` 历史门禁 |
 
 同名目录中的 `contract.mjs` 仅保存该功能共享的常量和基础契约，不作为全项目工具集合。
 
@@ -34,9 +34,9 @@
 - `TokenUsageManager` 持有回合、缓存和事件去重状态；Worker 生命周期由 `RolloutWorkerClient` 持有。Worker 继续使用内嵌源码与 `eval: true`，正式 SEA 包不依赖外部 Worker 文件。
 - `ModelRouterManager` 持有路由配置和传输生命周期；`RouterRequestLedger` 统一持有任务供应商绑定、用量写入器、回合累计和工具批次状态；`RouterNetworkMonitor` 独立持有网络连接、采样和监听状态。响应观察对象各自持有单个请求的指标。
 - `AccountManager` 持有账户库、操作状态与锁。迁移模块在既有锁和操作边界内执行完整事务，不把刷新、凭据交接和回滚拆成独立交易。
-- `runAppServerRelay` 持有 Relay 会话状态，各消息模块使用明确传入的同一状态；平台可执行文件的可变缓存留在各自发现模块。
-- `runInjector` 管理连接和调度；页面同步模块持有 revision、差量和稳定用量快照；宿主健康模块持有监听器、轮询和操作错误。
-- Widget 的 `runtime.mjs` 持有唯一页面状态。`browser-features.mjs` 注册功能工厂，每个工厂通过显式依赖执行原有功能。工厂必须能独立序列化：不能依赖模块导入或 Node.js 闭包；已初始化的依赖直接传入，仅对尚未初始化的跨功能回调使用延迟调用。经常同时修改的页面、表单和事件放在同一个功能文件中。
+- `runAppServerRelay` 持有 Relay 会话状态，各消息模块使用明确传入的同一状态；`HostHealthTracker` 按任务保存启动与目录核验证据，生命周期检查指定发起任务；平台可执行文件的可变缓存留在各自发现模块。
+- `runInjector` 管理连接和调度；页面同步模块独占每个连接的安装状态、revision 和已确认快照，只暴露重置、等待空闲、标记变化和请求更新。首个完整快照使用连接独立编号，后续差量同批一次 CDP 执行并确认；宿主健康模块持有监听器、轮询和操作错误。
+- Widget 的 `runtime.mjs` 持有唯一页面状态；公共额度、健康和版本独立于编辑页更新，模型表单保留节点。一个整页结构观察器负责挂载恢复和会话节点变化，不再叠加会话子树观察器。`browser-features.mjs` 注册功能工厂，每个工厂通过显式依赖执行原有功能。工厂必须能独立序列化：不能依赖模块导入或 Node.js 闭包；已初始化的依赖直接传入，仅对尚未初始化的跨功能回调使用延迟调用。经常同时修改的页面、表单和事件放在同一个功能文件中。
 - `expressions.mjs` 将运行时、功能工厂和样式组装为浏览器表达式。`src/dev-runtime.mjs` 对整个 Widget 目录创建独立 ESM 快照，导入后清理临时文件，子模块变更不会命中旧模块缓存。
 
 ## 测试入口
@@ -55,3 +55,5 @@
 源码拆分不改变免费回归、真实模型测试和启停恢复测试的授权、平台隔离和报告口径。压缩打包后的 Widget 会在临时真实浏览器中验证序列化、模型表单与动作；完整 Windows 生命周期仍须在 Windows 原生环境执行启停恢复测试。
 
 版本规则保持原意：应用版本在 `package.json` 与 `package-lock.json`；Widget 版本定义在 `src/widget/contract.mjs` 并从原入口导出；Relay 协议仍在 `src/relay-contract.mjs`。等价的内部拆分不改变 Relay、缓存或模型检测结论的版本。
+
+页面同步和渲染的失效机制、删减理由及前后对照见[2026-09-17 架构审查](architecture-review-2026-09-17.md)。

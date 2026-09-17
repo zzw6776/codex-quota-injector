@@ -17,9 +17,21 @@ function applySubagentMetadata({ rolloutMetadataByThread, turns, loggedSubagentM
     const metadataItems = [...rolloutMetadataByThread.values()]
       .filter((metadata) => metadata.isSubagent)
       .sort((left, right) => left.agentDepth - right.agentDepth);
+    if (metadataItems.length === 0) return false;
+    const turnsByThread = new Map();
+    for (const turn of turns.values()) {
+      const group = turnsByThread.get(turn.threadId) ?? [];
+      group.push(turn);
+      turnsByThread.set(turn.threadId, group);
+    }
+    const parentTurnsByThread = new Map();
+    for (const [threadId, group] of turnsByThread) {
+      parentTurnsByThread.set(threadId, [...group].sort((left, right) =>
+        (positiveNumber(right.startedAt) || positiveNumber(right.updatedAt)) -
+        (positiveNumber(left.startedAt) || positiveNumber(left.updatedAt))));
+    }
     for (const metadata of metadataItems) {
-      const agentTurns = [...turns.values()]
-        .filter((turn) => turn.threadId === metadata.threadId)
+      const agentTurns = (turnsByThread.get(metadata.threadId) ?? [])
         .sort((left, right) =>
           positiveNumber(left.startedAt) - positiveNumber(right.startedAt) ||
           positiveNumber(left.updatedAt) - positiveNumber(right.updatedAt));
@@ -41,7 +53,7 @@ function applySubagentMetadata({ rolloutMetadataByThread, turns, loggedSubagentM
       }
       for (const turn of agentTurns) {
         const previousParentTurnId = nonEmptyString(turn.parentTurnId);
-        const parentTurnId = resolveSubagentParentTurnId(metadata, turn, { rolloutMetadataByThread, turns });
+        const parentTurnId = resolveSubagentParentTurnId(metadata, turn, { rolloutMetadataByThread, parentTurnsByThread });
         const nextValues = {
           taskKey: metadata.threadId,
           isSubagent: true,
@@ -70,24 +82,17 @@ function applySubagentMetadata({ rolloutMetadataByThread, turns, loggedSubagentM
     return changed;
   }
 
-function resolveSubagentParentTurnId(metadata, agentTurn, { rolloutMetadataByThread, turns }) {
+function resolveSubagentParentTurnId(metadata, agentTurn, { rolloutMetadataByThread, parentTurnsByThread }) {
     const startedAt = positiveNumber(agentTurn.startedAt) || positiveNumber(agentTurn.updatedAt);
     const parentMetadata = rolloutMetadataByThread.get(metadata.parentThreadId);
     if (parentMetadata?.isSubagent) {
-      const parentAgentTurns = [...turns.values()]
-        .filter((turn) => turn.threadId === parentMetadata.threadId)
-        .sort((left, right) =>
-          (positiveNumber(right.startedAt) || positiveNumber(right.updatedAt)) -
-          (positiveNumber(left.startedAt) || positiveNumber(left.updatedAt)));
+      const parentAgentTurns = parentTurnsByThread.get(parentMetadata.threadId) ?? [];
       const parentAgentTurn = findTurnAtTimestamp(parentAgentTurns, startedAt);
       const inheritedParentTurnId = nonEmptyString(parentAgentTurn?.parentTurnId);
       if (inheritedParentTurnId) return inheritedParentTurnId;
     }
-    const rootTurns = [...turns.values()]
-      .filter((turn) => turn.threadId === metadata.rootThreadId && !turn.isSubagent)
-      .sort((left, right) =>
-        (positiveNumber(right.startedAt) || positiveNumber(right.updatedAt)) -
-        (positiveNumber(left.startedAt) || positiveNumber(left.updatedAt)));
+    const rootTurns = (parentTurnsByThread.get(metadata.rootThreadId) ?? [])
+      .filter((turn) => !turn.isSubagent);
     return findTurnAtTimestamp(rootTurns, startedAt)?.turnId ?? null;
   }
 

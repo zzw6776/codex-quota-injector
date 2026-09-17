@@ -27,7 +27,7 @@ export class AccountStore {
   async initialize() {
     await mkdir(this.accountsDir, { recursive: true, mode: 0o700 });
     const loaded = await this.#loadOwnData();
-    if (!loaded || (this.accounts.size === 0 && this.index.accounts.length > 0)) {
+    if (!loaded) {
       await this.#importCockpitData();
     }
     return this.snapshot();
@@ -85,14 +85,15 @@ export class AccountStore {
       throw new Error("当前账号不能移除，请先切换到其他账号");
     }
 
-    this.accounts.delete(accountId);
+    const previousAccounts = this.accounts;
+    const accounts = new Map(previousAccounts);
+    accounts.delete(accountId);
+    await this.#writeIndex(accounts);
     try {
-      await this.#writeIndex();
       await removeFile(join(this.accountsDir, `${safeFileId(accountId)}.json`));
     } catch (error) {
-      this.accounts.set(accountId, account);
       try {
-        await this.#writeIndex();
+        await this.#writeIndex(previousAccounts);
       } catch (rollbackError) {
         error.message = `${error.message}（回滚失败：${rollbackError.message}）`;
       }
@@ -101,7 +102,7 @@ export class AccountStore {
     return structuredClone(account);
   }
 
-  async #upsertOnce(account) {
+  async #upsertOnce(account, currentAccountId = this.index.currentAccountId) {
     const previous = this.accounts.get(account.id);
     const now = Math.floor(Date.now() / 1000);
     const next = normalizeAccount({
@@ -111,12 +112,11 @@ export class AccountStore {
       lastUsed: account.lastUsed ?? previous?.lastUsed ?? now,
     });
     await this.#writeAccount(next);
-    this.accounts.set(next.id, next);
+    const accounts = new Map(this.accounts);
+    accounts.set(next.id, next);
     try {
-      await this.#writeIndex();
+      await this.#writeIndex(accounts, currentAccountId);
     } catch (error) {
-      if (previous) this.accounts.set(next.id, previous);
-      else this.accounts.delete(next.id);
       try {
         if (previous) await this.#writeAccount(previous);
         else await removeFile(join(this.accountsDir, `${safeFileId(next.id)}.json`));
@@ -139,13 +139,14 @@ export class AccountStore {
     if (accountId != null && this.accounts.get(accountId)?.authStatus === "transferred") {
       throw new Error("已转出的账号不能设为当前账号，请先恢复");
     }
-    this.index.currentAccountId = accountId;
-    if (accountId) {
-      const account = this.accounts.get(accountId);
-      account.lastUsed = Math.floor(Date.now() / 1000);
-      await this.#writeAccount(account);
+    if (accountId != null) {
+      await this.#upsertOnce({
+        ...this.accounts.get(accountId),
+        lastUsed: Math.floor(Date.now() / 1000),
+      }, accountId);
+    } else {
+      await this.#writeIndex(this.accounts, null);
     }
-    await this.#writeIndex();
   }
 
   async #loadOwnData() {
@@ -226,8 +227,8 @@ export class AccountStore {
           lastUsed: raw.last_used ?? raw.lastUsed ?? summary.last_used,
           tokenGeneration: raw.token_generation ?? raw.tokenGeneration ?? 0,
         });
-        this.accounts.set(account.id, account);
         await this.#writeAccount(account);
+        this.accounts.set(account.id, account);
         imported += 1;
       } catch (error) {
         console.error(`[accounts] Cockpit 账号 ${summary.id} 导入失败: ${error.message}`);
@@ -252,8 +253,8 @@ export class AccountStore {
     await atomicWrite(path, content, 0o600);
   }
 
-  async #writeIndex() {
-    const index = { ...this.index, version: STORE_VERSION, accounts: [...this.accounts.values()].map((account) => ({
+  async #writeIndex(accounts = this.accounts, currentAccountId = this.index.currentAccountId) {
+    const index = { version: STORE_VERSION, currentAccountId, accounts: [...accounts.values()].map((account) => ({
       id: account.id,
       email: account.email,
       authMode: account.authMode,
@@ -263,6 +264,7 @@ export class AccountStore {
       lastUsed: account.lastUsed,
     })) };
     await atomicWrite(this.indexPath, `${JSON.stringify(index, null, 2)}\n`, 0o600);
+    this.accounts = accounts;
     this.index = index;
   }
 

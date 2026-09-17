@@ -47,7 +47,8 @@ if (process.platform === "win32") {
 const argv = process.argv.slice(2);
 const statusArgument = argv.find((arg) => arg === "--status" || arg.startsWith("--status="));
 const resumeArgument = argv.find((arg) => arg.startsWith("--resume="));
-const known = new Set(["--plan", "--confirm-restart", "--status"]);
+const known = new Set(["--plan", "--confirm-restart", "--status", "--task-tools-only"]);
+const taskToolsOnly = argv.includes("--task-tools-only");
 for (const argument of argv) {
   if (!known.has(argument) && !argument.startsWith("--status=") && !argument.startsWith("--resume=")) {
     throw new Error(`未知参数 ${argument}`);
@@ -56,6 +57,9 @@ for (const argument of argv) {
 if (argv.filter((arg) => arg === "--plan" || arg === "--confirm-restart" ||
   arg === "--status" || arg.startsWith("--status=") || arg.startsWith("--resume=")).length !== 1) {
   throw new Error("请选择一个操作：--plan、--confirm-restart、--status 或 --resume=<run-id>");
+}
+if (taskToolsOnly && (statusArgument || resumeArgument)) {
+  throw new Error("--task-tools-only 仅用于计划或新执行；查询和恢复沿用原报告范围");
 }
 
 if (statusArgument) {
@@ -101,6 +105,7 @@ const plan = await createMacLifecyclePlan({
   root: ROOT,
   projectVersion: packageJson.version,
   expectedProtocol: RELAY_PROTOCOL_VERSION,
+  taskToolsOnly,
 });
 if (argv.includes("--plan")) {
   console.log(JSON.stringify(plan, null, 2));
@@ -115,7 +120,7 @@ if (plan.unfinishedLifecycle) {
   throw new Error(`上一次启停恢复测试 ${plan.unfinishedLifecycle.runId} 尚未完成；` +
     `请先执行 npm run test:lifecycle -- --resume=${plan.unfinishedLifecycle.runId}`);
 }
-if (plan.accountRoundTrip !== "ready") {
+if (!taskToolsOnly && plan.accountRoundTrip !== "ready") {
   throw new Error("真实账号往返需要当前账号和另一个已保存的 OAuth 账号；前置条件不满足");
 }
 const session = await captureMacLifecycleSession();
@@ -155,22 +160,12 @@ const report = createLifecycleReport({
   runId,
   projectVersion: packageJson.version,
   targetRelayProtocol: RELAY_PROTOCOL_VERSION,
-  steps: [
-    "verify-package",
-    "wait-desktop-idle",
-    "install-update",
-    "launch-updated",
-    "repeat-launch",
-    "relay-reconnect",
-    "close-reopen",
-    "switch-account",
-    "restore-account",
-    "final-state",
-  ],
+  steps: plan.steps,
   metadata: {
     batch: plan.batch,
     name: plan.name,
     mode: "launchd-one-shot",
+    scope: plan.scope,
     failurePolicy: "stop-without-rollback",
     sourceSnapshot: initialSnapshot,
     initialHost: plan.host,
@@ -184,8 +179,9 @@ const report = createLifecycleReport({
     },
     tokenPolicy: {
       provider: "official OAuth",
-      requests: 1,
-      purpose: "切换后的账号只回复 OK 的最低价模型冒烟",
+      requests: plan.tokenRequests,
+      purpose: taskToolsOnly ? "定向核验启停和任务工具，不发送模型请求"
+        : "切换后的账号只回复 OK 的最低价模型冒烟",
       tokenHubResponses: "not-run",
       tokenHubChat: "not-run",
     },

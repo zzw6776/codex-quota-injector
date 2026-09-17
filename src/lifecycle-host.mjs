@@ -64,6 +64,7 @@ export function evaluateLifecycleReadiness({
   debugReady = true,
   expectedProtocol,
   healthState = null,
+  threadId = null,
   now = Date.now(),
 } = {}) {
   const protocol = relayProtocolFromGeneration(relayConfig?.generation);
@@ -82,6 +83,7 @@ export function evaluateLifecycleReadiness({
     },
     relayState,
     healthState,
+    threadId,
     relayCurrent: relayStateCurrent === true,
     now,
   });
@@ -108,6 +110,7 @@ export async function inspectLifecycleHost({
   installedApp = DEFAULT_INSTALLED_APP,
   expectedProtocol,
   cdpPort = 9_229,
+  threadId = null,
 } = {}) {
   const relayConfigPath = join(dataDir, "app-server-relay-config.json");
   const relayStatePath = join(dataDir, "app-server-relay-state.json");
@@ -146,6 +149,7 @@ export async function inspectLifecycleHost({
     debugReady,
     expectedProtocol,
     healthState,
+    threadId,
   });
   const desktopPidSet = new Set(codexPids);
   const appServerPids = appServerAndDesktopPids.filter((pid) => !desktopPidSet.has(pid));

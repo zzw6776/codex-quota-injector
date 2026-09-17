@@ -10,20 +10,33 @@ function requestCodexAppToolsReload(state) {
 }
 
 function requestCodexAppToolsStatus(state, threadId) {
-  if (!state.hostHealth || state.hostToolReloadInFlight ||
-    state.hostHealth.snapshot().status === "ready") return;
-  state.hostToolReloadInFlight = true;
-  sendHostToolReloadRequest(state, MCP_STATUS_LIST_METHOD, "startup-verify", threadId);
+  if (!state.hostHealth || state.hostHealth.snapshot(threadId).status === "ready") return;
+  state.hostToolStatusQueue ??= new Set();
+  state.hostToolStatusQueue.add(threadId);
+  drainHostToolStatusQueue(state);
+}
+
+function drainHostToolStatusQueue(state) {
+  if (state.hostToolReloadInFlight) return;
+  for (const threadId of state.hostToolStatusQueue ?? []) {
+    state.hostToolStatusQueue.delete(threadId);
+    if (state.hostHealth.snapshot(threadId).status === "ready") continue;
+    state.hostToolReloadInFlight = true;
+    sendHostToolReloadRequest(state, MCP_STATUS_LIST_METHOD, "startup-verify", threadId);
+    return;
+  }
 }
 
 function sendHostToolReloadRequest(state, method, phase, threadId = null) {
   const id = `codex-quota-host-tools-${phase}-${randomUUID()}`;
-  rememberPendingRequest(state, id, {
+  const pending = {
     method,
     internalHostToolReload: true,
     phase,
     threadId,
-  });
+    healthRevision: state.hostHealth?.statusRevision(threadId),
+  };
+  rememberPendingRequest(state, id, pending);
   try {
     // The official schema models config/mcpServer/reload as a unit request,
     // while mcpServerStatus/list requires an object even when all fields use
@@ -33,15 +46,15 @@ function sendHostToolReloadRequest(state, method, phase, threadId = null) {
       : { id, method, params: threadId == null ? {} : { threadId } });
   } catch (error) {
     state.pendingRequests.delete(id);
-    reportHostToolError(state, phase, threadId, error);
+    reportHostToolError(state, pending, error);
     finishHostToolReload(state);
     return;
   }
   clearTimeout(state.hostToolReloadTimer);
   state.hostToolReloadTimer = setTimeout(() => {
-    const pending = state.pendingRequests.get(id);
-    if (pending) pending.expired = true;
-    reportHostToolError(state, phase, threadId, new Error("官方 app-server 核验任务工具超时"));
+    const request = state.pendingRequests.get(id);
+    if (request) request.expired = true;
+    reportHostToolError(state, pending, new Error("官方 app-server 核验任务工具超时"));
     finishHostToolReload(state);
   }, HOST_TOOL_RELOAD_TIMEOUT_MS);
   state.hostToolReloadTimer.unref?.();
@@ -52,7 +65,7 @@ function handleHostToolReloadResponse(message, pending, state) {
   clearTimeout(state.hostToolReloadTimer);
   state.hostToolReloadTimer = null;
   if (message.error) {
-    reportHostToolError(state, pending.phase, pending.threadId, message.error);
+    reportHostToolError(state, pending, message.error);
     finishHostToolReload(state);
     return;
   }
@@ -64,8 +77,8 @@ function handleHostToolReloadResponse(message, pending, state) {
   finishHostToolReload(state);
 }
 
-function reportHostToolError(state, phase, threadId, error) {
-  if (phase === "startup-verify") state.hostHealth?.observeStatusList(null, error, { threadId });
+function reportHostToolError(state, pending, error) {
+  if (pending.phase === "startup-verify") state.hostHealth?.observeStatusList(null, error, pending);
   else state.hostHealth?.observeReloadFailed(error);
 }
 
@@ -73,6 +86,7 @@ function finishHostToolReload(state) {
   clearTimeout(state.hostToolReloadTimer);
   state.hostToolReloadTimer = null;
   state.hostToolReloadInFlight = false;
+  drainHostToolStatusQueue(state);
 }
 
 export { requestCodexAppToolsReload, requestCodexAppToolsStatus, handleHostToolReloadResponse };

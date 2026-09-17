@@ -1,3 +1,4 @@
+import { bindLifecycleTask } from "../lifecycle-task-tools.mjs";
 import { AccountManager } from "../../src/account-manager.mjs";
 import { inspectLifecycleHost, lifecycleFingerprint, readJson } from "../../src/lifecycle-host.mjs";
 import { waitForCodexTurnsIdle } from "../../src/lifecycle-turn-gate.mjs";
@@ -26,6 +27,7 @@ function createWindowsLifecycleOperations(controlPath, initialControl) {
   const currentHost = (expectedProtocol = control.expectedProtocol) => inspectLifecycleHost({
     installedApp: control.installedApp,
     expectedProtocol,
+    threadId: control.sessionCheckpoint ? bindLifecycleTask(control).threadId : null,
   });
   const verifyReady = async (options = {}) => waitForWindowsTargetHost(control, options);
   const waitForDesktopIdle = () => waitForCodexTurnsIdle({ codexHome: control.codexHome });

@@ -399,7 +399,7 @@ test("[LCH-04 TOOL-04] 重新加载并检查会重载官方 MCP 并以内置状�
   assert.deepEqual(health.missingTools, []);
 });
 
-test("[LCH-04 TOOL-04] 任务 MCP 晚于空全局目录就绪时主动核验该任务且不重载", async t => {
+test("[LCH-04 TOOL-04] 多个任务 MCP 交错就绪时逐个核验且不重载", async t => {
   const directory = await useTempDir(t, "codex-thread-only-host-tools-");
   const upstream = join(directory, "thread-only.mjs");
   const executable = join(directory, process.platform === "win32" ? "upstream.exe" : "upstream");
@@ -412,10 +412,10 @@ import {appendFileSync} from 'node:fs';
 const send=x=>console.log(JSON.stringify(x));
 for await(const line of createInterface({input:process.stdin})) {
  const x=JSON.parse(line);appendFileSync(process.env.RELAY_TEST_REQUEST_LOG,JSON.stringify(x)+'\\n');
- if(x.method==='initialize') {send({id:x.id,result:{}});setTimeout(()=>send({method:'mcpServer/startupStatus/updated',params:{name:'codex_app',status:'ready',threadId:'ready-thread'}}),100);}
+ if(x.method==='initialize') {send({id:x.id,result:{}});setTimeout(()=>{for(const threadId of ['ready-thread','other-thread']) send({method:'mcpServer/startupStatus/updated',params:{name:'codex_app',status:'ready',threadId}})},100);}
  else if(x.method==='mcpServerStatus/list') {
-  const data=x.params?.threadId==='ready-thread'?[{name:'codex_app',runtimeStatus:'connected',tools:Object.fromEntries(['list_threads','read_thread','list_projects','get_usage_limits'].map(name=>[name,{name}]))}]:[];
-  send({id:x.id,result:{data}});
+  const data=['ready-thread','other-thread'].includes(x.params?.threadId)?[{name:'codex_app',runtimeStatus:'connected',tools:Object.fromEntries(['list_threads','read_thread','list_projects','get_usage_limits'].map(name=>[name,{name}]))}]:[];
+  setTimeout(()=>send({id:x.id,result:{data}}),x.params?.threadId==='ready-thread'?50:0);
  } else send({id:x.id,result:{}});
 }`);
   await writeFile(configPath, JSON.stringify({upstreamExecutable: executable,
@@ -435,16 +435,20 @@ for await(const line of createInterface({input:process.stdin})) {
   child.stdin.write(`${JSON.stringify({id: 2, method: "mcpServerStatus/list", params: {}})}\n`);
   await waitFor(async () => {
     const health = JSON.parse(await readFile(healthPath, "utf8").catch(() => "null"));
-    return health?.status === "ready" && health.threadId === "ready-thread" && health.toolsVerified === true;
+    return health?.tasks?.["ready-thread"]?.status === "ready" &&
+      health.tasks?.["other-thread"]?.status === "ready";
   }, {timeoutMs: 10_000});
   child.stdin.end();
   await closed;
   const health = JSON.parse(await readFile(healthPath, "utf8"));
   assert.equal(health.status, "ready");
-  assert.equal(health.threadId, "ready-thread");
+  assert.equal(health.threadId, "other-thread");
+  assert.equal(health.tasks["ready-thread"].toolsVerified, true);
+  assert.equal(health.tasks["other-thread"].toolsVerified, true);
   assert.deepEqual(health.missingTools, []);
   const requests = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
-  assert.ok(requests.some(x=>x.method === "mcpServerStatus/list" && x.params?.threadId === "ready-thread"));
+  assert.deepEqual(requests.filter(x => x.method === "mcpServerStatus/list" && x.params?.threadId)
+    .map(x => x.params.threadId), ["ready-thread", "other-thread"]);
   assert.ok(requests.every(x=>x.method !== "config/mcpServer/reload" && x.method !== "turn/start"));
   assert.doesNotMatch(stdout, /codex-quota-host-tools-/);
   const responses = stdout.trim().split(/\r?\n/).map(JSON.parse);

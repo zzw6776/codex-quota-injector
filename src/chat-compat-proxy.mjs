@@ -63,16 +63,17 @@ async function proxyRequest(request, response, targets, history) {
     }
     const scopedHistory = history.forPlatform(route.target.id);
     if (!shouldUseChatCompatibility(model, preparedBody)) {
-      const normalizedBody = normalizeResponsesRequestToolSchemas(preparedBody);
-      const unavailableHostedTools = applyResponsesCapabilityPolicy(normalizedBody, model);
+      // 能力策略只替换顶层字段；工具转换器负责唯一一次 Schema 规范化。
+      const compatibleBody = { ...preparedBody };
+      const unavailableHostedTools = applyResponsesCapabilityPolicy(compatibleBody, model);
       if (!needsResponsesToolBridge(model)) {
-        forwardJson(request.headers, response, route.url, normalizedBody);
+        forwardJson(request.headers, response, route.url, normalizeResponsesRequestToolSchemas(compatibleBody));
         return;
       }
       const previousResponseId = text(preparedBody?.previous_response_id);
       const restored = {
-        ...normalizedBody,
-        input: restoreToolCalls(normalizedBody, scopedHistory),
+        ...compatibleBody,
+        input: restoreToolCalls(compatibleBody, scopedHistory),
       };
       const prepared = prepareResponsesToolRequest(restored, {
         inheritedTools: scopedHistory.getTools(previousResponseId),

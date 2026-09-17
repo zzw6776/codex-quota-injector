@@ -60,7 +60,6 @@ function createConversationUsage({ usageSummaryText, selectNetworkLatency, MAX_C
       Number(Boolean(left?.completed)) - Number(Boolean(right?.completed)) ||
       Number(Boolean(left?.isSubagentSummary)) - Number(Boolean(right?.isSubagentSummary)) ||
       Number(left?.updatedAt) - Number(right?.updatedAt)));
-    bindConversationObserver();
     if (state.conversationDomDirty) {
       state.conversationTurnNodes = new Map([...document.querySelectorAll("[data-content-search-turn-key]")]
         .map((node) => [node.getAttribute("data-content-search-turn-key"), node]));
@@ -153,33 +152,6 @@ function createConversationUsage({ usageSummaryText, selectNetworkLatency, MAX_C
     const identity = nickname || pathName;
     const depth = Math.max(1, Number(usage.agentDepth) || 1);
     return `${depth > 1 ? `子智能体 L${depth}` : "子智能体"}${identity ? ` ${identity}` : ""}`;
-  }
-
-  function findConversationObserverRoot() {
-    const firstTurn = document.querySelector(conversationTurnSelector);
-    if (!firstTurn) return null;
-    let candidate = firstTurn.parentElement;
-    while (candidate && candidate !== document.body) {
-      if (candidate.querySelectorAll(conversationTurnSelector).length > 1) return candidate;
-      candidate = candidate.parentElement;
-    }
-    return firstTurn.parentElement;
-  }
-
-  function bindConversationObserver() {
-    if (state.conversationObserverRoot?.isConnected) return;
-    const root = findConversationObserverRoot();
-    if (root === state.conversationObserverRoot) return;
-    state.observer?.disconnect();
-    state.conversationObserverRoot = root;
-    if (root) {
-      state.observer?.observe(root, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["data-content-search-turn-key"],
-      });
-    }
   }
 
   function mutationTouchesConversation(mutations) {

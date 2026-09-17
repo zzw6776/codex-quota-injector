@@ -1,275 +1,179 @@
+import { randomUUID } from "node:crypto";
 import {
   WIDGET_HEALTH_CHECK_MS,
   TOKEN_USAGE_STABILITY_GRACE_MS,
 } from "./contract.mjs";
 
 function createWidgetSession(dependencies) {
-  let widgetInstalled = false;
-
-  let lastStaticJson = null;
-
-  let lastStaticCoreJson = null;
-
-  let lastNetworkJson = null;
-
-  let lastTokenUsageTurns = null;
-
-  let lastTokenUsageSignatures = new Map();
-
-  let lastTokenUsageStatus = null;
-
-  let lastTokenUsageError = null;
-
-  let widgetUpdateRevision = 0;
-
-  let widgetUpdatePromise = null;
-
-  let widgetUpdateRequested = false;
-
-  let widgetDataDirty = true;
-
-  let widgetDataRevision = 0;
-
-  let lastStableTokenUsage = null;
-
-  let lastStableTokenUsageAt = 0;
-
-  let lastWidgetHealthCheckAt = 0;
+  let connection = null;
+  let dataRevision = 0;
+  let updatePromise = null;
+  let updateRequested = false;
+  let stableUsage = null;
+  let stableUsageAt = 0;
 
   function markWidgetDataDirty() {
-    widgetDataDirty = true;
-    widgetDataRevision += 1;
+    dataRevision += 1;
+  }
+
+  function reset() {
+    connection = null;
+    markWidgetDataDirty();
+  }
+
+  // Rollout reconciliation can temporarily publish an empty view. Keep this
+  // existing display policy separate from the per-connection delivery state.
+  function tokenUsageView(now) {
+    const usage = dependencies.tokenUsageManager.getViewModel();
+    const hasTurns = usage.turns.length > 0;
+    if (usage.status === "ready" &&
+      (hasTurns || !stableUsage || now - stableUsageAt >= TOKEN_USAGE_STABILITY_GRACE_MS)) {
+      stableUsage = usage;
+      stableUsageAt = now;
+    }
+    return stableUsage && now - stableUsageAt < TOKEN_USAGE_STABILITY_GRACE_MS &&
+      (!hasTurns || usage.status !== "ready")
+      ? { ...stableUsage, status: usage.status, error: usage.error }
+      : usage;
+  }
+
+  function snapshot(previous) {
+    const account = dependencies.accountManager.getViewModel();
+    const core = {
+      version: dependencies.appDisplayVersion,
+      injectionMode: dependencies.injectionMode,
+      accounts: account.accounts.map((item) => ({
+        ...item,
+        wakeup: dependencies.wakeupManager.getViewModel(item.id),
+      })),
+      windows: account.windows,
+      currentAccountId: account.currentAccountId,
+      operation: account.operation,
+      context: dependencies.contextManager.getViewModel(),
+      hostHealth: dependencies.hostHealth,
+    };
+    const extraModels = dependencies.extraModelManager.getViewModel();
+    const network = dependencies.modelRouterManager.getNetworkViewModel?.() ?? null;
+    const usage = tokenUsageView(Date.now());
+    const sameTurns = usage.turns === previous?.usage.turns;
+    const signatures = sameTurns ? previous.signatures : new Map();
+    const updates = [];
+    if (!sameTurns) {
+      for (const turn of usage.turns) {
+        const signature = JSON.stringify(turn);
+        signatures.set(turn.turnId, signature);
+        if (signature !== previous?.signatures.get(turn.turnId)) updates.push(turn);
+      }
+    }
+    const removedTurnIds = sameTurns || !previous ? []
+      : [...previous.signatures.keys()].filter((id) => !signatures.has(id));
+    return {
+      core, extraModels, network, usage, signatures,
+      coreJson: JSON.stringify(core),
+      modelsJson: JSON.stringify(extraModels),
+      networkJson: JSON.stringify(network),
+      usageDelta: { status: usage.status, error: usage.error ?? null, updates, removedTurnIds },
+    };
+  }
+
+  function updatesFor(next, previous, widget, revision) {
+    if (!previous) {
+      // A surviving page may still have revisions from an earlier injector.
+      // Connection-scoped revisions always replace that earlier baseline.
+      return [widget.widgetUpdateExpressionJson(JSON.stringify({
+        ...next.core, extraModels: next.extraModels, network: next.network, tokenUsage: next.usage,
+      }), revision)];
+    }
+    const updates = [];
+    if (next.coreJson !== previous.coreJson) {
+      updates.push(widget.widgetUpdateExpressionJson(JSON.stringify({
+        ...next.core, extraModels: next.extraModels,
+      }), revision));
+    } else if (next.modelsJson !== previous.modelsJson) {
+      updates.push(widget.widgetExtraModelsUpdateExpressionJson(next.modelsJson, revision));
+    }
+    if (next.networkJson !== previous.networkJson) {
+      updates.push(widget.widgetNetworkUpdateExpressionJson(next.networkJson));
+    }
+    if (next.usage.status !== previous.usage.status ||
+      (next.usage.error ?? null) !== (previous.usage.error ?? null) ||
+      next.usageDelta.updates.length || next.usageDelta.removedTurnIds.length) {
+      updates.push(widget.widgetTokenUsageDeltaUpdateExpressionJson(
+        JSON.stringify(next.usageDelta), revision,
+      ));
+    }
+    return updates;
   }
 
   async function pushWidgetViewModel() {
-    const currentCdp = dependencies.cdp;
-    if (!currentCdp?.isConnected || !widgetInstalled || dependencies.stopped)
-      return false;
-    if (
-      widgetInstalled &&
-      Date.now() - lastWidgetHealthCheckAt >= WIDGET_HEALTH_CHECK_MS
-    ) {
-      lastWidgetHealthCheckAt = Date.now();
-      const runtimeVersion = await currentCdp.evaluate(
-        dependencies.widget.widgetRuntimeVersionExpression(),
-      );
-      if (runtimeVersion !== dependencies.widget.WIDGET_RUNTIME_VERSION) {
-        await currentCdp.evaluate(
-          dependencies.widget.widgetInstallExpression(),
-        );
-        widgetInstalled = true;
-        lastStaticJson = null;
-        lastTokenUsageSignatures = new Map();
-        lastTokenUsageStatus = null;
-        lastTokenUsageError = null;
-        widgetUpdateRevision = 0;
-        markWidgetDataDirty();
+    const cdp = dependencies.cdp;
+    const widget = dependencies.widget;
+    if (!cdp?.isConnected || dependencies.stopped) return false;
+    if (connection?.cdp !== cdp || connection?.widget !== widget) {
+      connection = { id: randomUUID(), cdp, widget, installed: false, checkedAt: 0,
+        snapshot: null, sentRevision: -1, updateRevision: 0 };
+    }
+    const current = connection;
+    const isCurrent = () => connection === current && dependencies.cdp === cdp &&
+      dependencies.widget === widget && !dependencies.stopped;
+    if (current.installed && Date.now() - current.checkedAt >= WIDGET_HEALTH_CHECK_MS) {
+      const version = await cdp.evaluate(widget.widgetRuntimeVersionExpression());
+      if (!isCurrent()) return false;
+      current.checkedAt = Date.now();
+      current.installed = version === widget.WIDGET_RUNTIME_VERSION;
+    }
+    if (!current.installed) {
+      const version = await cdp.evaluate(widget.widgetInstallExpression());
+      if (!isCurrent()) return false;
+      if (version !== widget.WIDGET_RUNTIME_VERSION) throw new Error("Widget 安装版本不匹配");
+      current.installed = true;
+      current.checkedAt = Date.now();
+      current.snapshot = null;
+      current.sentRevision = -1;
+    }
+    if (current.sentRevision === dataRevision) return true;
+    const revision = dataRevision;
+    const next = snapshot(current.snapshot);
+    const updates = updatesFor(next, current.snapshot, widget, `${current.id}:${++current.updateRevision}`);
+    if (updates.length) {
+      // One browser task applies all channels. Missing/replaced runtimes do not
+      // acknowledge delivery, so the next attempt starts with a full snapshot.
+      const applied = await cdp.evaluate(`(() => {
+        if (window.__codexQuotaWidget?.version !== ${widget.WIDGET_RUNTIME_VERSION}) return false;
+        ${updates.join(";\n")};
+        return true;
+      })()`);
+      if (!isCurrent()) return false;
+      if (!applied) {
+        current.installed = false;
+        updateRequested = true;
+        return false;
       }
     }
-    if (!widgetDataDirty) return dependencies.cdp === currentCdp;
-    const dataRevisionAtStart = widgetDataRevision;
-    const tokenUsage = dependencies.tokenUsageManager.getViewModel();
-    const hasCurrentTurns =
-      Array.isArray(tokenUsage.turns) && tokenUsage.turns.length > 0;
-    if (
-      tokenUsage.status === "ready" &&
-      (hasCurrentTurns || !lastStableTokenUsage)
-    ) {
-      lastStableTokenUsage = tokenUsage;
-      lastStableTokenUsageAt = Date.now();
-    }
-    const keepStableTokenUsage =
-      lastStableTokenUsage &&
-      Date.now() - lastStableTokenUsageAt < TOKEN_USAGE_STABILITY_GRACE_MS;
-    if (
-      !hasCurrentTurns &&
-      tokenUsage.status === "ready" &&
-      !keepStableTokenUsage
-    ) {
-      lastStableTokenUsage = tokenUsage;
-      lastStableTokenUsageAt = Date.now();
-    }
-    const stableTokenUsage =
-      keepStableTokenUsage &&
-      (!hasCurrentTurns || tokenUsage.status !== "ready")
-        ? {
-            ...lastStableTokenUsage,
-            status: tokenUsage.status,
-            error: tokenUsage.error,
-          }
-        : tokenUsage;
-    const viewModel = {
-      ...dependencies.accountManager.getViewModel(),
-      context: dependencies.contextManager.getViewModel(),
-      extraModels: dependencies.extraModelManager.getViewModel(),
-      network: dependencies.modelRouterManager.getNetworkViewModel?.() ?? null,
-      tokenUsage: stableTokenUsage,
-    };
-    const staticViewModel = {
-      version: dependencies.appDisplayVersion,
-      injectionMode: dependencies.injectionMode,
-      accounts: viewModel.accounts.map((account) => ({
-        ...account,
-        wakeup: dependencies.wakeupManager.getViewModel(account.id),
-      })),
-      windows: viewModel.windows,
-      currentAccountId: viewModel.currentAccountId,
-      operation: viewModel.operation,
-      context: viewModel.context,
-      extraModels: viewModel.extraModels,
-      hostHealth: dependencies.hostHealth,
-    };
-    const firstSnapshot = lastStaticJson == null;
-    const networkJson = JSON.stringify(viewModel.network);
-    const staticJson = JSON.stringify(staticViewModel);
-    const { extraModels: _extraModels, ...staticCoreViewModel } =
-      staticViewModel;
-    const staticCoreJson = JSON.stringify(staticCoreViewModel);
-    // TokenUsageManager reuses the view until its data changes. Network and
-    // account events need not serialize every unchanged historical turn.
-    const sameTurns = !firstSnapshot && stableTokenUsage.turns === lastTokenUsageTurns;
-    const nextTokenUsageSignatures = sameTurns ? lastTokenUsageSignatures : new Map();
-    const tokenUsageUpdates = [];
-    for (const turn of !sameTurns && Array.isArray(stableTokenUsage.turns)
-      ? stableTokenUsage.turns
-      : []) {
-      const turnId = String(turn?.turnId ?? "");
-      if (!turnId) continue;
-      const signature = JSON.stringify(turn);
-      nextTokenUsageSignatures.set(turnId, signature);
-      if (signature !== lastTokenUsageSignatures.get(turnId))
-        tokenUsageUpdates.push(turn);
-    }
-    const removedTurnIds = [...lastTokenUsageSignatures.keys()].filter(
-      (turnId) => !nextTokenUsageSignatures.has(turnId),
-    );
-    const tokenUsageDelta = {
-      status: stableTokenUsage.status,
-      error: stableTokenUsage.error ?? null,
-      updates: tokenUsageUpdates,
-      removedTurnIds,
-    };
-    const tokenUsageChanged =
-      stableTokenUsage.status !== lastTokenUsageStatus ||
-      (stableTokenUsage.error ?? null) !== lastTokenUsageError ||
-      tokenUsageUpdates.length > 0 ||
-      removedTurnIds.length > 0;
-    if (staticJson !== lastStaticJson) {
-      if (lastStaticJson != null && staticCoreJson === lastStaticCoreJson) {
-        await currentCdp.evaluate(
-          dependencies.widget.widgetExtraModelsUpdateExpressionJson(
-            JSON.stringify(staticViewModel.extraModels),
-            ++widgetUpdateRevision,
-          ),
-        );
-      } else {
-        await currentCdp.evaluate(
-          dependencies.widget.widgetUpdateExpressionJson(
-            JSON.stringify({
-              ...staticViewModel,
-              ...(firstSnapshot ? { tokenUsage: stableTokenUsage, network: viewModel.network } : {}),
-            }),
-            ++widgetUpdateRevision,
-          ),
-        );
-      }
-    }
-    if (!firstSnapshot && networkJson !== lastNetworkJson) {
-      await currentCdp.evaluate(
-        dependencies.widget.widgetNetworkUpdateExpressionJson(networkJson),
-      );
-    }
-    if (!firstSnapshot && tokenUsageChanged) {
-      await currentCdp.evaluate(
-        dependencies.widget.widgetTokenUsageDeltaUpdateExpressionJson(
-          JSON.stringify(tokenUsageDelta),
-          ++widgetUpdateRevision,
-        ),
-      );
-    }
-    if (dependencies.cdp === currentCdp) {
-      lastStaticJson = staticJson;
-      lastStaticCoreJson = staticCoreJson;
-      lastNetworkJson = networkJson;
-      lastTokenUsageTurns = stableTokenUsage.turns;
-      lastTokenUsageSignatures = nextTokenUsageSignatures;
-      lastTokenUsageStatus = stableTokenUsage.status;
-      lastTokenUsageError = stableTokenUsage.error ?? null;
-    }
-    if (
-      dependencies.cdp === currentCdp &&
-      widgetDataRevision === dataRevisionAtStart
-    ) {
-      widgetDataDirty = false;
-    }
-    return dependencies.cdp === currentCdp;
+    current.snapshot = next;
+    current.sentRevision = revision;
+    if (dataRevision !== revision) updateRequested = true;
+    return true;
   }
 
   function requestWidgetUpdate() {
     if (dependencies.widgetReloading) return Promise.resolve(false);
-    widgetUpdateRequested = true;
-    if (widgetUpdatePromise) return widgetUpdatePromise;
-    const task = (async () => {
+    updateRequested = true;
+    if (updatePromise) return updatePromise;
+    updatePromise = Promise.resolve().then(async () => {
+      let applied;
       do {
-        widgetUpdateRequested = false;
-        await pushWidgetViewModel();
-      } while (widgetUpdateRequested && !dependencies.stopped);
-    })().finally(() => {
-      if (widgetUpdatePromise === task) widgetUpdatePromise = null;
-    });
-    widgetUpdatePromise = task;
-    return task;
+        updateRequested = false;
+        applied = await pushWidgetViewModel();
+      } while (updateRequested && !dependencies.stopped && !dependencies.widgetReloading);
+      return applied;
+    }).finally(() => { updatePromise = null; });
+    return updatePromise;
   }
 
   return {
-    get widgetInstalled() {
-      return widgetInstalled;
-    },
-    set widgetInstalled(value) {
-      widgetInstalled = value;
-    },
-    get lastStaticJson() {
-      return lastStaticJson;
-    },
-    set lastStaticJson(value) {
-      lastStaticJson = value;
-    },
-    get lastTokenUsageSignatures() {
-      return lastTokenUsageSignatures;
-    },
-    set lastTokenUsageSignatures(value) {
-      lastTokenUsageSignatures = value;
-    },
-    get lastTokenUsageStatus() {
-      return lastTokenUsageStatus;
-    },
-    set lastTokenUsageStatus(value) {
-      lastTokenUsageStatus = value;
-    },
-    get lastTokenUsageError() {
-      return lastTokenUsageError;
-    },
-    set lastTokenUsageError(value) {
-      lastTokenUsageError = value;
-    },
-    get widgetUpdateRevision() {
-      return widgetUpdateRevision;
-    },
-    set widgetUpdateRevision(value) {
-      widgetUpdateRevision = value;
-    },
-    get widgetUpdatePromise() {
-      return widgetUpdatePromise;
-    },
-    set widgetUpdatePromise(value) {
-      widgetUpdatePromise = value;
-    },
-    get lastWidgetHealthCheckAt() {
-      return lastWidgetHealthCheckAt;
-    },
-    set lastWidgetHealthCheckAt(value) {
-      lastWidgetHealthCheckAt = value;
-    },
+    reset,
+    whenIdle: () => updatePromise ?? Promise.resolve(),
     markWidgetDataDirty,
     requestWidgetUpdate,
   };

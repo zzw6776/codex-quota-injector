@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { useTempDir } from "./helpers.mjs";
 import { join } from "node:path";
@@ -109,4 +109,39 @@ test("损坏或未来版本的上下文存储只读保护，不会被覆盖", as
   assert.match(view.message, /不支持.*版本/);
   await assert.rejects(manager.setOverride("official-model", 1, 1), /存储未修改/);
   assert.equal(await readFile(storePath, "utf8"), original);
+});
+
+test("上下文写入失败保持已发布状态，后续操作仍可保存", async (t) => {
+  for (const operation of ["set", "reset", "resetAll"]) {
+    await t.test(operation, async (t) => {
+      const codexHome = await useTempDir(t, "codex-home-test-");
+      const dataDir = await useTempDir(t);
+      await writeFile(join(codexHome, "models_cache.json"), JSON.stringify(baseCatalog()));
+      const manager = new CodexContextManager({ codexHome, dataDir });
+      await manager.initialize();
+      await manager.setOverride("official-model", 192_000, 384_000);
+      const before = manager.getEffectiveCatalog();
+      const storePath = join(dataDir, "context-overrides.json");
+      const savedPath = `${storePath}.saved`;
+      const saved = await readFile(storePath, "utf8");
+      await rename(storePath, savedPath);
+      await mkdir(storePath); // 真实触发原子替换失败，不依赖权限或 mock。
+      const change = () => operation === "set"
+        ? manager.setOverride("official-model", 256_000, 512_000)
+        : operation === "reset" ? manager.resetOverride("official-model") : manager.resetAll();
+
+      await assert.rejects(change(), (error) => ["EISDIR", "EPERM", "EACCES"].includes(error.code));
+      assert.deepEqual(manager.getEffectiveCatalog(), before);
+      assert.equal(await readFile(savedPath, "utf8"), saved);
+
+      await rm(storePath, { recursive: true });
+      await rename(savedPath, storePath);
+      await change();
+      assert.equal(manager.getEffectiveCatalog().models[0].context_window,
+        operation === "set" ? 256_000 : 128_000);
+      const reloaded = new CodexContextManager({ codexHome, dataDir });
+      await reloaded.initialize();
+      assert.deepEqual(reloaded.getEffectiveCatalog(), manager.getEffectiveCatalog());
+    });
+  }
 });

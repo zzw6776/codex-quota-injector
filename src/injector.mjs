@@ -101,24 +101,12 @@ export async function runInjector({
 
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
   const widgetSession = createWidgetSession({
-    get injectionMode() {
-      return injectionMode;
-    },
-    get accountManager() {
-      return accountManager;
-    },
-    get contextManager() {
-      return contextManager;
-    },
-    get extraModelManager() {
-      return extraModelManager;
-    },
-    get modelRouterManager() {
-      return modelRouterManager;
-    },
-    get tokenUsageManager() {
-      return tokenUsageManager;
-    },
+    injectionMode,
+    accountManager,
+    contextManager,
+    extraModelManager,
+    modelRouterManager,
+    tokenUsageManager,
     get cdp() {
       return cdp;
     },
@@ -143,18 +131,12 @@ export async function runInjector({
   });
 
   const hostHealthSession = createHostHealthSession({
-    get getLaunchOptions() {
-      return getLaunchOptions;
-    },
+    getLaunchOptions,
     get stopped() {
       return stopped;
     },
-    get markWidgetDataDirty() {
-      return widgetSession.markWidgetDataDirty;
-    },
-    get requestWidgetUpdate() {
-      return widgetSession.requestWidgetUpdate;
-    },
+    markWidgetDataDirty: widgetSession.markWidgetDataDirty,
+    requestWidgetUpdate: widgetSession.requestWidgetUpdate,
   });
 
   const wakeupManager = new AccountWakeupManager(accountManager, () => {
@@ -173,6 +155,7 @@ export async function runInjector({
 
   const stop = () => {
     stopped = true;
+    widgetSession.reset();
     registerLaunchRecovery?.(null);
     registerWidgetReload?.(null);
     wakeupManager.close();
@@ -276,23 +259,10 @@ export async function runInjector({
       cdp = new CdpClient(target.webSocketDebuggerUrl);
       await cdp.connect();
       targetId = target.id;
-      widgetSession.lastStaticJson = null;
-      widgetSession.lastTokenUsageSignatures = new Map();
-      widgetSession.lastTokenUsageStatus = null;
-      widgetSession.lastTokenUsageError = null;
-      widgetSession.widgetUpdateRevision = 0;
-      widgetSession.widgetInstalled = false;
-      widgetSession.lastWidgetHealthCheckAt = 0;
+      widgetSession.reset();
       lastAccountOperationJson = null;
-      widgetSession.markWidgetDataDirty();
       reconnected = true;
       await contextManager.refresh();
-    }
-    if (!widgetSession.widgetInstalled) {
-      await cdp.evaluate(widget.widgetInstallExpression());
-      widgetSession.widgetInstalled = true;
-      widgetSession.lastWidgetHealthCheckAt = Date.now();
-      widgetSession.markWidgetDataDirty();
     }
     if (reconnected) {
       const tokenRefresh = tokenUsageManager.refresh().catch((error) => {
@@ -549,14 +519,8 @@ export async function runInjector({
     cdp?.close();
     cdp = null;
     targetId = null;
-    widgetSession.widgetInstalled = false;
-    widgetSession.lastStaticJson = null;
-    widgetSession.lastWidgetHealthCheckAt = 0;
+    widgetSession.reset();
     hostHealthSession.lastHostHealthCheckAt = 0;
-    widgetSession.lastTokenUsageSignatures = new Map();
-    widgetSession.lastTokenUsageStatus = null;
-    widgetSession.lastTokenUsageError = null;
-    widgetSession.markWidgetDataDirty();
   }
 
   function scheduleModelCatalogRefresh(delayMs = MODEL_CATALOG_REFRESH_MS) {
@@ -722,19 +686,12 @@ export async function runInjector({
     ) {
       widgetReloading = true;
       try {
-        await widgetSession.widgetUpdatePromise?.catch(() => {});
+        await widgetSession.whenIdle().catch(() => {});
         const next = pendingWidgetReload;
         pendingWidgetReload = null;
         widget = next.widget;
         appDisplayVersion = `${next.version}.dev`;
-        widgetSession.widgetInstalled = false;
-        widgetSession.lastStaticJson = null;
-        widgetSession.lastTokenUsageSignatures = new Map();
-        widgetSession.lastTokenUsageStatus = null;
-        widgetSession.lastTokenUsageError = null;
-        widgetSession.widgetUpdateRevision = 0;
-        widgetSession.lastWidgetHealthCheckAt = 0;
-        widgetSession.markWidgetDataDirty();
+        widgetSession.reset();
       } finally {
         widgetReloading = false;
       }
@@ -835,9 +792,7 @@ export async function runInjector({
       cdp?.close();
       cdp = null;
       targetId = null;
-      widgetSession.widgetInstalled = false;
-      widgetSession.lastWidgetHealthCheckAt = 0;
-      widgetSession.markWidgetDataDirty();
+      widgetSession.reset();
     }
     await delay(TARGET_POLL_MS);
   }

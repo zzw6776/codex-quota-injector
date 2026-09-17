@@ -1,6 +1,6 @@
 # 官方模型与 DeepSeek Flash 测试：真实桌面入口验收
 
-报告版本16起按[组件输入影响规则](testing-index.md#修改后测什么按实际影响复用)复用后台与桌面证据。原始全仓摘要和执行发布版本继续留证，不再作为全部组件失效的依据；下文旧“必须同一源码摘要”指对应受测输入等价。文档、发布版本和无关免费用例变化不强制重新消耗后台模型Token。已完成报告的状态查询只展示执行结果与当前有效性，不重写历史结论。
+报告版本16起按[组件输入影响规则](testing-index.md#修改后测什么按实际影响复用)复用后台与桌面证据。原始全仓摘要和执行发布版本继续留证，不作为全部组件失效的依据；行为复用按对应受测输入等价判断。文档、发布版本和无关免费用例变化不强制重新消耗后台模型Token。已完成报告的状态查询只展示执行结果与当前有效性，不重写历史结论。
 
 全部6个测试组件及macOS原生、Windows原生、WSL原生的18个验收位置见[测试总索引](testing-index.md)。本页只说明其中两个模型的桌面链与后台绑定条件。
 
@@ -11,11 +11,11 @@
 | `model-official-backend/<runtime>` / `model-deepseek-backend/<runtime>` | 隔离的官方 app-server | 真实模型路由、文件/命令/MCP、历史、分叉、压缩及 app-server 回调 |
 | `model-official-desktop/<runtime>` / `model-deepseek-desktop/<runtime>` | 当前 Codex 桌面任务 | 实际模型、codex_app 会话读取、functions.exec、web.run、computer use、当前 Widget/中继/运行环境 |
 
-只有同一源码摘要、平台、运行环境和供应商的两个组件都为 `passed`，对应官方模型测试或 DeepSeek Flash 测试才是 `passed`。后台通过而桌面组件未运行时，总状态是 `incomplete`；不再使用容易被误解为整批通过的后台结果代替桌面结论。
+同一平台、运行环境和供应商的两个组件受测输入仍有效且均为 `passed` 时，原始功能执行总状态为 `passed`；已确认且符合复用条件的官方/兼容性阻断另存接受报告并计验收通过，详见[验收口径](desktop-known-issues.md#通过报告口径)。后台通过而桌面组件未运行时，总状态是 `incomplete`；不再使用容易被误解为整批通过的后台结果代替桌面结论。
 
 ## 执行顺序
 
-无需免费回归报告作为前置条件。后台直接准备本次原生 Relay，桌面入口直接读取本次源码摘要并核对对应后台报告；旧免费报告缺失、失败或过期都不阻断。源码在测试期间变化仍使报告失效。
+无需免费回归报告作为前置条件。后台直接准备本次原生 Relay，桌面入口直接读取本次源码摘要并核对对应后台报告；旧免费报告缺失、失败或过期都不阻断。测试期间受测输入变化时，按影响范围判定对应组件有效性。
 
 计划命令不会发送模型请求：
 
@@ -74,7 +74,7 @@ npm run test:desktop -- --status=<run-id>
 
 桌面组件逐项核对：
 
-1. `package.json` 源码摘要在测试期间未变化；实际 Widget 显示当前项目版本，实际中继协议与源码一致；接管 app-server 时，`codex_app` 健康状态必须为 `ready`。
+1. 对应组件执行输入在测试期间未变化；实际 Widget 显示当前项目版本，或满足全部生产输入等价的版本复用条件，实际中继协议与源码一致；接管 app-server 时，`codex_app` 健康状态必须为 `ready`。
 2. 当前桌面运行环境与报告一致。macOS、Windows 原生 Relay、WSL 原生 Relay 的结果不能互相继承。
 3. rollout 中任务实际使用官方模型测试的官方模型或 DeepSeek Flash 测试的 `deepseek-flash`，并记录任务 ID、轮次 ID 和各工具调用 ID。
 4. `functions.exec` 的成功命令返回随机标记；另一命令返回随机标记和退出码 23，且同一任务随后继续调用其他工具。
@@ -109,7 +109,7 @@ npm run test:desktop -- --profile=official --runtime=wsl-native --plan
 
 ## 报告与其他桌面能力
 
-每次结果写入 `.runtime/test-results/desktop-host/<run-id>/report.json`，相邻 `progress.html` 只显示脱敏步骤和状态，不驱动测试，也不参与断言。后台报告同步记录桌面报告路径、两个组件状态和真实模型测试总状态。固定检查逐项使用 `passed`、`unsupported`、`not-executed`、`failed` 或执行中的 `not-run`；明确不支持的 `unsupported` 项作为“不适用”单列，并从适用项总数中排除；其余适用项全部通过时桌面组件为 `passed`。`not-executed` 和已确认上游故障仍阻断，实际调用失败仍失败；不能将证据不足或未完成配置当作不支持。报告不保存提示正文之外的真实业务内容、工具输出正文或凭据。
+每次结果写入 `.runtime/test-results/desktop-host/<run-id>/report.json`，相邻 `progress.html` 只显示脱敏步骤和状态，不驱动测试，也不参与断言。后台报告同步记录桌面报告路径、两个组件状态和真实模型测试总状态。固定检查逐项使用 `passed`、`unsupported`、`not-executed`、`failed` 或执行中的 `not-run`；明确不支持的 `unsupported` 项作为“不适用”单列，并从适用项总数中排除；其余适用项全部通过时桌面组件为 `passed`。原始执行保留 `not-executed`、上游阻断和实际调用失败；已确认且符合复用条件的上游/兼容性问题在独立接受报告中计验收通过。普通遗漏仍未通过，不能将证据不足或未完成配置当作不支持。报告不保存提示正文之外的真实业务内容、工具输出正文或凭据。
 
 `read_thread` 或其他官方宿主工具异常不能根据单次桌面结果直接归因。先检查已知问题并核对 rollout/SQLite。`read_thread` 的正确任务中出现 completed 回合空 items 时，第一排查方向是 `codex-desktop-read-thread-pagination-cursor`，按[证据复用说明](read-thread-pagination-investigation.md#再次出现时先做什么)核对适用条件；匹配时引用既有对照并注明本任务未重复对照，不因供应商或任务变化重复完整定位。首次出现或证据不匹配时，再以实际运行的同版本官方 app-server、同一数据分别运行无 Relay 直连和正式 Relay 对照。两个底层结果一致且桌面封装异常的证据齐全时才标记 `blocked-upstream`；对照不一致仍保持 `failed` 并继续定位。当前 read_thread 归因只匹配“正确任务已成功返回，完成回合全部为显式空 items”的现场形态；缺失 items 字段、委托正文不完整或其他读取错误不能套用这个阻断标签。
 

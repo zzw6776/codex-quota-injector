@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHostHealthTracker } from "../src/host-health.mjs";
+import { evaluateLifecycleReadiness } from "../src/lifecycle-host.mjs";
 import { activateLifecycleTaskTools, bindLifecycleTask } from "../scripts/lifecycle-task-tools.mjs";
 import { waitForWindowsTargetHost } from "../scripts/lifecycle-windows/host.mjs";
 import { waitForTargetHost } from "../scripts/lifecycle-macos.mjs";
@@ -47,7 +49,8 @@ for (const [platform, wait] of [["Windows/WSL", waitForWindowsTargetHost], ["mac
     let reads = 0;
     let activations = 0;
     const result = await wait(control, { timeoutMs: 1000, pollIntervalMs: 0,
-      inspectHost: async () => {
+      inspectHost: async options => {
+        assert.equal(options.threadId, threadId);
         reads++;
         const ready = reads >= 4;
         return { ...host, hostHealth: { required: true, threadId: ready ? threadId : "other", status: ready ? "ready" : "idle" },
@@ -65,5 +68,26 @@ for (const [platform, wait] of [["Windows/WSL", waitForWindowsTargetHost], ["mac
       inspectHost: async () => host,
       activateTaskTools: async () => { activations++; return { codexPid: 42, threadId }; } }), /就绪超时/);
     assert.equal(activations, 1);
+  });
+}
+
+for (const [platform, wait] of [["Windows/WSL", waitForWindowsTargetHost], ["macOS", waitForTargetHost]]) {
+  test(`[LCH-04] ${platform} 从多任务健康记录读取发起任务，其他任务失败不造成误报`, async t => {
+    const tracker = await createHostHealthTracker({ path: null, generation: "test" });
+    t.after(() => tracker.close({ disconnected: false }));
+    tracker.observeStatusList({ data: [{ name: "codex_app", runtimeStatus: "connected",
+      tools: Object.fromEntries(["list_threads", "read_thread", "list_projects", "get_usage_limits"].map(name => [name, { name }])) }] }, null, { threadId });
+    tracker.observeStartupStatus({ name: "codex_app", status: "failed", threadId: "other" });
+    const result = await wait(control, { timeoutMs: 100, pollIntervalMs: 0,
+      inspectHost: async options => {
+        const readiness = evaluateLifecycleReadiness({
+          relayConfig: { hostToolsRequired: true, generation: "test" },
+          relayState: { generation: "test", pid: tracker.snapshot().pid }, relayPidAlive: true,
+          codexPids: [42], injectorPids: [43], healthState: tracker.snapshot(), threadId: options.threadId,
+        });
+        return { ...host, readiness, hostHealth: readiness.hostHealth };
+      }, activateTaskTools: async () => assert.fail("发起任务已就绪，不应重复激活") });
+    assert.equal(result.hostHealth.threadId, threadId);
+    assert.equal(result.readiness.ready, true);
   });
 }

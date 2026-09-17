@@ -220,20 +220,13 @@ export class CodexContextManager {
       if (nextMaxContextWindow < nextContextWindow) {
         throw new Error("最大上下文窗口不能小于上下文窗口");
       }
-      const previousOverrides = this.overrides;
-      this.overrides = {
+      await this.#persistStore({
         ...this.overrides,
         [slug]: {
           contextWindow: nextContextWindow,
           maxContextWindow: nextMaxContextWindow,
         },
-      };
-      try {
-        await this.#persistStore();
-      } catch (error) {
-        this.overrides = previousOverrides;
-        throw error;
-      }
+      });
       this.message = `${model.display_name ?? slug} 已保存覆盖值，正在重启 Codex`;
       this.messageState = "success";
       return this.getViewModel();
@@ -245,15 +238,9 @@ export class CodexContextManager {
       await this.#refreshOnce({ sync: false });
       this.#assertStoreWritable();
       if (!this.overrides[slug]) return this.getViewModel();
-      const previousOverrides = this.overrides;
-      this.overrides = { ...this.overrides };
-      delete this.overrides[slug];
-      try {
-        await this.#persistStore();
-      } catch (error) {
-        this.overrides = previousOverrides;
-        throw error;
-      }
+      const overrides = { ...this.overrides };
+      delete overrides[slug];
+      await this.#persistStore(overrides);
       this.message = "已恢复该模型的系统默认值，正在重启 Codex";
       this.messageState = "success";
       return this.getViewModel();
@@ -266,14 +253,7 @@ export class CodexContextManager {
       this.#assertStoreWritable();
       const hasOverrides = Object.keys(this.overrides).length > 0;
       if (!hasOverrides) return this.getViewModel();
-      const previousOverrides = this.overrides;
-      this.overrides = {};
-      try {
-        await this.#persistStore();
-      } catch (error) {
-        this.overrides = previousOverrides;
-        throw error;
-      }
+      await this.#persistStore({});
       this.message = "已恢复全部系统默认值，正在重启 Codex";
       this.messageState = "success";
       return this.getViewModel();
@@ -487,26 +467,19 @@ export class CodexContextManager {
     if (firstError) throw firstError;
   }
 
-  async #persistStore() {
+  async #persistStore(overrides = this.overrides) {
     await writeJsonAtomic(this.storePath, {
       version: STORE_VERSION,
-      overrides: this.overrides,
+      overrides,
       legacyCatalogMigration: this.legacyCatalogMigration,
     });
+    this.overrides = overrides;
   }
 
-  async #withLock(callback) {
-    const previous = this.operationTail;
-    let release;
-    this.operationTail = new Promise((resolveRelease) => {
-      release = resolveRelease;
-    });
-    await previous;
-    try {
-      return await callback();
-    } finally {
-      release();
-    }
+  #withLock(callback) {
+    const task = this.operationTail.then(callback);
+    this.operationTail = task.catch(() => {});
+    return task;
   }
 }
 

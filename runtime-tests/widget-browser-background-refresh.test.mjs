@@ -71,3 +71,29 @@ test("[OBS-01] 静态数据更新不抹掉独立通道的用量，关闭期间�
   await b.click(".quota-chip");
   assert.match(await b.value(".account-list"), /latest@example.test/);
 });
+
+test("[UI-02 UI-03] 模型编辑时公共状态继续更新，表单节点和焦点保持不变", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.click('.quota-chip');
+  await b.click('.extra-models-open');
+  await b.click('.extra-platform-add');
+  await b.fill('.extra-platform-form [name="name"]', '正在编辑的平台');
+  await b.client.evaluate(`window.editingForm = ${SHADOW}.querySelector('.extra-platform-form')`);
+  const data = fixtureData({ version: 'updated', windows: [{ remainingPercent: 42 }],
+    hostHealth: { required: true, status: 'degraded', message: 'fixture unavailable', canOpenLogs: true } });
+  await b.update(data);
+  assert.match(await b.value('.quota-chip'), /42%/);
+  assert.equal(await b.value('.panel-version-text'), 'vupdated');
+  assert.match(await b.value('.host-health-status', 'className'), /degraded/);
+  assert.match(await b.value('.host-health-banner'), /fixture unavailable/);
+  assert.equal(await b.client.evaluate(`window.editingForm === ${SHADOW}.querySelector('.extra-platform-form')`), true);
+  assert.equal(await b.value('.extra-platform-form [name="name"]', 'value'), '正在编辑的平台');
+  assert.equal(await b.client.evaluate(`${SHADOW}.activeElement?.name`), 'name');
+  await b.click('.host-health-recheck');
+  assert.deepEqual((await b.drain()).map(action => action.type), ['host-health-recheck']);
+  data.hostHealth = { required: true, status: 'ready' };
+  await b.update(data);
+  assert.equal(await b.value('.host-health-banner'), null);
+  assert.match(await b.value('.host-health-status', 'className'), /ready/);
+  assert.equal(await b.client.evaluate(`window.editingForm === ${SHADOW}.querySelector('.extra-platform-form')`), true);
+});

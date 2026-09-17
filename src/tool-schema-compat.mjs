@@ -42,9 +42,8 @@ const MAX_REFERENCE_EXPANSION_DEPTH = 64;
  */
 export function normalizeToolParametersSchema(schema) {
   if (!isSchema(schema)) return structuredClone(schema);
-  const root = structuredClone(schema);
-  return compileSchema(root, {
-    root,
+  return compileSchema(schema, {
+    root: schema,
     references: new Set(),
     depth: 0,
   });
@@ -103,7 +102,7 @@ function compileSchema(value, context) {
     const reference = value[referenceKey];
     const siblings = compileSchemaObject(value, context, new Set([referenceKey]));
     const target = resolveLocalReference(context.root, reference);
-    if (!target) return siblings;
+    if (target === null) return siblings;
     if (context.references.has(reference)) {
       return intersectSchemas(schemaTypeFallback(target), siblings);
     }
@@ -127,6 +126,7 @@ function compileSchemaObject(value, context, skippedKeys = new Set()) {
           output,
           compileSchema(branch, { ...context, depth: context.depth + 1 }),
         );
+        if (output === false) return false;
       }
       continue;
     }

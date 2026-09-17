@@ -72,6 +72,7 @@
         "test/model-configuration-detection.test.mjs",
         "test/model-configuration-official-catalog.test.mjs",
         "test/host-health.test.mjs",
+        "test/host-tools.test.mjs",
         "test/app-server-relay.test.mjs",
         "test/lifecycle-host.test.mjs",
         "runtime-tests/widget-browser.test.mjs",
@@ -208,6 +209,7 @@
       "free": [
         "test/desktop-host-evidence.test.mjs",
         "test/host-health.test.mjs",
+        "test/host-tools.test.mjs",
         "runtime-tests/browser-host.test.mjs",
         "runtime-tests/desktop-fixture.test.mjs",
         "runtime-tests/windows-computer-use-fixture.test.mjs",

@@ -645,3 +645,32 @@ test("完全原生 Responses 的直接入口仍按能力矩阵过滤未来工具
   assert.equal(requests[0].tool_choice, "auto");
   assert.equal(Object.hasOwn(requests[0], "parallel_tool_calls"), false);
 });
+
+test("Responses 原生与桥接入口都展开工具引用并保留 false 参数约束", async (t) => {
+  const requests = [];
+  const upstream = await startHttpServer(t, async (request, response) => {
+    requests.push(await readJsonRequest(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "schema", status: "completed", output: [] }));
+  });
+  for (const native of [false, true]) {
+    const fixture = await startResponsesBridgeProxy(t, upstream.origin, native ? {
+      customTools: "native", namespaceTools: "native", nativeCustomTools: ["*"],
+    } : {});
+    const response = await fixture.post({ input: "read", tools: [{
+      type: "function", name: "read", parameters: {
+        type: "object",
+        $defs: { path: { type: "string", minLength: 1 }, forbidden: false },
+        properties: { path: { $ref: "#/$defs/path" }, unsafe: { $ref: "#/$defs/forbidden" } },
+        required: ["path"], additionalProperties: false,
+      },
+    }] });
+    assert.equal(response.status, 200, await response.text());
+    assert.deepEqual(requests.at(-1).tools[0].parameters, {
+      type: "object",
+      properties: { path: { type: "string", minLength: 1 }, unsafe: false },
+      required: ["path"], additionalProperties: false,
+    });
+  }
+  assert.equal(requests.length, 2);
+});

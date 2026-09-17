@@ -86,6 +86,39 @@ test("递归引用只展开一层并以已知类型终止", () => {
   });
 });
 
+test("本地引用的 false 禁止约束不会被当作缺失引用丢弃", () => {
+  const schema = {
+    type: "object",
+    $defs: { forbidden: false, allowed: true },
+    properties: {
+      blocked: { $ref: "#/$defs/forbidden", description: "禁止填写" },
+      free: { $ref: "#/$defs/allowed", type: "string" },
+    },
+  };
+  assert.deepEqual(normalizeToolParametersSchema(schema), {
+    type: "object",
+    properties: { blocked: false, free: { type: "string" } },
+  });
+  assert.equal(normalizeToolParametersSchema({ $defs: { no: false }, $ref: "#/$defs/no" }), false);
+  assert.equal(normalizeToolParametersSchema({
+    $defs: { no: false }, allOf: [{ $ref: "#/$defs/no" }], type: "object",
+  }), false);
+});
+
+test("编译结果中的引用、枚举和扩展字段与原始 Schema 相互隔离", () => {
+  const schema = {
+    $defs: { choice: { enum: [{ nested: [1] }] } },
+    properties: { first: { $ref: "#/$defs/choice" }, second: { $ref: "#/$defs/choice" } },
+    "x-metadata": { labels: ["original"] },
+  };
+  const original = structuredClone(schema);
+  const result = normalizeToolParametersSchema(schema);
+  result.properties.first.enum[0].nested.push(2);
+  result["x-metadata"].labels.push("changed");
+  assert.deepEqual(schema, original);
+  assert.deepEqual(result.properties.second.enum, [{ nested: [1] }]);
+});
+
 function hasReferenceSibling(value) {
   if (Array.isArray(value)) return value.some(hasReferenceSibling);
   if (!value || typeof value !== "object") return false;

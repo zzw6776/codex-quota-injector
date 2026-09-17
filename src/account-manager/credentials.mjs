@@ -59,9 +59,10 @@ async function writeOfficialCredentialPayload(
       "-w",
       JSON.stringify(payload),
     ]);
-  } catch (error) {
-    if (strictKeychain) throw new Error(`Codex 钥匙串清理失败：${error.message}`);
-    console.error(`[switch] Keychain 更新失败，已保留 auth.json: ${error.message}`);
+  } catch {
+    // execFile 的异常包含完整命令参数，其中有 Token，不能转发到日志或 UI。
+    if (strictKeychain) throw new Error("Codex 钥匙串更新失败，请检查钥匙串访问权限");
+    console.error("[switch] Keychain 更新失败，已保留 auth.json，请检查钥匙串访问权限");
   }
 }
 

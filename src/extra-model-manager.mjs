@@ -170,10 +170,7 @@ export class ExtraModelManager {
       }
       return model;
     });
-    const nextPlatforms = this.settings.platforms.map((item) => clonePlatform(item));
-    if (currentIndex >= 0) nextPlatforms[currentIndex] = normalized;
-    else nextPlatforms.push(normalized);
-    await this.#replaceSettings(nextPlatforms, currentIndex < 0 ? normalized : null);
+    await this.#replaceSettings(candidatePlatforms, currentIndex < 0 ? normalized : null);
     this.platformSave = { requestId, platformId: normalized.id };
     this.pendingRestart = true;
     this.message = normalized.enabled
@@ -413,16 +410,11 @@ export class ExtraModelManager {
           compatibilityTargetFingerprint(assignedPlatform, model) === report.targetFingerprint)
           ? { ...report, platformId: assignedPlatform.id } : report),
     };
-    try {
-      await this.#persist(next);
-      this.settings = next;
-      const previousKey = previous.platforms.find((item) => item.preset === "deepseek")?.apiKey ?? "";
-      const nextKey = next.platforms.find((item) => item.preset === "deepseek")?.apiKey ?? "";
-      if (previousKey !== nextKey) this.#clearDeepSeekBalance();
-    } catch (error) {
-      this.settings = previous;
-      throw error;
-    }
+    await this.#persist(next);
+    this.settings = next;
+    const previousKey = previous.platforms.find((item) => item.preset === "deepseek")?.apiKey ?? "";
+    const nextKey = next.platforms.find((item) => item.preset === "deepseek")?.apiKey ?? "";
+    if (previousKey !== nextKey) this.#clearDeepSeekBalance();
   }
 
   async #refreshDeepSeekModels(platform) {

@@ -60,3 +60,71 @@ test("[ACC-06] 损坏、未来版本与不可解密的已有账号数据明确�
     assert.equal(restored.get("existing").tokens.accessToken, "fixture-old");
   });
 });
+
+test("[ACC-03 ACC-06] 切换账号写失败不发布当前账号或使用时间，队列恢复后不带入失败状态", async t => {
+  for (const target of ["account", "index", "clear-current"]) await t.test(target, async t => {
+    const { options, store } = await setup(t);
+    await store.setCurrent("existing");
+    await store.upsert({ id: "next", lastUsed: 1, tokens: { accessToken: "fixture-next" } });
+    const before = store.snapshot();
+    const path = target === "account" ? join(store.accountsDir, "next.json") : store.indexPath;
+    await rename(path, `${path}.backup`);
+    await mkdir(path);
+    await assert.rejects(store.setCurrent(target === "clear-current" ? null : "next"));
+    assert.deepEqual(store.snapshot(), before);
+    await rm(path, { recursive: true });
+    await rename(`${path}.backup`, path);
+    const restored = new AccountStore(options);
+    await restored.initialize();
+    assert.deepEqual(restored.snapshot(), before);
+    await store.update("existing", { tokenGeneration: 2 });
+    await restored.initialize();
+    assert.equal(restored.snapshot().currentAccountId, "existing");
+    assert.equal(restored.get("next").lastUsed, 1);
+    await store.setCurrent("next");
+    await restored.initialize();
+    assert.equal(restored.snapshot().currentAccountId, "next");
+    assert.ok(restored.get("next").lastUsed > 1);
+  });
+});
+
+test("[ACC-06] 迁移中单个账号写失败时只索引成功账号，仍可正常重载", async t => {
+  const dataDir = await useTempDir(t);
+  const cockpitDir = join(dataDir, "legacy");
+  await mkdir(join(cockpitDir, "codex_accounts"), { recursive: true });
+  await mkdir(join(dataDir, "accounts", "blocked.json"), { recursive: true });
+  await writeFile(join(cockpitDir, "codex_accounts.json"), JSON.stringify({
+    current_account_id: "blocked",
+    accounts: [{ id: "blocked" }, { id: "good" }],
+  }));
+  for (const id of ["blocked", "good"]) {
+    await writeFile(join(cockpitDir, "codex_accounts", `${id}.json`), JSON.stringify({ id, tokens: { accessToken: `fixture-${id}` } }));
+  }
+  const store = new AccountStore({ dataDir, cockpitDir });
+  await store.initialize();
+  assert.deepEqual(store.list().map(account => account.id), ["good"]);
+  assert.equal(store.snapshot().currentAccountId, null);
+  const restored = new AccountStore({ dataDir, cockpitDir });
+  await restored.initialize();
+  assert.deepEqual(restored.snapshot(), store.snapshot());
+});
+
+test("[ACC-06] 删除账号的索引或密文操作失败后仍可读取和重载原账号", async t => {
+  for (const target of ["index", "account"]) await t.test(target, async t => {
+    const { options, store } = await setup(t);
+    const before = store.snapshot();
+    const path = target === "index" ? store.indexPath : join(store.accountsDir, "existing.json");
+    await rename(path, path + ".backup");
+    await mkdir(path);
+    await assert.rejects(store.remove("existing"));
+    assert.deepEqual(store.snapshot(), before);
+    await rm(path, { recursive: true });
+    await rename(path + ".backup", path);
+    const restored = new AccountStore(options);
+    await restored.initialize();
+    assert.deepEqual(restored.snapshot(), before);
+    await store.remove("existing");
+    await restored.initialize();
+    assert.deepEqual(restored.list(), []);
+  });
+});

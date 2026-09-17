@@ -368,35 +368,35 @@ test("[platform:windows-native] [LCH-01 UI-02] Windows 原生提示脚本只包�
   assert.doesNotMatch(alertScript, /Bearer|api[_-]?key/i);
 });
 
-test("[LCH-04] 无任务目录的空运行状态不得覆盖启动证据，也不能单凭缓存目录判就绪", async t => {
+test("[LCH-04] 全局缓存目录不能借用任务启动通知，任务状态独立采纳真实目录和失败", async t => {
+  let tracker;
+  t.after(() => tracker?.close({ disconnected: false }));
   const directory = await useTempDir(t, "host-health-unscoped-");
-  const tracker = await createHostHealthTracker({path: join(directory, "health.json")});
-  try {
+  tracker = await createHostHealthTracker({ path: join(directory, "health.json") });
   const catalog = { data: [{ name: "codex_app", runtimeStatus: null,
-    tools: Object.fromEntries(["list_threads", "read_thread", "list_projects", "get_usage_limits"].map(name => [name, {name}])) }] };
+    tools: Object.fromEntries(["list_threads", "read_thread", "list_projects", "get_usage_limits"].map(name => [name, { name }])) }] };
   tracker.observeStatusList(catalog);
-  assert.equal(tracker.snapshot().status, "starting", "目录可能来自缓存，不能单独证明运行时就绪");
-  tracker.observeStartupStatus({name: "codex_app", status: "ready", threadId: "current"});
+  assert.equal(tracker.snapshot().status, "starting", "缓存目录不能单独证明运行时就绪");
+  tracker.observeStartupStatus({ name: "codex_app", status: "ready", threadId: "current" });
   tracker.observeStatusList(catalog);
-  assert.equal(tracker.snapshot().status, "ready", "全局目录不可覆盖已收到的 ready");
-  tracker.observeStatusList(catalog, null, {threadId: "other"});
-  assert.equal(tracker.snapshot().status, "starting", "另一任务的目录不可借用当前任务状态");
-  tracker.observeStatusList(catalog, null, {threadId: "current"});
-  assert.equal(tracker.snapshot().status, "ready");
-  tracker.observeStatusList({data: [{...catalog.data[0], runtimeStatus: "starting"}]});
-  assert.equal(tracker.snapshot().status, "starting", "明确的运行状态仍需采纳");
-  tracker.observeStartupStatus({name: "codex_app", status: "failed", threadId: "current"});
-  tracker.observeStatusList(catalog);
-  assert.notEqual(tracker.snapshot().status, "ready");
-  tracker.observeStartupStatus({name: "codex_app", status: "ready", threadId: "current"});
+  assert.equal(tracker.snapshot("current").toolsVerified, false, "全局目录不能核验指定任务");
+  tracker.observeStatusList(catalog, null, { threadId: "other" });
+  assert.equal(tracker.snapshot("other").status, "starting", "另一任务不能借用启动通知");
+  tracker.observeStatusList(catalog, null, { threadId: "current" });
+  assert.equal(tracker.snapshot("current").status, "ready");
+  tracker.observeStatusList({ data: [{ ...catalog.data[0], runtimeStatus: "starting" }] }, null, { threadId: "current" });
+  assert.equal(tracker.snapshot("current").status, "starting");
+  tracker.observeStartupStatus({ name: "codex_app", status: "failed", threadId: "current" });
+  tracker.observeStatusList(catalog, null, { threadId: "current" });
+  assert.equal(tracker.snapshot("current").status, "degraded");
+  tracker.observeStartupStatus({ name: "codex_app", status: "ready", threadId: "current" });
   const missing = structuredClone(catalog);
   delete missing.data[0].tools.read_thread;
-  tracker.observeStatusList(missing);
-  assert.equal(tracker.snapshot().code, "required-tool-missing");
+  tracker.observeStatusList(missing, null, { threadId: "current" });
+  assert.equal(tracker.snapshot("current").code, "required-tool-missing");
   tracker.observeReloadStarted();
-  tracker.observeStatusList(catalog);
-  assert.equal(tracker.snapshot().status, "starting", "重载后不得借用旧启动通知");
-  } finally { await tracker.close({disconnected: false}); }
+  tracker.observeStatusList(catalog, null, { threadId: "current" });
+  assert.equal(tracker.snapshot("current").status, "starting", "重载后不得借用旧启动通知");
 });
 
 test("[LCH-04] 空全局目录不能推翻同一已就绪任务的完整工具证据", async t => {
@@ -415,7 +415,7 @@ test("[LCH-04] 空全局目录不能推翻同一已就绪任务的完整工具�
     assert.equal(tracker.snapshot().code, "codex-app-not-listed");
     tracker.observeStatusList(catalog, null, {threadId: "other"});
     tracker.observeStatusList({data: []});
-    assert.notEqual(tracker.snapshot().status, "ready", "不能借用另一任务的目录");
+    assert.equal(tracker.snapshot("current").code, "codex-app-not-listed", "另一任务就绪不能修复当前任务的缺失目录");
     tracker.observeStatusList(catalog, null, {threadId: "current"});
     tracker.observeStartupStatus({name: "codex_app", status: "failed", threadId: "current"});
     tracker.observeStatusList({data: []});
@@ -429,7 +429,6 @@ test("[LCH-04] 主页初始化与空全局目录保持按需加载，实际任�
   const tracker = await createHostHealthTracker({ path: join(directory, "health.json"),
     setTimer(handler) { timer = handler; return { unref() {} }; }, clearTimer() { timer = null; } });
   try {
-    tracker.observeClientMessage({ method: "initialized" });
     tracker.observeStatusList({ data: [] });
     assert.equal(tracker.snapshot().status, "idle");
     assert.equal(tracker.snapshot().toolsVerified, false);
@@ -483,4 +482,61 @@ test("[LCH-04 UI-02] 按需加载显示中性说明，不提示重启或冒充�
   const controls = widget.renderPanelControls(health);
   assert.match(controls, /status-idle/);
   assert.doesNotMatch(controls, /已加载|任务功能异常|建议：/);
+});
+
+const completeCatalog = { data: [{ name: "codex_app", runtimeStatus: "connected",
+  tools: Object.fromEntries(["list_threads", "read_thread", "list_projects", "get_usage_limits"].map(name => [name, { name }])) }] };
+
+test("[LCH-04] 多任务状态持久化互不覆盖，失败、重载与断开使对应证据失效", async t => {
+  let tracker;
+  t.after(() => tracker?.close({ disconnected: false }));
+  const directory = await useTempDir(t, "host-health-task-isolation-");
+  const path = join(directory, "health.json");
+  tracker = await createHostHealthTracker({ path, generation: "isolated" });
+  for (const threadId of ["initiating", "other"]) {
+    tracker.observeStartupStatus({ name: "codex_app", status: "ready", threadId });
+    tracker.observeStatusList(completeCatalog, null, { threadId });
+  }
+  await tracker.claim();
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  const view = (healthState, threadId) => evaluateHostHealth({
+    binding: { hostToolsRequired: true, generation: "isolated" },
+    relayState: { pid: persisted.pid }, healthState, relayCurrent: true, threadId,
+  });
+  assert.equal(persisted.threadId, "other");
+  assert.equal(view(persisted, "initiating").status, "ready");
+  assert.equal(view(persisted, "other").status, "ready");
+  assert.notEqual(view(persisted, "unseen").status, "ready");
+  const revision = tracker.statusRevision("initiating");
+  tracker.observeStartupStatus({ name: "codex_app", status: "failed", threadId: "initiating" });
+  tracker.observeStatusList(completeCatalog, null, { threadId: "initiating", healthRevision: revision });
+  assert.equal(view(tracker.snapshot(), "initiating").status, "degraded");
+  assert.equal(view(tracker.snapshot(), "other").status, "ready");
+  tracker.observeStartupStatus({ name: "codex_app", status: "starting", threadId: "other" });
+  assert.equal(view(tracker.snapshot(), "other").toolsVerified, false);
+  tracker.observeReloadStarted();
+  tracker.observeStatusList(completeCatalog, null, { threadId: "initiating", healthRevision: revision });
+  assert.notEqual(view(tracker.snapshot(), "initiating").status, "ready");
+  tracker.observeStatusList(completeCatalog, null, { threadId: "other" });
+  await tracker.disconnect();
+  assert.notEqual(view(tracker.snapshot(), "other").status, "ready");
+});
+
+test("[LCH-04] 一个任务就绪不能取消另一任务的启动超时", async t => {
+  let tracker;
+  t.after(() => tracker?.close({ disconnected: false }));
+  const directory = await useTempDir(t, "host-health-task-timeouts-");
+  const timers = new Set();
+  tracker = await createHostHealthTracker({ path: join(directory, "health.json"),
+    setTimer(fn) { timers.add(fn); return fn; }, clearTimer(fn) { timers.delete(fn); } });
+  tracker.observeStatusList({ data: [{ ...completeCatalog.data[0], runtimeStatus: null }] });
+  assert.equal(timers.size, 0, "无作用域缓存目录不能留下会误报任务故障的全局超时");
+  for (const threadId of ["waiting", "ready"]) {
+    tracker.observeStartupStatus({ name: "codex_app", status: "starting", threadId });
+  }
+  tracker.observeStatusList(completeCatalog, null, { threadId: "ready" });
+  assert.equal(timers.size, 1);
+  [...timers][0]();
+  assert.equal(tracker.snapshot("waiting").code, "startup-status-timeout");
+  assert.equal(tracker.snapshot("ready").status, "ready");
 });

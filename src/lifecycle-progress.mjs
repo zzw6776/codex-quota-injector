@@ -47,6 +47,7 @@ const COMPONENT_LABELS = new Map([
 ]);
 
 export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {}) {
+  const targeted = report.metadata?.scope === "task-tools-startup";
   const currentIndex = report.steps.findIndex((step) => step.status === "running");
   const failed = report.steps.find((step) => step.status === "failed");
   const passedCount = report.steps.filter((step) => step.status === "passed").length;
@@ -57,7 +58,7 @@ export function renderLifecycleProgressHtml(report, { refreshSeconds = 1 } = {})
   const headline = report.recovery?.status === "running"
     ? "正在恢复上一次生命周期测试未能回滚的状态"
     : report.status === "passed"
-    ? "生命周期测试全部通过"
+    ? targeted ? "启停恢复定向补测通过" : "生命周期测试全部通过"
     : rollbackInProgress
         ? "测试失败，正在恢复原状态"
       : report.status === "rollback-failed" || rollbackFailed
@@ -118,6 +119,7 @@ h1{font-size:24px;margin:0 0 8px}.sub{color:#667085;margin-bottom:24px}.banner{p
 </style></head><body><main>
 <h1>启停恢复测试 - Codex 官方模型</h1>
 <div class="sub">运行编号 ${escapeHtml(report.runId)} · 正式版本 ${escapeHtml(report.projectVersion)} · 目标中继协议 ${escapeHtml(report.targetRelayProtocol)}</div>
+${targeted ? '<p class="sub">本次为定向补测，范围以以下步骤为准；账号切换与模型冒烟未执行，不代表完整启停验收。</p>' : ""}
 <section class="banner ${tone}"><strong>${escapeHtml(headline)}</strong>${failure ? `<div class="failure">${escapeHtml(failure)}</div>` : ""}</section>
 <div class="summary"><span>已通过 ${passedCount}/${report.steps.length}</span><span>总体状态：${escapeHtml(statusLabel(report.status))}</span>${report.ownerPid ? `<span>监督器 PID：${escapeHtml(report.ownerPid)}</span>` : ""}${completionNotification}<span>最近更新：${escapeHtml(report.updatedAt ?? report.createdAt ?? "未知")}</span></div>
 ${components}

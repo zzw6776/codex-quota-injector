@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 
 import { isRelayStateCurrent } from "./platform.mjs";
 
-export const HOST_HEALTH_STATE_VERSION = 2;
+export const HOST_HEALTH_STATE_VERSION = 3;
 export const HOST_HEALTH_STARTUP_GRACE_MS = 30_000;
 export const HOST_HEALTH_ACTIVE_POLL_MS = 3_000;
 export const HOST_HEALTH_READY_POLL_MS = 30_000;
@@ -270,11 +270,10 @@ class HostHealthTracker {
     this.graceMs = Math.max(0, Number(graceMs) || 0);
     this.requiredTools = normalizeToolNames(requiredTools);
     this.sessionId = randomUUID();
-    this.timer = null;
+    this.contexts = new Map();
+    this.revision = 0;
     this.tail = Promise.resolve();
     this.closed = false;
-    this.startupStatus = null;
-    this.catalogThreadId = null;
     const startedAt = this.now();
     this.state = {
       version: HOST_HEALTH_STATE_VERSION,
@@ -302,6 +301,23 @@ class HostHealthTracker {
     };
   }
 
+  context(threadId = null) {
+    if (!this.contexts.has(threadId)) {
+      this.contexts.set(threadId, {
+        state: { status: "idle", code: "awaiting-task",
+          message: "任务工具按需加载，进入任务后自动核验", detail: null,
+          serverStatus: "notStarted", threadId, requiredTools: this.requiredTools,
+          missingTools: [], toolsVerified: false, updatedAt: this.now() },
+        startupStatus: null, timer: null, revision: this.revision,
+      });
+    }
+    return this.contexts.get(threadId);
+  }
+
+  statusRevision(threadId = null) {
+    return this.context(threadId).revision;
+  }
+
   async start({ claim = true } = {}) {
     if (!this.path) return;
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
@@ -310,12 +326,6 @@ class HostHealthTracker {
 
   claim() {
     return this.persist({ claim: true });
-  }
-
-  observeClientMessage(message) {
-    if (!message || typeof message !== "object") return;
-    // Desktop initializes its global app-server on the home page. Task-local
-    // codex_app startup is observed separately; initialized is not its start.
   }
 
   observeServerMessage(message) {
@@ -327,203 +337,143 @@ class HostHealthTracker {
     if (!isCodexAppServer(params?.name)) return;
     const serverStatus = String(params?.status ?? "").trim();
     const threadId = typeof params?.threadId === "string" ? params.threadId : null;
-    this.startupStatus = { status: serverStatus, threadId };
+    const context = this.context(threadId);
+    context.startupStatus = serverStatus;
     if (serverStatus === "ready") {
-      if (this.state.toolsVerified && this.state.missingTools.length === 0 &&
-        this.catalogThreadId === threadId) {
-        this.clearGraceTimer();
-        void this.update({
-          status: "ready",
-          code: null,
-          message: "Codex 任务工具已就绪",
-          detail: null,
-          serverStatus,
-          threadId,
-        });
+      if (context.state.status === "ready" && context.state.toolsVerified) {
+        this.clearGraceTimer(context);
+        void this.update({ status: "ready", code: null,
+          message: "Codex 任务工具已就绪", detail: null, serverStatus }, context);
       } else {
-        void this.update({
-          status: "starting",
-          code: "awaiting-tool-catalog",
-          message: "Codex 任务工具服务已启动，正在核对工具目录",
-          detail: null,
-          serverStatus,
-          threadId,
-          toolsVerified: false,
-          missingTools: [],
-        });
-        this.armGraceTimer();
+        void this.update({ status: "starting", code: "awaiting-tool-catalog",
+          message: "Codex 任务工具服务已启动，正在核对工具目录", detail: null,
+          serverStatus, toolsVerified: false, missingTools: [] }, context);
+        this.armGraceTimer(context);
       }
       return;
     }
-    if (serverStatus === "failed" || serverStatus === "cancelled") {
-      this.clearGraceTimer();
-      const failure = classifyStartupFailure(params, serverStatus);
-      void this.update({
-        status: "degraded",
-        ...failure,
-        serverStatus,
-        threadId,
-      });
-      return;
-    }
-    if (serverStatus === "starting") {
-      this.catalogThreadId = null;
-      void this.update({
-        status: "starting",
-        code: "codex-app-starting",
-        message: "Codex 任务工具正在启动",
-        detail: null,
-        serverStatus,
-        threadId,
-        toolsVerified: false,
-        missingTools: [],
-      });
-      this.armGraceTimer();
+    if (["starting", "failed", "cancelled"].includes(serverStatus)) {
+      context.revision = ++this.revision;
+      this.clearGraceTimer(context);
+      if (serverStatus !== "starting") {
+        void this.update({ status: "degraded", ...classifyStartupFailure(params, serverStatus),
+          serverStatus, toolsVerified: false }, context);
+      } else {
+        void this.update({ status: "starting", code: "codex-app-starting",
+          message: "Codex 任务工具正在启动", detail: null,
+          serverStatus, toolsVerified: false, missingTools: [] }, context);
+        this.armGraceTimer(context);
+      }
     }
   }
 
-  observeStatusList(result, error = null, { threadId = null } = {}) {
+  observeStatusList(result, error = null, { threadId = null, healthRevision } = {}) {
+    const context = this.context(threadId);
+    // Responses from before a task restart or global reload cannot restore old proof.
+    if (healthRevision != null && healthRevision !== context.revision) return;
+    if (["failed", "cancelled"].includes(context.startupStatus)) return;
     if (error) {
-      this.clearGraceTimer();
-      void this.update({
-        status: "degraded",
-        code: "status-query-failed",
+      this.clearGraceTimer(context);
+      void this.update({ status: "degraded", code: "status-query-failed",
         message: "无法确认 Codex 任务工具状态",
-        detail: sanitizeHealthDetail(errorMessage(error)),
-      });
+        detail: sanitizeHealthDetail(errorMessage(error)), toolsVerified: false }, context);
       return;
     }
-    const entries = Array.isArray(result?.data) ? result.data : [];
-    const entry = entries.find((candidate) => isCodexAppServer(candidate?.name));
-    // Task-local overrides are intentionally absent from the home-page inventory.
-    // An empty global list is not evidence about an activated task's service.
+    const entry = (Array.isArray(result?.data) ? result.data : [])
+      .find(candidate => isCodexAppServer(candidate?.name));
+    // An unscoped cached/empty inventory says nothing about task-local services.
+    if (threadId == null && entry?.runtimeStatus == null && this.contexts.size > 1) return;
     if (!entry && threadId == null) {
-      if (this.startupStatus == null &&
-        this.state.status !== "degraded") {
-        this.clearGraceTimer();
-        this.catalogThreadId = null;
-        void this.update({
-          status: "idle", code: "awaiting-task",
-          message: "任务工具按需加载，进入任务后自动核验",
-          detail: null, serverStatus: "notStarted", threadId: null,
-          toolsVerified: false, missingTools: [],
-        });
-      } else if (this.startupStatus?.status === "ready" && this.state.status === "ready" &&
-        this.catalogThreadId !== this.startupStatus.threadId) {
-        void this.update({ status: "starting", code: "awaiting-tool-catalog",
-          message: "Codex 任务工具服务已启动，正在核对工具目录", toolsVerified: false, missingTools: [] });
-        this.armGraceTimer();
+      if (this.contexts.size === 1 && context.startupStatus == null &&
+        context.state.status !== "degraded") {
+        this.clearGraceTimer(context);
+        void this.update({ status: "idle", code: "awaiting-task",
+          message: "任务工具按需加载，进入任务后自动核验", detail: null,
+          serverStatus: "notStarted", toolsVerified: false, missingTools: [] }, context);
       }
       return;
     }
-    // Unscoped inventory reports runtimeStatus:null even after startup is ready.
-    // Use the observed startup evidence, never the cached catalog alone, and
-    // never combine a different task's scoped response with that evidence.
-    const startupReady = this.startupStatus?.status === "ready" &&
-      (threadId == null || threadId === this.startupStatus.threadId);
-    const classified = classifyCodexAppStatus(entry && entry.runtimeStatus == null && startupReady
-      ? { ...entry, runtimeStatus: "connected" }
-      : entry, this.requiredTools);
-    this.catalogThreadId = classified.status === "ready" ? threadId : null;
-    void this.update({ ...classified,
-      ...(threadId != null ? { threadId } : {}),
-    });
-    if (classified.status === "ready" || classified.status === "degraded") {
-      this.clearGraceTimer();
-    } else {
-      this.armGraceTimer();
-    }
+    const classified = classifyCodexAppStatus(entry && entry.runtimeStatus == null &&
+      context.startupStatus === "ready" ? { ...entry, runtimeStatus: "connected" } : entry,
+      this.requiredTools);
+    void this.update(classified, context);
+    if (["ready", "degraded"].includes(classified.status)) this.clearGraceTimer(context);
+    else if (threadId != null || context.startupStatus != null) this.armGraceTimer(context);
+  }
+
+  resetContexts() {
+    for (const context of this.contexts.values()) this.clearGraceTimer(context);
+    this.contexts.clear();
+    this.revision++;
   }
 
   observeReloadStarted() {
-    this.startupStatus = null;
-    this.catalogThreadId = null;
-    this.clearGraceTimer();
-    void this.update({
-      status: "starting",
-      code: "reloading-codex-app",
-      message: "正在重新加载 Codex 任务工具",
-      toolsVerified: false,
-      missingTools: [],
-      threadId: null,
-      detail: null,
-      serverStatus: "starting",
-    });
+    this.resetContexts();
+    void this.update({ status: "starting", code: "reloading-codex-app",
+      message: "正在重新加载 Codex 任务工具", toolsVerified: false,
+      missingTools: [], detail: null, serverStatus: "starting" });
   }
 
   observeReloadFailed(error) {
-    this.clearGraceTimer();
-    void this.update({
-      status: "degraded",
-      code: "codex-app-reload-failed",
-      message: "Codex 任务工具重新加载失败",
-      detail: sanitizeHealthDetail(errorMessage(error)),
-      serverStatus: "failed",
-    });
+    this.resetContexts();
+    void this.update({ status: "degraded", code: "codex-app-reload-failed",
+      message: "Codex 任务工具重新加载失败", toolsVerified: false,
+      detail: sanitizeHealthDetail(errorMessage(error)), serverStatus: "failed" });
   }
 
   async disconnect(detail = null) {
-    this.clearGraceTimer();
-    if (this.state.status !== "degraded") {
-      await this.update({
-        status: "degraded",
-        code: "relay-disconnected",
-        message: "Codex 任务工具连接已中断",
-        detail: sanitizeHealthDetail(detail),
-        serverStatus: "failed",
-      });
-    } else {
-      await this.tail;
-    }
+    const failure = this.state.status === "degraded" ? this.state : {
+      status: "degraded", code: "relay-disconnected",
+      message: "Codex 任务工具连接已中断", detail: sanitizeHealthDetail(detail),
+      serverStatus: "failed",
+    };
+    this.resetContexts();
+    await this.update({ ...failure, threadId: null, toolsVerified: false });
   }
 
   async close({ disconnected = true, detail = null } = {}) {
     if (this.closed) return this.tail;
     if (disconnected) await this.disconnect(detail);
     this.closed = true;
-    this.clearGraceTimer();
+    for (const context of this.contexts.values()) this.clearGraceTimer(context);
     await this.tail;
   }
 
-  snapshot() {
-    return structuredClone(this.state);
+  snapshot(threadId) {
+    if (threadId !== undefined) return structuredClone(this.context(threadId).state);
+    return structuredClone({ ...this.state, tasks: Object.fromEntries(
+      [...this.contexts].filter(([id]) => id != null).map(([id, context]) => [id, context.state]),
+    ) });
   }
 
-  armGraceTimer() {
-    if (this.closed || !this.path || this.state.status !== "starting") return;
-    this.clearGraceTimer();
-    this.timer = this.setTimer(() => {
-      this.timer = null;
-      if (this.closed || this.state.status !== "starting") return;
-      void this.update({
-        status: "degraded",
-        code: "startup-status-timeout",
-        message: "Codex 任务工具未在启动时限内就绪",
-        detail: null,
-        serverStatus: "failed",
-      });
+  armGraceTimer(context) {
+    if (this.closed || !this.path || context.state.status !== "starting") return;
+    this.clearGraceTimer(context);
+    context.timer = this.setTimer(() => {
+      context.timer = null;
+      if (this.closed || context.state.status !== "starting") return;
+      void this.update({ status: "degraded", code: "startup-status-timeout",
+        message: "Codex 任务工具未在启动时限内就绪", detail: null,
+        serverStatus: "failed", toolsVerified: false }, context);
     }, this.graceMs);
-    this.timer?.unref?.();
+    context.timer?.unref?.();
   }
 
-  clearGraceTimer() {
-    if (this.timer != null) this.clearTimer(this.timer);
-    this.timer = null;
+  clearGraceTimer(context) {
+    if (context.timer != null) this.clearTimer(context.timer);
+    context.timer = null;
   }
 
-  update(patch) {
+  update(patch, context = this.context()) {
     if (this.closed) return this.tail;
-    this.state = {
-      ...this.state,
-      ...patch,
-      updatedAt: this.now(),
-    };
+    context.state = { ...context.state, ...patch, updatedAt: this.now() };
+    this.state = { ...this.state, ...context.state };
     return this.persist();
   }
 
   persist({ claim = false } = {}) {
     if (!this.path) return this.tail;
-    const state = structuredClone(this.state);
+    const state = this.snapshot();
     this.tail = this.tail.then(async () => {
       if (!claim && !await healthFileOwnedBy(this.path, this.sessionId)) return;
       const temporaryPath = `${this.path}.${process.pid}.${this.sessionId}.tmp`;
@@ -628,6 +578,7 @@ export function evaluateHostHealth({
   binding,
   relayState,
   healthState,
+  threadId = null,
   relayCurrent,
   now = Date.now(),
 } = {}) {
@@ -673,6 +624,12 @@ export function evaluateHostHealth({
           detail: null,
           updatedAt: finiteNumber(healthState?.updatedAt),
         };
+  }
+  if (threadId != null) {
+    healthState = healthState.tasks?.[threadId] ?? {
+      status: "starting", code: "initiating-task-tools-not-verified",
+      message: "正在等待发起任务的工具目录核验", toolsVerified: false, threadId,
+    };
   }
   let status = ["idle", "starting", "ready", "degraded"].includes(healthState.status)
     ? healthState.status

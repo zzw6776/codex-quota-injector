@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { applySubagentMetadata } from "../src/token-usage/subagents.mjs";
 import { event, protocolUsage, rolloutUsage, turnContext, tokenCount, taskComplete, createManager } from "./token-usage/support.mjs";
 
 test("子智能体用量形成摘要并计入根任务累计费用", async (t) => {
@@ -57,4 +58,36 @@ test("子智能体用量形成摘要并计入根任务累计费用", async (t) =
   assert.equal(summary.totalTokens, 10);
   assert.equal(summary.agentNickname, "review");
   assert.ok(root.cost.cumulativeCny > root.cost.totalCny);
+});
+
+test("子智能体按各自开始时间归属根回合，嵌套任务继承父回合并可随迟到元数据修正", () => {
+  const values = [
+    { turnId: "root-2", threadId: "root", startedAt: 300, updatedAt: 600, completed: true },
+    { turnId: "child-2", threadId: "child", startedAt: 350, updatedAt: 550, completed: true },
+    { turnId: "grandchild", threadId: "grandchild", startedAt: 250, updatedAt: 270, completed: true },
+    { turnId: "root-1", threadId: "root", startedAt: 100, updatedAt: 200, completed: true },
+    { turnId: "child-1", threadId: "child", startedAt: 150, updatedAt: 450, completed: true },
+    { turnId: "orphan", threadId: "orphan", startedAt: 400, updatedAt: 500, completed: true },
+  ];
+  const turns = new Map(values.map(turn => [turn.turnId, turn]));
+  const metadata = (threadId, parentThreadId, agentDepth) => ({
+    threadId, parentThreadId, agentDepth, rootThreadId: "root",
+    isSubagent: true, agentPath: threadId, agentNickname: threadId,
+  });
+  const rolloutMetadataByThread = new Map([
+    ["grandchild", metadata("grandchild", "child", 2)],
+    ["orphan", metadata("orphan", "missing-parent", 2)],
+    ["child", metadata("child", "root", 1)],
+  ]);
+  const context = { turns, rolloutMetadataByThread, loggedSubagentModelTransitions: new Set() };
+  assert.equal(applySubagentMetadata(context), true);
+  assert.equal(turns.get("child-1").parentTurnId, "root-1");
+  assert.equal(turns.get("child-2").parentTurnId, "root-2");
+  assert.equal(turns.get("grandchild").parentTurnId, "root-1");
+  assert.equal(turns.get("orphan").parentTurnId, "root-2");
+  assert.equal(applySubagentMetadata(context), false);
+  turns.get("grandchild").startedAt = 400;
+  assert.equal(applySubagentMetadata(context), true);
+  assert.equal(turns.get("grandchild").parentTurnId, "root-2");
+  assert.deepEqual([...turns.keys()], values.map(turn => turn.turnId));
 });
