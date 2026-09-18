@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import process from "node:process";
+import { createMacDmg } from "./package-macos-dmg.mjs";
 
 const options = parseOptions(process.argv.slice(2));
 const root = resolve(import.meta.dirname, "..");
@@ -64,17 +65,7 @@ execFileSync("/bin/chmod", ["755", executable, worker, shimExecutable]);
 execFileSync("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", appPath], {
   stdio: "inherit",
 });
-execFileSync("/usr/bin/hdiutil", [
-  "create",
-  "-volname",
-  "Codex Quota Injector",
-  "-srcfolder",
-  appPath,
-  "-ov",
-  "-format",
-  "UDZO",
-  dmgPath,
-], { stdio: "inherit" });
+await createMacDmg({ appPath, dmgPath });
 
 console.log(dmgPath);
 
