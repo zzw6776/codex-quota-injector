@@ -9,7 +9,7 @@ import { OPENAI_PROVIDER, RELAY_CLEANUP_INTERVAL_MS, RELAY_OWNERSHIP_POLL_MS, re
 import { openSidecarUpstream, pipeLines, pipeRaw, runPassthrough, clearRelayEnvironment, forwardSignals, forwardSidecarSignals, exitLikeChild, fail } from "./app-server-relay/transport.mjs";
 import { rewriteClientLine } from "./app-server-relay/client-messages.mjs";
 import { rewriteServerLine } from "./app-server-relay/server-messages.mjs";
-import { requestCodexAppToolsReload } from "./app-server-relay/host-tools.mjs";
+import { requestCodexAppToolsReload, requestCodexAppToolsStatus, requestCodexAppToolsDiagnostic, closeHostToolChecks } from "./app-server-relay/host-tools.mjs";
 import { readOfficialModelSlugs } from "./app-server-relay/model-catalog.mjs";
 import { pruneRelayState } from "./app-server-relay/thread-context.mjs";
 import { createUsageEventWriter } from "./app-server-relay/usage.mjs";
@@ -238,7 +238,7 @@ export async function runAppServerRelay() {
     await relayOwnershipCheck.catch(() => undefined);
     hostToolReloadWatcher?.close();
     hostToolReloadWatcher = null;
-    if (relayState?.hostToolReloadTimer) clearTimeout(relayState.hostToolReloadTimer);
+    closeHostToolChecks(relayState);
     await Promise.all([
       removeRelayState(statePath, processIdentity),
       // Relay 状态一旦删除，读取端会立即把宿主能力判为断开。这里不再
@@ -303,14 +303,19 @@ export async function runAppServerRelay() {
       upstreamInput.write(`${JSON.stringify(message)}\n`);
     },
     hostToolReloadInFlight: false,
-    hostToolReloadTimer: null,
   };
   hostToolReloadWatcher = watchHostToolReloadRequests({
     healthPath,
     generation: relayConfig?.generation ??
       process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
   }, {
-    onRequest: () => requestCodexAppToolsReload(relayState),
+    onRequest: (request) => {
+      if (request.action === "reload") requestCodexAppToolsReload(relayState);
+      else if (request.action === "diagnose") requestCodexAppToolsDiagnostic(relayState, request.threadId);
+      else requestCodexAppToolsStatus(relayState, request.threadId, {
+        retry: request.action === "check", priority: true,
+      });
+    },
     onError: (error) => {
       console.error(`[host-health] 重载请求监听失败：${error.message}`);
     },

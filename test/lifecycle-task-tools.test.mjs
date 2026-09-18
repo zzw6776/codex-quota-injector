@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHostHealthTracker } from "../src/host-health.mjs";
+import { proveHostTools } from "./host-tool-fixtures.mjs";
 import { evaluateLifecycleReadiness } from "../src/lifecycle-host.mjs";
 import { activateLifecycleTaskTools, bindLifecycleTask } from "../scripts/lifecycle-task-tools.mjs";
 import { waitForWindowsTargetHost } from "../scripts/lifecycle-windows/host.mjs";
@@ -77,6 +78,7 @@ for (const [platform, wait] of [["Windows/WSL", waitForWindowsTargetHost], ["mac
     t.after(() => tracker.close({ disconnected: false }));
     tracker.observeStatusList({ data: [{ name: "codex_app", runtimeStatus: "connected",
       tools: Object.fromEntries(["list_threads", "read_thread", "list_projects", "get_usage_limits"].map(name => [name, { name }])) }] }, null, { threadId });
+    proveHostTools(tracker, threadId);
     tracker.observeStartupStatus({ name: "codex_app", status: "failed", threadId: "other" });
     const result = await wait(control, { timeoutMs: 100, pollIntervalMs: 0,
       inspectHost: async options => {

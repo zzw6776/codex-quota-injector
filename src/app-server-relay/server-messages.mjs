@@ -38,6 +38,10 @@ function rewriteServerLine(line, state) {
     state.hostHealth?.observeStatusList(message.result, message.error, pending);
     return line;
   }
+  if (pending.hostToolCall) {
+    state.hostHealth?.observeToolResult(message.result, message.error, pending);
+    return line;
+  }
   if (message.error) {
     restoreThreadContext(
       state.threadContexts,

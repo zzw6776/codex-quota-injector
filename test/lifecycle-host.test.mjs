@@ -170,6 +170,8 @@ test("[LCH-03 LCH-04] 接管 app-server 后 codex_app 健康状态是生命周�
     requiredTools: [...REQUIRED_CODEX_APP_TOOLS],
     missingTools: [],
     toolsVerified: true,
+    verification: "calls",
+    checks: Object.fromEntries(REQUIRED_CODEX_APP_TOOLS.map(tool => [tool, { status: "passed" }])),
   };
   assert.equal(evaluateLifecycleReadiness({ ...base, healthState: ready }).ready, true);
   const degraded = { ...ready, status: "degraded", code: "codex-app-startup-failed" };

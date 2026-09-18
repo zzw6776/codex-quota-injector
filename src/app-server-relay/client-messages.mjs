@@ -1,4 +1,5 @@
 import { isMcpStatusListMethod } from "../host-health.mjs";
+import { MCP_TOOL_CALL_METHOD } from "./host-tools.mjs";
 import { THREAD_METHODS, THREAD_SETTINGS_METHOD, MODEL_LIST_METHOD, OBSERVED_THREAD_METHODS, TURN_INPUT_METHODS } from "./contract.mjs";
 import { readModelSetting, getThreadContext, cloneThreadContext, updateThreadContext, rememberPendingRequest, nextModelRevision } from "./thread-context.mjs";
 import { normalizedModel, providerForModel, deepSeekRouteModel, customThreadConfig, isCustomProvider, customPlatformForProvider, containsImageInput, jsonRpcError } from "./configuration.mjs";
@@ -16,6 +17,14 @@ function rewriteClientLine(line, state) {
   const params = message.params && typeof message.params === "object"
     ? { ...message.params }
     : {};
+  if (method === "config/mcpServer/reload") state.hostHealth?.observeReloadStarted();
+  if (method === MCP_TOOL_CALL_METHOD && params.server === "codex_app" && message.id != null && params.threadId) {
+    const proof = state.hostHealth?.beginToolCheck(params.threadId, params.tool, message.id, {
+      targetThreadId: params.arguments?.threadId ?? params.threadId,
+    });
+    if (proof) rememberPendingRequest(state, message.id, { method, ...proof, hostToolCall: true });
+    return line;
+  }
   if (isMcpStatusListMethod(method)) {
     if (message.id != null) {
       rememberPendingRequest(state, message.id, {

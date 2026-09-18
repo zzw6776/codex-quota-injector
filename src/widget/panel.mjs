@@ -138,9 +138,24 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
 
   function bindGeneralEvents(wrap) {
 bindDetailPanelResize(wrap);
-wrap.querySelector(".host-health-recheck")?.addEventListener("click", () => {
-      enqueue({ type: "host-health-recheck" });
-    });
+for (const name of ["recheck", "reload", "diagnose"]) {
+  wrap.querySelector(`.host-health-${name}`)?.addEventListener("click", (event) => {
+    event.currentTarget.disabled = true;
+    enqueue({ type: `host-health-${name}`, threadId: state.data.hostHealth?.threadId });
+  });
+}
+for (const selector of [".host-health-details", ".host-health-status"]) {
+  wrap.querySelector(selector)?.addEventListener("click", () => {
+    const key = state.data.hostHealth?.threadId ?? "global";
+    state.hostHealthDetailsThread = state.hostHealthDetailsThread === key ? null : key;
+    render();
+  });
+}
+wrap.querySelector(".host-health-more")?.addEventListener("click", () => {
+  const key = state.data.hostHealth?.threadId ?? "global";
+  state.hostHealthMoreThread = state.hostHealthMoreThread === key ? null : key;
+  render();
+});
 wrap.querySelector(".host-health-restart")?.addEventListener("click", (event) => {
       event.currentTarget.disabled = true;
       enqueue({ type: "host-health-restart" });

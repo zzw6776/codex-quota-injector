@@ -1,91 +1,94 @@
 // Browser-serializable factory: all external values arrive through this explicit boundary.
 function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
+  function presentation(health) {
+    const checks = Object.values(health?.checks ?? {});
+    const legacyUnknown = ["status-query-failed", "startup-status-timeout", "health-check-failed",
+      "health-state-missing", "required-tool-unverified", "codex-app-reload-failed"].includes(health?.code);
+    const status = legacyUnknown ? "unconfirmed" : health?.status ?? "unconfirmed";
+    const titles = {
+      idle: "选择本机任务后自动检查任务工具",
+      starting: checks.length ? health.message : "正在连接任务工具",
+      ready: health?.verification === "calls" ? health.message : "工具目录已核验",
+      unconfirmed: health?.code === "health-runtime-outdated" ? "检查服务待更新" : "任务工具状态待确认",
+      degraded: ["relay-not-current", "relay-disconnected"].includes(health?.code)
+        ? "任务工具连接已断开" : "任务工具检查异常",
+      direct: "官方直连",
+    };
+    return { status, title: titles[status] ?? "任务工具状态待确认", checks };
+  }
+
+  function expanded(health) {
+    return state.hostHealthDetailsThread === (health?.threadId ?? "global");
+  }
+
   function renderHostHealthBanner(health) {
     if (!health?.required) return "";
-    if (health.status === "idle") {
-      return '<aside class="host-health-banner idle" role="status">任务工具按需加载，进入任务后自动核验</aside>';
-    }
-    if (!["starting", "degraded"].includes(health.status)) return "";
-    const degraded = health.status === "degraded";
-    const title = degraded ? "Codex 任务工具不可用" : "正在确认 Codex 任务工具";
-    const detail = health.actionError || health.detail;
-    const missing = Array.isArray(health.missingTools) && health.missingTools.length
-      ? `<div class="host-health-missing">缺少：${health.missingTools.map(escapeHtml).join("、")}</div>`
-      : "";
-    const restart = health.canRestart
-      ? '<button class="btn host-health-restart" type="button">重启 Codex</button>'
-      : "";
-    const logs = health.canOpenLogs
-      ? '<button class="btn host-health-open-logs" type="button">打开日志</button>'
-      : "";
-    return `<aside class="host-health-banner ${degraded ? "degraded" : "starting"}" role="${degraded ? "alert" : "status"}" aria-live="polite">
-      <div class="host-health-title">${title}</div>
-      <div>${escapeHtml(health.message ?? title)}</div>
-      ${detail ? `<div class="host-health-detail">${escapeHtml(detail)}</div>` : ""}
-      ${missing}
-      <div class="host-health-actions"><button class="btn host-health-recheck" type="button">重新加载并检查</button>${restart}${logs}</div>
+    const view = presentation(health);
+    const open = expanded(health);
+    if (["ready", "direct", "idle"].includes(view.status) && !open) return "";
+    const checking = view.checks.some(check => check.status === "checking");
+    const recheck = health.canCheck && health.threadId
+      ? `<button class="btn host-health-recheck" type="button" ${checking ? "disabled" : ""}>${checking ? "检查中…" : "重新检查"}</button>` : "";
+    const details = open ? renderDetails(health) : "";
+    const more = state.hostHealthMoreThread === (health.threadId ?? "global")
+      ? `<div class="host-health-actions host-health-recovery">
+        ${health.canCheck ? '<button class="btn host-health-reload" type="button" title="重新读取工具配置并刷新已加载任务的连接，可能影响其他任务">刷新工具配置</button>' : ""}
+        ${health.canRestart ? '<button class="btn host-health-restart" type="button" title="退出并重新启动整个 Codex 应用">重启 Codex 应用</button>' : ""}
+        </div>` : "";
+    const message = view.status === "unconfirmed" && health.code === "startup-status-timeout"
+      ? "等待工具服务就绪超时，暂时无法确认状态。" : health.message;
+    return `<aside class="host-health-banner ${view.status}" role="${view.status === "degraded" ? "alert" : "status"}" aria-live="polite">
+      <div class="host-health-title">${escapeHtml(view.title)}</div>
+      ${message && message !== view.title ? `<div>${escapeHtml(message)}</div>` : ""}
+      ${view.status === "unconfirmed" ? '<div>尚未确认不代表工具不可用。</div>' : ""}
+      ${health.actionError ? `<div class="host-health-detail">操作未完成：${escapeHtml(health.actionError)}</div>` : ""}
+      <div class="host-health-actions">${recheck}
+        <button class="btn host-health-details" type="button" aria-expanded="${open}">${open ? "收起详情" : "查看详情"}</button>
+        <button class="btn host-health-more" type="button" aria-expanded="${Boolean(more)}">更多</button>
+      </div>${more}${details}
     </aside>`;
   }
 
-  function renderPanelControls(health = state.data.hostHealth) {
-    return `<div class="panel-controls">${renderHostHealthStatus(health)}<button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
+  function renderDetails(health) {
+    const labels = { passed: "通过", checking: "检查中", failed: "异常", unconfirmed: "未确认" };
+    const rows = (health.requiredTools ?? []).map(tool => {
+      const check = health.checks?.[tool];
+      const checkedAt = check?.checkedAt ? ` · ${formatUpdatedAt(check.checkedAt)}` : "";
+      return `<li>${escapeHtml(hostToolLabel(tool))}：${labels[check?.status] ?? "尚未检查"}${escapeHtml(checkedAt)}
+        ${check?.detail ? `<div class="host-health-detail">${escapeHtml(check.detail)}</div>` : ""}</li>`;
+    }).join("");
+    const diagnostic = health.diagnostic;
+    const diagnosticMessage = diagnostic?.status === "checking" ? "正在查询完整工具目录…"
+      : diagnostic?.detail ?? diagnostic?.catalog?.message;
+    return `<div class="host-health-details-content">
+      <ul class="host-health-checks">${rows}</ul>
+      ${health.updatedAt ? `<div class="host-health-detail">状态更新：${escapeHtml(formatUpdatedAt(health.updatedAt))}</div>` : ""}
+      ${health.detail ? `<div class="host-health-detail">${escapeHtml(health.detail)}</div>` : ""}
+      ${diagnosticMessage ? `<div class="host-health-detail">目录诊断：${escapeHtml(diagnosticMessage)}</div>` : ""}
+      <div class="host-health-actions">
+        ${health.canOpenLogs ? '<button class="btn host-health-open-logs" type="button">打开诊断日志</button>' : ""}
+        ${health.canCheck ? `<button class="btn host-health-diagnose" type="button" ${diagnostic?.status === "checking" ? "disabled" : ""}>检查完整工具目录</button>` : ""}
+      </div>
+    </div>`;
   }
 
-  function renderHostHealthStatus(health) {
-    const status = String(health?.status ?? "unknown");
-    const view = {
-      idle: { className: "idle" },
-      ready: { className: "ready" },
-      starting: { className: "starting" },
-      degraded: { className: "degraded" },
-      direct: { className: "direct" },
-    }[status] ?? { className: "unknown" };
-    const requiredTools = Array.isArray(health?.requiredTools) ? health.requiredTools : [];
-    const missingTools = Array.isArray(health?.missingTools) ? health.missingTools : [];
-    const details = [];
-    if (status === "ready") {
-      details.push("任务功能正常");
-      details.push(`${requiredTools.length} 项常用功能已加载`);
-      details.push(...requiredTools.map((name) => `✓ ${hostToolLabel(name)}`));
-    } else if (status === "idle") {
-      details.push("任务工具按需加载");
-      details.push("进入任务后自动核验");
-    } else if (status === "starting") {
-      details.push("正在检查任务功能");
-      details.push("正在读取可用功能列表…");
-    } else if (status === "direct") {
-      details.push("官方直连");
-      details.push("任务功能由 Codex 直接提供");
-    } else {
-      details.push(status === "degraded" ? "任务功能异常" : "任务功能状态未知");
-      if (missingTools.length) {
-        details.push(`缺少 ${missingTools.length} 项功能`);
-        details.push(...missingTools.map((name) => `✕ ${hostToolLabel(name)}`));
-      } else if (health?.message) {
-        details.push(String(health.message));
-      }
-      details.push("建议：先重新加载并检查，仍异常则重启 Codex");
-      if (missingTools.length) details.push(`诊断：${missingTools.join("、")} 未注册`);
-      if (health?.detail) details.push(`详情：${health.detail}`);
-      if (health?.actionError) details.push(`操作失败：${health.actionError}`);
-      details.push(`状态码：${health?.code || status}`);
-      if (health?.updatedAt) details.push(`状态更新：${formatUpdatedAt(health.updatedAt)}`);
-    }
-    const tooltip = escapeHtml(details.join("\n"));
-    return `<button class="host-health-status status-${view.className}" type="button" data-account-tooltip="${tooltip}" aria-label="${escapeHtml(details.join("；"))}"><span class="host-health-dot ${view.className}" aria-hidden="true"></span></button>`;
+  function renderPanelControls(health = state.data.hostHealth) {
+    const view = presentation(health);
+    const details = [view.title];
+    if (health?.updatedAt) details.push(`状态更新：${formatUpdatedAt(health.updatedAt)}`);
+    details.push("点击查看逐项检查结果");
+    const text = escapeHtml(details.join("\n"));
+    return `<div class="panel-controls"><button class="host-health-status status-${view.status}" type="button" data-account-tooltip="${text}" aria-label="${text}"><span class="host-health-dot ${view.status}" aria-hidden="true"></span></button><button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
   }
 
   function hostToolLabel(name) {
-    const value = String(name ?? "");
     return {
-      list_threads: "查看任务列表",
-      read_thread: "读取会话内容",
-      list_projects: "查看项目列表",
-      get_usage_limits: "查看用量额度",
-    }[value] ?? value;
+      list_threads: "查看任务列表", read_thread: "读取任务内容",
+      list_projects: "查看项目列表", get_usage_limits: "查看用量额度",
+    }[name] ?? String(name);
   }
 
-  return { renderHostHealthBanner, renderPanelControls };
+  return { renderHostHealthBanner, renderPanelControls, presentation };
 }
 
 export { createHostHealth };

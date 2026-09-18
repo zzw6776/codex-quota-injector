@@ -158,6 +158,10 @@ const WIDGET_STYLES = {
     .host-health-missing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
     .host-health-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .host-health-actions .btn { padding: 4px 8px; }
+    .host-health-checks { margin: 8px 0; padding-left: 18px; display: grid; gap: 6px; }
+    .host-health-details-content { display: grid; gap: 7px; }
+    .host-health-banner.ready { color: #43a665; border-color: rgba(67,166,101,.3); background: rgba(67,166,101,.07); }
+    .host-health-banner.starting { color: #aaaab5; border-color: rgba(138,138,149,.22); background: rgba(138,138,149,.06); }
     .panel-version { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.07); color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
     .panel-version-text { margin-left: auto; color: var(--token-text-secondary, #aaaab5); white-space: nowrap; }
     .panel-balance { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

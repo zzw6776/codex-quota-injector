@@ -4,13 +4,20 @@ import { join } from "node:path";
 import test from "node:test";
 import { ROOT, startRuntime } from "./support/offline-runtime.mjs";
 import { waitFor } from "../test/helpers.mjs";
+import { successfulHostToolResult } from "../test/host-tool-fixtures.mjs";
+
+function taskToolFixture(source) {
+  return source.replace('["record", "read", "fail", "ask"]', '["list_threads", "read_thread", "list_projects", "get_usage_limits"]')
+    .replace('if (name === "record") {', `if (["list_threads", "read_thread", "list_projects", "get_usage_limits"].includes(name)) {
+      return reply(value.id, (${successfulHostToolResult.toString()})(name, args.threadId));
+    }\n      if (name === "record") {`);
+}
 
 for (const profile of ["direct", "shim"]) {
   test(`[LCH-04 TOOL-04] 官方 ${profile} 启动后全局 MCP 目录空 runtimeStatus 不造成健康误报`, {timeout: 30_000}, async t => {
     const r = await startRuntime(t, {profile, prepare: async ({directory, env}) => {
       const fixture = join(directory, "mcp.mjs");
-      await writeFile(fixture, (await readFile(join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), "utf8"))
-        .replace('["record", "read", "fail", "ask"]', '["list_threads", "read_thread", "list_projects", "get_usage_limits"]'));
+      await writeFile(fixture, taskToolFixture(await readFile(join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), "utf8")));
       const path = join(env.CODEX_HOME, "config.toml");
       await writeFile(path, await readFile(path, "utf8") + `\n[mcp_servers.codex_app]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([fixture, directory])}\n`);
     }});
@@ -37,12 +44,11 @@ for (const profile of ["direct", "shim"]) {
   });
 }
 
-test("[LCH-04 TOOL-04] 正式 Relay 的主页空目录超过启动宽限期仍按需加载，进入任务后核验真实目录", { timeout: 60_000 }, async t => {
+test("[LCH-04 TOOL-04] 正式 Relay 主页按需加载，进入任务后四项直接验证且不发模型请求", { timeout: 60_000 }, async t => {
   let server;
   const r = await startRuntime(t, { profile: "shim", prepare: async ({ directory }) => {
     const fixture = join(directory, "task-local-mcp.mjs");
-    await writeFile(fixture, (await readFile(join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), "utf8"))
-      .replace('["record", "read", "fail", "ask"]', '["list_threads", "read_thread", "list_projects", "get_usage_limits"]'));
+    await writeFile(fixture, taskToolFixture(await readFile(join(ROOT, "runtime-tests/support/mcp-fixture.mjs"), "utf8")));
     server = { command: process.execPath, args: [fixture, directory], enabled: true };
   } });
   assert.deepEqual((await r.rpc.request("mcpServerStatus/list", {})).data, []);
@@ -58,6 +64,8 @@ test("[LCH-04 TOOL-04] 正式 Relay 的主页空目录超过启动宽限期仍�
     return value.status === "ready" && value.threadId === thread.id ? value : null;
   });
   assert.equal(health.toolsVerified, true);
+  assert.equal(health.verification, "calls");
+  assert.ok(Object.values(health.checks).every(check => check.status === "passed"));
   assert.deepEqual(health.missingTools, []);
   assert.deepEqual((await r.rpc.request("mcpServerStatus/list", {})).data, []);
   assert.equal(JSON.parse(await readFile(healthPath, "utf8")).status, "ready");

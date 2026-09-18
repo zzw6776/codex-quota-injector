@@ -124,7 +124,7 @@ function installQuotaWidget(
     escapeHtml,
   });
 
-  const { renderHostHealthBanner, renderPanelControls } = features.host_health({
+  const { renderHostHealthBanner, renderPanelControls, presentation: presentHostHealth } = features.host_health({
     state,
     formatUpdatedAt,
     escapeHtml,
@@ -407,13 +407,15 @@ function installQuotaWidget(
       chipItems.push(`<span class="quota-chip-item quota-chip-balance">${escapeHtml(chipBalanceText)}</span>`);
     }
     const hostHealth = state.data.hostHealth ?? { required: false, status: "direct" };
-    const healthIndicator = hostHealth.status === "degraded"
+    const healthStatus = presentHostHealth(hostHealth).status;
+    const healthIndicator = healthStatus === "degraded"
       ? '<span class="host-health-dot degraded" aria-hidden="true"></span>'
-      : hostHealth.status === "starting"
+      : ["starting", "unconfirmed"].includes(healthStatus)
         ? '<span class="host-health-dot" aria-hidden="true"></span>'
         : "";
     const chip = `${healthIndicator}${chipItems.join('<span class="quota-divider">·</span>')}`;
-    const chipLabel = hostHealth.status === "degraded" ? "Codex 任务工具异常；查看账号额度与诊断" : "查看账号额度";
+    const chipLabel = healthStatus === "degraded" ? "任务工具异常；查看账号额度与诊断"
+      : healthStatus === "unconfirmed" ? "任务工具状态待确认；查看账号额度与诊断" : "查看账号额度";
     const chipButton = wrap.querySelector(".quota-chip");
     if (chipButton) {
       if (chipButton.innerHTML !== chip) chipButton.innerHTML = chip;
@@ -421,7 +423,8 @@ function installQuotaWidget(
     }
     // A detail page does not display quota timestamps or live network samples.
     // Compare its actual inputs, not the complete app view or editable DOM.
-    const chromeKey = JSON.stringify([state.data.version, state.data.injectionMode, hostHealth]);
+    const chromeKey = JSON.stringify([state.data.version, state.data.injectionMode, hostHealth,
+      state.hostHealthDetailsThread, state.hostHealthMoreThread]);
     const common = JSON.stringify([state.page, state.data.operation]);
     const pageData = state.page === "context" ? state.data.context
       : state.page === "wakeup" ? accounts.map(({ id, email, current, authMode, authStatus, wakeup }) =>

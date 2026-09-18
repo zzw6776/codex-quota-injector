@@ -6,6 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { requestHostToolReload } from "../src/host-health.mjs";
+import { successfulHostToolResult } from "./host-tool-fixtures.mjs";
 import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
 import { createTestNodeExecutable as createNodeAlias, useTempDir, waitFor } from "./helpers.mjs";
 
@@ -13,6 +14,7 @@ const FAKE_CODEX = `#!/usr/bin/env node
 import readline from "node:readline";
 import { appendFileSync } from "node:fs";
 const lines = readline.createInterface({ input: process.stdin });
+const toolResult = ${successfulHostToolResult.toString()};
 for await (const line of lines) {
   const message = JSON.parse(line);
   if (process.env.RELAY_TEST_REQUEST_LOG) {
@@ -20,6 +22,13 @@ for await (const line of lines) {
   }
   if (message.method === "config/mcpServer/reload") {
     process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");
+    process.stdout.write(JSON.stringify({ method: "mcpServer/startupStatus/updated", params: {
+      threadId: "reload-task", name: "codex_app", status: "ready" } }) + "\\n");
+    continue;
+  }
+  if (message.method === "mcpServer/tool/call") {
+    process.stdout.write(JSON.stringify({ id: message.id,
+      result: toolResult(message.params.tool, message.params.arguments?.threadId) }) + "\\n");
     continue;
   }
   if (message.method === "mcpServerStatus/list") {
@@ -333,7 +342,7 @@ for await (const line of lines) {
   await waitFor(async () => !await readFile(statePath, "utf8").then(() => true, () => false));
 });
 
-test("[LCH-04 TOOL-04] 重新加载并检查会重载官方 MCP 并以内置状态查询验证工具目录", async (t) => {
+test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部响应不泄漏", async (t) => {
   const directory = await useTempDir(t, "codex-host-tools-reload-");
   const fakeCodexPath = join(directory, "fake-codex.mjs");
   const upstreamExecutable = join(
@@ -390,16 +399,16 @@ test("[LCH-04 TOOL-04] 重新加载并检查会重载官方 MCP 并以内置状�
   const reloadRequest = requests.find((message) => message.method === "config/mcpServer/reload");
   assert.ok(reloadRequest);
   assert.equal(Object.hasOwn(reloadRequest, "params"), false);
-  const statusRequest = requests.find((message) => message.method === "mcpServerStatus/list");
-  assert.deepEqual(statusRequest?.params, {});
-  assert.doesNotMatch(stdout, /codex-quota-host-tools-/,
+  assert.equal(requests.filter(message => message.method === "mcpServer/tool/call").length, 4);
+  assert.ok(requests.every(message => message.method !== "mcpServerStatus/list"));
+  assert.doesNotMatch(stdout, /codex-quota-(host-tools|tool-check)-/,
     "中继内部恢复请求和响应不能进入桌面客户端协议");
   const health = JSON.parse(await readFile(healthPath, "utf8"));
   assert.equal(health.status, "ready");
   assert.deepEqual(health.missingTools, []);
 });
 
-test("[LCH-04 TOOL-04] 多个任务 MCP 交错就绪时逐个核验且不重载", async t => {
+test("[LCH-04 TOOL-04] 多个任务 MCP 交错就绪时并发探针且不重载", async t => {
   const directory = await useTempDir(t, "codex-thread-only-host-tools-");
   const upstream = join(directory, "thread-only.mjs");
   const executable = join(directory, process.platform === "win32" ? "upstream.exe" : "upstream");
@@ -410,12 +419,15 @@ test("[LCH-04 TOOL-04] 多个任务 MCP 交错就绪时逐个核验且不重载"
   await writeFile(upstream, `import {createInterface} from 'node:readline';
 import {appendFileSync} from 'node:fs';
 const send=x=>console.log(JSON.stringify(x));
+const toolResult=${successfulHostToolResult.toString()};
 for await(const line of createInterface({input:process.stdin})) {
  const x=JSON.parse(line);appendFileSync(process.env.RELAY_TEST_REQUEST_LOG,JSON.stringify(x)+'\\n');
  if(x.method==='initialize') {send({id:x.id,result:{}});setTimeout(()=>{for(const threadId of ['ready-thread','other-thread']) send({method:'mcpServer/startupStatus/updated',params:{name:'codex_app',status:'ready',threadId}})},100);}
  else if(x.method==='mcpServerStatus/list') {
   const data=['ready-thread','other-thread'].includes(x.params?.threadId)?[{name:'codex_app',runtimeStatus:'connected',tools:Object.fromEntries(['list_threads','read_thread','list_projects','get_usage_limits'].map(name=>[name,{name}]))}]:[];
   setTimeout(()=>send({id:x.id,result:{data}}),x.params?.threadId==='ready-thread'?50:0);
+ } else if(x.method==='mcpServer/tool/call') {
+  setTimeout(()=>send({id:x.id,result:toolResult(x.params.tool,x.params.arguments?.threadId)}),x.params.threadId==='ready-thread'?50:0);
  } else send({id:x.id,result:{}});
 }`);
   await writeFile(configPath, JSON.stringify({upstreamExecutable: executable,
@@ -442,15 +454,15 @@ for await(const line of createInterface({input:process.stdin})) {
   await closed;
   const health = JSON.parse(await readFile(healthPath, "utf8"));
   assert.equal(health.status, "ready");
-  assert.equal(health.threadId, "other-thread");
+  assert.equal(health.threadId, "ready-thread");
   assert.equal(health.tasks["ready-thread"].toolsVerified, true);
   assert.equal(health.tasks["other-thread"].toolsVerified, true);
   assert.deepEqual(health.missingTools, []);
   const requests = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
-  assert.deepEqual(requests.filter(x => x.method === "mcpServerStatus/list" && x.params?.threadId)
-    .map(x => x.params.threadId), ["ready-thread", "other-thread"]);
+  assert.deepEqual(requests.filter(x => x.method === "mcpServerStatus/list" && x.params?.threadId), []);
+  assert.equal(requests.filter(x => x.method === "mcpServer/tool/call").length, 8);
   assert.ok(requests.every(x=>x.method !== "config/mcpServer/reload" && x.method !== "turn/start"));
-  assert.doesNotMatch(stdout, /codex-quota-host-tools-/);
+  assert.doesNotMatch(stdout, /codex-quota-(host-tools|tool-check)-/);
   const responses = stdout.trim().split(/\r?\n/).map(JSON.parse);
   assert.deepEqual(responses.find(x=>x.id === 2).result, {data: []});
   assert.ok(responses.some(x=>x.method === "mcpServer/startupStatus/updated"));

@@ -32,6 +32,7 @@ import {
 import { delay, debugLog } from "./injector/logging.mjs";
 import { createWidgetSession } from "./injector/widget-session.mjs";
 import { createHostHealthSession } from "./injector/host-health-session.mjs";
+import { readVisibleHostTask } from "./injector/active-task.mjs";
 
 export async function runInjector({
   port = DEFAULT_PORT,
@@ -132,6 +133,8 @@ export async function runInjector({
 
   const hostHealthSession = createHostHealthSession({
     getLaunchOptions,
+    readActiveTask: async () => cdp?.isConnected
+      ? cdp.evaluate(`(${readVisibleHostTask.toString()})()`) : null,
     get stopped() {
       return stopped;
     },
@@ -332,8 +335,19 @@ export async function runInjector({
     try {
       switch (action?.type) {
         case "host-health-recheck":
+        case "host-health-diagnose":
+        case "host-health-reload":
           hostHealthSession.hostHealthActionError = null;
-          await requestHostToolReload(getLaunchOptions?.()?.relay);
+          if (!hostHealthSession.hostHealth.canCheck ||
+              action.threadId !== hostHealthSession.selectedTask?.threadId ||
+              hostHealthSession.selectedTask?.hostId !== "local") {
+            throw new Error("当前任务已切换或检查服务尚未就绪，请重新打开详情");
+          }
+          await requestHostToolReload(getLaunchOptions?.()?.relay, {
+            action: action.type === "host-health-recheck" ? "check"
+              : action.type === "host-health-diagnose" ? "diagnose" : "reload",
+            threadId: action.threadId,
+          });
           hostHealthSession.lastHostHealthCheckAt = 0;
           await hostHealthSession.syncHostHealth({ force: true });
           break;
