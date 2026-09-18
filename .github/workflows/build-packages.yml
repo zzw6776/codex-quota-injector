@@ -22,6 +22,7 @@ jobs:
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +44,23 @@ jobs:
         run: npm ci
 
       - name: Run non-UI contract tests
-        run: npm test
+        timeout-minutes: 8
+        run: >-
+          node --test --test-concurrency=1 --test-timeout=120000
+          --test-reporter=./scripts/ci-test-reporter.mjs
+          --test-reporter=./scripts/ci-test-reporter.mjs
+          --test-reporter-destination=stdout
+          --test-reporter-destination=ci-contract-tests.log
+          "test/*.test.mjs"
+
+      - name: Upload contract test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-test-log-${{ matrix.os }}
+          path: ci-contract-tests.log
+          retention-days: 7
+          if-no-files-found: warn
 
   macos:
     name: macOS ${{ matrix.architecture }} DMG
