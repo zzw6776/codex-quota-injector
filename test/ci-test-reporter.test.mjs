@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import reporter from "../scripts/ci-test-reporter.mjs";
 import { useTempDir } from "./helpers.mjs";
@@ -34,11 +35,11 @@ test("CI Node 超时结束被遗留定时器占住的测试文件，并输出文
   let failure;
   try {
     await promisify(execFile)(process.execPath, ["--test", "--test-concurrency=1", "--test-timeout=1000",
-      `--test-reporter=${resolve("scripts/ci-test-reporter.mjs")}`, fixture], { env, timeout: 10_000 });
+      `--test-reporter=${pathToFileURL(resolve("scripts/ci-test-reporter.mjs")).href}`, fixture], { env, timeout: 10_000 });
   } catch (error) { failure = error; }
   assert.ok(failure, "leaked worker must fail");
   assert.equal(failure.killed, false, "Node must time out before the outer safety timer");
-  assert.equal(failure.code, 1);
+  assert.equal(failure.code, 1, `Unexpected child exit:\n${failure.stderr}\n${failure.stdout}`);
   assert.match(failure.stdout, /START .*leaked-timer.test.mjs/);
   assert.match(failure.stdout, /FAIL .*leaked-timer.test.mjs/);
   assert.match(failure.stdout, /testTimeoutFailure|timed out/);

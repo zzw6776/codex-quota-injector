@@ -20,3 +20,11 @@
 - Workflow YAML 解析与 `git diff --check` 通过。Windows/Linux 的新执行结果以新 CI 为准，不以本机结果代替。
 
 私有材料：`.runtime/ci-logging-20260918-Mzz84L/`。最终双输出日志 SHA-256：`acd1c6978e9ba6e3d2010a10467adf14d0ab9eba5e3c6a15b3eed088e3eedaf5`；旧 Windows 日志 SHA-256：`c1b361b2c78df6c8002fa523993eb81117295a4e7133e74118513a8631840abf`。
+
+## 0.1.288：新增夹具的 Windows reporter 路径修复
+
+运行 `35346111149` 的 Windows 测试约 71 秒完成：557 项中 553 通过、1 失败、3 跳过；Ubuntu/macOS 通过。唯一失败为本轮新增的超时子进程验证，实际退出码 7，而非预期超时失败码 1；原进度页用例这次通过，不把旧 EPERM 当成本次失败。
+
+夹具把 `resolve()` 得到的 Windows `D:\\...` 路径直接作为 `--test-reporter`，而 Node 22.23.1 的内置实现把该参数传给 ESM import。带盘符的字符串被识别为 `d:` URL 协议；同版本 ESM 对照返回 `ERR_UNSUPPORTED_ESM_URL_SCHEME`。修复使用 `pathToFileURL(...).href`，保留严格退出码及超时错误检查，并在意外退出时打印子进程 stderr/stdout。远端旧日志未记录子进程 stderr，因此协议错误归因由代码及同版本加载器对照支持，Windows 实际恢复由新 CI 独立确认。
+
+修复后 macOS arm64 / Node 22.23.1 定向 2/2 通过，`git diff --check` 通过。只改变测试夹具与发布版本，不重跑未受影响业务/打包测试、不安装或重启。修复后日志 SHA-256：`47d655dbe7f1f8572998d07cd86d34525e494539d43ac446aa4c58f1192d39af`；本次远端失败日志 SHA-256：`0c6ea22ba4fc3b175df9cef1a8ce45a851923a6a712aedf1f70a949a9f7120d0`。
