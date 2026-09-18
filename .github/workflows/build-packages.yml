@@ -171,9 +171,9 @@ jobs:
           if-no-files-found: error
           path: build/native/codex-quota-relay-wsl-*
 
-  windows:
-    name: Windows x64 Setup
-    needs: wsl-relay
+  windows-build:
+    name: Windows x64 Build
+    needs: test
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -187,12 +187,6 @@ jobs:
 
       - name: Install build dependencies
         run: npm ci
-
-      - name: Download prebuilt WSL relay
-        uses: actions/download-artifact@v4
-        with:
-          name: wsl-relay-intermediate
-          path: build/native
 
       - name: Download official Node.js runtime
         shell: pwsh
@@ -226,6 +220,55 @@ jobs:
           npm run build:relay:windows -- `
             --node "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/node.exe" `
             --output "build/native/codex-quota-relay-windows-$packageVersion.exe"
+
+      - name: Stage Node.js license
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Copy-Item -LiteralPath "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/LICENSE" `
+            -Destination "build/native/NODE_LICENSE.txt"
+
+      - name: Upload Windows binaries for packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries-intermediate
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            build/native/Codex Quota Injector.exe
+            build/native/codex-quota-relay-windows-*.exe
+            build/native/NODE_LICENSE.txt
+
+  windows:
+    name: Windows x64 Setup
+    needs:
+      - windows-build
+      - wsl-relay
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install packaging dependencies
+        run: npm ci
+
+      - name: Download prebuilt Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries-intermediate
+          path: build/native
+
+      - name: Download prebuilt WSL relay
+        uses: actions/download-artifact@v4
+        with:
+          name: wsl-relay-intermediate
+          path: build/native
 
       - name: Install NSIS
         shell: pwsh
@@ -277,7 +320,7 @@ jobs:
             --input-executable "build/native/Codex Quota Injector.exe" `
             --windows-relay-executable "build/native/codex-quota-relay-windows-$packageVersion.exe" `
             --wsl-relay-executable "build/native/codex-quota-relay-wsl-$packageVersion" `
-            --node-license "build/node-runtimes/node-v$env:NODE_RUNTIME_VERSION-win-x64/LICENSE" `
+            --node-license "build/native/NODE_LICENSE.txt" `
             --output-dir "release/windows" `
             --makensis "$env:MAKENSIS_PATH"
 
