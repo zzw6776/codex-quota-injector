@@ -5,6 +5,7 @@ import { requestHeaders } from "./http-transport.mjs";
 import { createResponseObservation } from "./response-observation.mjs";
 import { consumeResponsePayloads, responseEvent, readLimitedResponseText, upstreamErrorMessage } from "./response-stream.mjs";
 import { sendWebSocketFailure, withWebSocketTransport, sendWebSocketJson, isTerminalResponseEvent } from "./websocket-transport.mjs";
+import { observeDiagnosticResponse } from "./transport-diagnostics.mjs";
 
 function startHttpWebSocketBridge({
   client,
@@ -22,6 +23,7 @@ function startHttpWebSocketBridge({
   onPrepared,
   onAccepted,
   onDone,
+  createDiagnostic,
 }) {
   const prepared = prepareCustomWebSocketRequest(body, target);
   const requestShape = customRequestShape(prepared);
@@ -30,6 +32,8 @@ function startHttpWebSocketBridge({
   const payload = Buffer.from(JSON.stringify(prepared));
   const targetUrl = new URL(`responses${search}`, target.baseUrl);
   const headers = requestHeaders(sourceHeaders, target, payload.length);
+  const diagnostic = createDiagnostic?.({ context, transport: "websocket-http-bridge",
+    method: "POST", endpoint: "/v1/responses", url: targetUrl, headers, body: prepared, wireBody: payload });
   const transport = targetUrl.protocol === "https:" ? requestHttps : requestHttp;
   const observation = createResponseObservation({
     requestStartedAt: context.requestStartedAt,
@@ -51,6 +55,7 @@ function startHttpWebSocketBridge({
     sendWebSocketFailure(client, body, streamId, message, sequenceNumber++);
   };
   const upstream = transport(targetUrl, { method: "POST", headers }, (response) => {
+    if (diagnostic) observeDiagnosticResponse(response, diagnostic);
     upstreamResponse = response;
     observation.markResponseStarted();
     const statusCode = response.statusCode ?? 502;
@@ -101,14 +106,18 @@ function startHttpWebSocketBridge({
     });
   });
   upstream.once("error", (error) => {
+    diagnostic?.error(error);
+    diagnostic?.finish("request-error");
     if (finished) return;
     fail(`自定义模型请求失败：${error.message}`);
     finish();
   });
+  diagnostic?.requestHeaders(upstream.getHeaders());
   upstream.end(payload);
   return {
     cancel() {
       if (finished) return;
+      diagnostic?.finish("cancelled");
       observation.abort();
       upstreamResponse?.destroy();
       upstream.destroy();

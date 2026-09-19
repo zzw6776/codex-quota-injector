@@ -211,6 +211,19 @@ export class RouterRequestLedger {
     });
   }
 
+  recordTurnState(threadId, view) {
+    const normalizedThreadId = nonEmptyString(threadId);
+    const byteLength = Number(view?.byteLength);
+    if (!normalizedThreadId || !Number.isInteger(byteLength) || byteLength < 0) return;
+    this.usageWriter?.write({
+      type: "turn-state-observed",
+      threadId: normalizedThreadId,
+      model: nonEmptyString(view?.model),
+      byteLength,
+      expectedByteLength: Number(view?.expectedByteLength),
+    });
+  }
+
   recordPendingToolCall(context, call) {
     if (!context.threadId || !context.turnId || !call?.referenceId) return;
     const batchKey = pendingToolBatchKey(context.threadId, context.requestId);

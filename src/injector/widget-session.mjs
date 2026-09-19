@@ -51,6 +51,10 @@ function createWidgetSession(dependencies) {
       operation: account.operation,
       context: dependencies.contextManager.getViewModel(),
       hostHealth: dependencies.hostHealth,
+      turnState292: dependencies.tokenUsageManager.getTurnStateViewModel?.(
+        dependencies.hostHealth?.threadId,
+      ) ?? { status: "unknown", expectedByteLength: 292, byteLength: null,
+        model: null, observedAt: null },
     };
     const extraModels = dependencies.extraModelManager.getViewModel();
     const network = dependencies.modelRouterManager.getNetworkViewModel?.() ?? null;

@@ -11,6 +11,8 @@ function fixture() {
     account: { id: "one", email: "fixture@example.test", current: true },
     models: { platforms: [] },
     usage: { status: "ready", turns: [{ turnId: "a", totalTokens: 100, updatedAt: 1 }] },
+    turnState292: { status: "match", expectedByteLength: 292, byteLength: 292,
+      model: "gpt-5.6-sol", observedAt: 1 },
     stopped: false,
   };
   const page = {
@@ -44,8 +46,13 @@ function fixture() {
     accountManager: { getViewModel: () => ({ accounts: [state.account], windows: [] }) },
     contextManager: { getViewModel: () => ({ models: [] }) },
     extraModelManager: { getViewModel: () => state.models },
-    modelRouterManager: { getNetworkViewModel: () => state.network },
-    tokenUsageManager: { getViewModel: () => state.usage },
+    modelRouterManager: {
+      getNetworkViewModel: () => state.network,
+    },
+    tokenUsageManager: {
+      getViewModel: () => state.usage,
+      getTurnStateViewModel: () => state.turnState292,
+    },
     wakeupManager: { getViewModel: () => null },
   });
   return { session, state, calls, sent, page, window, cdp, async push() {
@@ -63,6 +70,7 @@ test("网络采样只发送小包，不重传或序列化未变化的回合", as
   };
   await f.push();
   assert.ok(f.calls[0][1].tokenUsage.turns.length);
+  assert.deepEqual(f.calls[0][1].turnState292, f.state.turnState292);
   const before = serializations;
   f.calls.length = 0;
   f.sent.length = 0;

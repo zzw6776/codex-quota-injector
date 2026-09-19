@@ -1,6 +1,7 @@
 import { createServer, request as requestHttp } from "node:http";
 import { request as requestHttps } from "node:https";
 import { randomBytes, randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { startModelCompatibilityProxy } from "./chat-compat-proxy.mjs";
 import { ResponsesHistory } from "./responses-history.mjs";
@@ -15,6 +16,9 @@ import { startHttpWebSocketBridge } from "./model-router/websocket-bridge.mjs";
 import { sendWebSocketPrewarm, sendWebSocketFailure, sendWebSocketData, webSocketProtocols, parseWebSocketJson, normalizedStreamId, webSocketLane, webSocketTargetUrl, validWebSocketCloseCode, proxyAuxiliaryWebSocket } from "./model-router/websocket-transport.mjs";
 import { RouterRequestLedger } from "./model-router/request-ledger.mjs";
 import { RouterNetworkMonitor } from "./model-router/network-monitor.mjs";
+import { createTransportDiagnostic, observeDiagnosticResponse, diagnosticWebSocketHandshake, withDiagnosticObservation } from "./model-router/transport-diagnostics.mjs";
+import { createDiagnosticEventWriter } from "./model-router/diagnostic-writer.mjs";
+import { CodexTurnStateMonitor, withTurnStateObservation } from "./model-router/turn-state-monitor.mjs";
 
 export class ModelRouterManager {
   constructor({
@@ -24,6 +28,7 @@ export class ModelRouterManager {
     networkProbeIntervalMs = DEFAULT_NETWORK_PROBE_INTERVAL_MS,
     networkProbeTimeoutMs = DEFAULT_NETWORK_PROBE_TIMEOUT_MS,
     onRequestShape = null,
+    fullRequestDiagnostics = process.env.CODEX_QUOTA_FULL_REQUEST_DIAGNOSTICS === "1",
     log = console.log,
   } = {}) {
     this.server = null;
@@ -39,6 +44,13 @@ export class ModelRouterManager {
     this.chatCompatibilityProxy = null;
     this.networkMonitor = new RouterNetworkMonitor({ networkProbeIntervalMs, networkProbeTimeoutMs });
     this.requestLedger = new RouterRequestLedger(this.networkMonitor);
+    this.diagnosticWriter = null;
+    this.diagnosticPath = null;
+    this.fullRequestDiagnostics = Boolean(fullRequestDiagnostics);
+    this.turnStateMonitor = new CodexTurnStateMonitor();
+    this.turnStateMonitor.onChange((view, threadId) => {
+      this.requestLedger.recordTurnState(threadId, view);
+    });
 
     this.closed = false;
     this.officialBaseUrls = {
@@ -57,6 +69,14 @@ export class ModelRouterManager {
 
   getNetworkViewModel() {
     return this.networkMonitor.getViewModel();
+  }
+
+  onTurnStateChange(listener) {
+    return this.turnStateMonitor.onChange(listener);
+  }
+
+  getTurnStateViewModel(threadId) {
+    return this.turnStateMonitor.getViewModel(threadId);
   }
 
   async configure({
@@ -79,6 +99,14 @@ export class ModelRouterManager {
     this.#reuseIdentity(reusableIdentity);
     await this.#ensureServer();
     await this.requestLedger.ensureUsageWriter(usageEventPath);
+    const diagnosticPath = this.fullRequestDiagnostics && usageEventPath
+      ? join(dirname(usageEventPath), "model-request-diagnostics.jsonl")
+      : null;
+    if (diagnosticPath !== this.diagnosticPath) {
+      await this.diagnosticWriter?.close();
+      this.diagnosticPath = diagnosticPath;
+      this.diagnosticWriter = diagnosticPath ? createDiagnosticEventWriter(diagnosticPath, { log: this.log }) : null;
+    }
     const snapshotSignature = `${normalized.signature}:observe-official=${Boolean(observeOfficial)}`;
     if (snapshotSignature !== this.snapshotSignature) {
       const replacingSnapshot = this.snapshotSignature !== null;
@@ -120,6 +148,7 @@ export class ModelRouterManager {
     this.snapshot = null;
     this.snapshotSignature = null;
     this.requestLedger.reset();
+    this.turnStateMonitor.clear();
     this.networkMonitor.stopAllNetworkMonitors();
     this.#closeWebSocketConnections(1012, "模型路由配置已更新");
     const compatibilityProxy = this.chatCompatibilityProxy;
@@ -140,6 +169,7 @@ export class ModelRouterManager {
     const ledgerClose = this.requestLedger.close();
     this.networkMonitor.stopAllNetworkMonitors({ notify: false });
     this.networkMonitor.close();
+    this.turnStateMonitor.clear();
     this.#closeWebSocketConnections(1001, "模型路由器已关闭");
     server?.closeAllConnections?.();
     await Promise.all([
@@ -148,6 +178,8 @@ export class ModelRouterManager {
       compatibilityProxy ? compatibilityProxy.close() : Promise.resolve(),
       ledgerClose,
     ]);
+    await this.diagnosticWriter?.close();
+    this.diagnosticWriter = null;
   }
 
   async #ensureServer() {
@@ -255,6 +287,7 @@ export class ModelRouterManager {
         const payload = await readRequestBody(request);
         const body = await parseRequestJson(payload, request.headers, { required: true });
         const context = this.#createRequestContext(body, request.headers);
+        context.diagnosticBody = body;
         // Official traffic keeps its exact wire representation. Decoding is
         // only for route selection and observation, never for forwarding.
         let prepared = payload;
@@ -319,12 +352,19 @@ export class ModelRouterManager {
       shape: structuredClone(customRequestShape(body)),
     });
     const headers = rawRequestHeaders(request.headers, target, payload.length);
+    const diagnostic = this.#diagnostic({
+      context: observationContext ?? { target, threadId: requestThreadId(body, request.headers),
+        turnId: turnIdFromHeaders(request.headers) },
+      transport: "http", method: request.method, endpoint: route.pathname,
+      url: targetUrl, body, wireBody: payload, headers,
+    });
     const transport = targetUrl.protocol === "https:" ? requestHttps : requestHttp;
     await new Promise((resolve) => {
       const upstream = transport(targetUrl, {
         method: request.method,
         headers,
       }, (upstreamResponse) => {
+        if (diagnostic) observeDiagnosticResponse(upstreamResponse, diagnostic);
         response.writeHead(
           upstreamResponse.statusCode ?? 502,
           responseHeaders(upstreamResponse.headers),
@@ -351,12 +391,18 @@ export class ModelRouterManager {
         upstreamResponse.pipe(response);
       });
       upstream.once("error", (error) => {
+        diagnostic?.error(error);
+        diagnostic?.finish("request-error");
         writeError(response, 502, `模型上游请求失败：${error.message}`);
         resolve();
       });
       response.once("close", () => {
-        if (!response.writableFinished) upstream.destroy();
+        if (!response.writableFinished) {
+          diagnostic?.finish("client-closed");
+          upstream.destroy();
+        }
       });
+      diagnostic?.requestHeaders(upstream.getHeaders());
       upstream.end(payload);
     });
   }
@@ -404,7 +450,8 @@ export class ModelRouterManager {
 
   #proxyWebSocket(client, request, route) {
     return proxyAuxiliaryWebSocket(client, request, route,
-      (body, headers) => this.#resolveAuxiliaryTarget(body, headers));
+      (body, headers) => this.#resolveAuxiliaryTarget(body, headers),
+      options => this.#diagnostic(options));
   }
 
   #routeWebSocket(client, request, route) {
@@ -414,6 +461,7 @@ export class ModelRouterManager {
     const networkConnectionId = randomUUID();
     let officialSocket = null;
     let officialOpen = null;
+    let connectionDiagnostic = null;
     let messageTail = Promise.resolve();
     let closed = false;
 
@@ -430,8 +478,15 @@ export class ModelRouterManager {
     const ensureOfficialSocket = (target) => {
       if (officialOpen) return officialOpen;
       const targetUrl = webSocketTargetUrl(target, route.incoming.search);
+      const headers = upstreamWebSocketHeaders(request.headers, target);
+      connectionDiagnostic = this.#diagnostic({
+        context: { target, threadId: requestThreadId(null, request.headers) },
+        transport: "websocket-handshake", method: "GET", endpoint: route.pathname,
+        url: targetUrl, headers, connectionId: networkConnectionId,
+      });
       officialSocket = new WebSocket(targetUrl, webSocketProtocols(request.headers), {
-        headers: upstreamWebSocketHeaders(request.headers, target),
+        headers,
+        ...(connectionDiagnostic ? { finishRequest: diagnosticWebSocketHandshake(connectionDiagnostic) } : {}),
         maxPayload: MAX_REQUEST_BYTES,
         perMessageDeflate: true,
         handshakeTimeout: 15_000,
@@ -451,17 +506,20 @@ export class ModelRouterManager {
         officialSocket.once("error", onInitialError);
       });
       officialSocket.on("message", (data, isBinary) => {
+        connectionDiagnostic?.raw(data, { binary: isBinary });
         if (!isBinary) observations.accept(parseWebSocketJson(data));
         sendWebSocketData(client, data, isBinary);
       });
       officialSocket.on("close", (code, reason) => {
+        connectionDiagnostic?.finish(`websocket-close:${code}`);
         this.networkMonitor.stopNetworkMonitor(networkConnectionId, { unexpected: !closed });
         observations.abortAll();
         if (client.readyState === WebSocket.OPEN) {
           client.close(validWebSocketCloseCode(code) ? code : 1011, reason);
         }
       });
-      officialSocket.on("error", () => {
+      officialSocket.on("error", (error) => {
+        connectionDiagnostic?.error(error);
         // The opening promise or close event reports the failure to Codex.
       });
       return officialOpen;
@@ -480,6 +538,7 @@ export class ModelRouterManager {
         const upstream = await ensureOfficialSocket(
           officialTarget(this.snapshot, request.headers, this.officialBaseUrls),
         );
+        connectionDiagnostic?.raw(data, { direction: "request", binary: false });
         upstream.send(data, { binary: false });
         return;
       }
@@ -489,6 +548,10 @@ export class ModelRouterManager {
       });
       const streamId = normalizedStreamId(body.stream_id);
       if (context.target.kind === "official") {
+        const diagnostic = this.#diagnostic({
+          context, transport: "websocket", method: "response.create", endpoint: route.pathname,
+          body, wireBody: data, connectionId: networkConnectionId,
+        });
         this.onRequestShape?.({
           path: route.pathname,
           targetKind: context.target.kind,
@@ -499,7 +562,10 @@ export class ModelRouterManager {
           // Prewarm still has a terminal response on the same WebSocket lane.
           // Keep a queue entry so that response cannot consume the following
           // real request's observation, but deliberately emit no metrics.
-          const entry = observations.add(streamId, ignoredResponseObservation());
+          const ignored = ignoredResponseObservation();
+          const stateObserved = withTurnStateObservation(ignored, this.turnStateMonitor, context);
+          const entry = observations.add(streamId,
+            diagnostic ? withDiagnosticObservation(stateObserved, diagnostic) : stateObserved);
           try {
             const upstream = await ensureOfficialSocket(context.target);
             upstream.send(data, { binary: false });
@@ -524,7 +590,9 @@ export class ModelRouterManager {
           this.requestLedger.settleThreadRoute(routeClaim, accepted);
           routeClaim = null;
         };
-        const entry = observations.add(streamId, observation, {
+        const stateObserved = withTurnStateObservation(observation, this.turnStateMonitor, context);
+        const entry = observations.add(streamId,
+          diagnostic ? withDiagnosticObservation(stateObserved, diagnostic) : stateObserved, {
           onAccepted: () => settleRoute(true),
           onRejected: () => settleRoute(false),
         });
@@ -539,9 +607,14 @@ export class ModelRouterManager {
       }
 
       if (body.generate === false) {
+        const diagnostic = this.#diagnostic({ context, transport: "local-websocket-prewarm",
+          method: "response.create", endpoint: route.pathname, body, wireBody: data });
         const expanded = customHistory.expand(body, context.target.routeKey);
         const completed = sendWebSocketPrewarm(client, body, streamId);
         customHistory.remember(expanded, completed, context.target.routeKey);
+        diagnostic?.raw(JSON.stringify(completed));
+        diagnostic?.recordPayload(completed);
+        diagnostic?.finish("local-prewarm");
         return;
       }
       const laneKey = webSocketLane(streamId);
@@ -564,6 +637,7 @@ export class ModelRouterManager {
           target: context.target,
           context,
           streamId,
+          createDiagnostic: options => this.#diagnostic(options),
           onUsage: (usage, responseId) => this.requestLedger.recordUsage(context, usage, responseId),
           onToolCall: (call) => this.requestLedger.recordPendingToolCall(context, call),
           onGeneration: (generation) => this.requestLedger.recordGeneration(context, {
@@ -668,7 +742,15 @@ export class ModelRouterManager {
       onUsage: (usage, responseId) => this.requestLedger.recordUsage(context, usage, responseId),
       onToolCall: call => this.requestLedger.recordPendingToolCall(context, call),
       onGeneration: generation => this.requestLedger.recordGeneration(context, { ...generation, requestId: context.requestId }),
+      onResponseHeaders: headers => this.turnStateMonitor.observe(context, headers, "headers"),
+      onResponsePayload: payload => this.turnStateMonitor.observe(context, payload),
+      createDiagnostic: options => this.#diagnostic(options),
     });
+  }
+
+  #diagnostic(options) {
+    const writer = this.diagnosticWriter;
+    return writer ? createTransportDiagnostic(event => writer.write(event), options) : null;
   }
 
 }

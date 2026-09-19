@@ -82,6 +82,15 @@ const WIDGET_STYLES = {
     .panel-subtitle { margin-top: 3px; color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-weight: 400; }
     .panel-count { margin-left: 6px; color: var(--token-text-secondary, #aaaab5); font-size: 12px; font-weight: 500; }
     .panel-controls { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+    .turn-state-status {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 28px; height: 20px; padding: 0 6px; border-radius: 7px;
+      color: #8a8a95; background: rgba(138,138,149,.12);
+      font: 650 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums; cursor: default;
+    }
+    .turn-state-status.match { color: #71c98c; background: rgba(67,166,101,.13); }
+    .turn-state-status.mismatch { color: #ef8e86; background: rgba(220,76,63,.13); }
     .host-health-status {
       appearance: none; display: inline-flex; align-items: center; justify-content: center;
       width: 22px; height: 22px; padding: 0; border: 0; border-radius: 7px; cursor: default;
@@ -331,6 +340,9 @@ const WIDGET_STYLES = {
     .quota-wrap.is-light .host-health-banner.degraded { color: #a7352e; border-color: rgba(181,61,53,.24); background: rgba(181,61,53,.06); }
     .quota-wrap.is-light .host-health-detail { color: #6f6f79; }
     .quota-wrap.is-light .host-health-status:hover, .quota-wrap.is-light .host-health-status:focus-visible { background: rgba(0,0,0,.065); }
+    .quota-wrap.is-light .turn-state-status { color: #6f6f79; background: rgba(138,138,149,.1); }
+    .quota-wrap.is-light .turn-state-status.match { color: #2f7f4a; background: rgba(67,166,101,.1); }
+    .quota-wrap.is-light .turn-state-status.mismatch { color: #a7352e; background: rgba(220,76,63,.09); }
     .quota-wrap.is-light .account-remove { color: #b53d35; border-color: rgba(181,61,53,.2); background: rgba(181,61,53,.045); }
     .quota-wrap.is-light .account-remove:hover { background: rgba(181,61,53,.09); }
     .quota-wrap.is-light .account-tooltip { color: #202124; background: #fff; border-color: rgba(0,0,0,.12); box-shadow: 0 6px 20px rgba(0,0,0,.12); }

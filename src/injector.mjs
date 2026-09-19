@@ -76,6 +76,7 @@ export async function runInjector({
 
   let removeTokenUsageListener = () => {};
   let removeNetworkListener = () => {};
+  let removeTurnStateListener = () => {};
   let removeExtraModelListener = () => {};
   let activeAction = null;
   const activeModelDetections = new Set();
@@ -174,6 +175,8 @@ export async function runInjector({
     removeTokenUsageListener = () => {};
     removeNetworkListener();
     removeNetworkListener = () => {};
+    removeTurnStateListener();
+    removeTurnStateListener = () => {};
     removeExtraModelListener();
     removeExtraModelListener = () => {};
     cdp?.close();
@@ -320,6 +323,13 @@ export async function runInjector({
         console.error(
           `[model-router] 网络状态 Widget 刷新失败: ${error.message}`,
         );
+      });
+    }) ?? (() => {});
+  removeTurnStateListener =
+    modelRouterManager.onTurnStateChange?.(() => {
+      widgetSession.markWidgetDataDirty();
+      void widgetSession.requestWidgetUpdate().catch((error) => {
+        console.error(`[model-router] Turn state Widget 刷新失败: ${error.message}`);
       });
     }) ?? (() => {});
   removeExtraModelListener =

@@ -40,3 +40,27 @@ test("按钮分别发送检查、目录诊断和重载动作并绑定任务，�
   assert.equal(actions.length, 3);
   assert.equal(renders, 1);
 });
+
+test("任务状态旁按当前任务显示 292、非 292 与未观察状态", () => {
+  const state = { data: { hostHealth: { status: "ready" }, turnState292: {
+    status: "match", expectedByteLength: 292, byteLength: 292,
+    model: "gpt-5.6-sol", observedAt: 123,
+  } } };
+  const widget = createHostHealth({ state, escapeHtml: String, formatUpdatedAt: value => `at-${value}` });
+  let controls = widget.renderPanelControls();
+  assert.match(controls, /turn-state-status match[^>]*>292<\/span>/);
+  assert.match(controls, /x-codex-turn-state：292 字节（符合）/);
+  assert.match(controls, /gpt-5\.6-sol/);
+
+  state.data.turnState292 = { status: "mismatch", expectedByteLength: 292,
+    byteLength: 312, model: "gpt-6-astra", observedAt: 456 };
+  controls = widget.renderPanelControls();
+  assert.match(controls, /turn-state-status mismatch[^>]*>≠292<\/span>/);
+  assert.match(controls, /x-codex-turn-state：312 字节（不等于 292）/);
+
+  state.data.turnState292 = { status: "unknown", expectedByteLength: 292,
+    byteLength: null, model: null, observedAt: null };
+  controls = widget.renderPanelControls();
+  assert.match(controls, /turn-state-status unknown[^>]*>--<\/span>/);
+  assert.match(controls, /尚未观察到当前任务/);
+});

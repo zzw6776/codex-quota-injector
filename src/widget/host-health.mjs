@@ -78,7 +78,21 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
     if (health?.updatedAt) details.push(`状态更新：${formatUpdatedAt(health.updatedAt)}`);
     details.push("点击查看逐项检查结果");
     const text = escapeHtml(details.join("\n"));
-    return `<div class="panel-controls"><button class="host-health-status status-${view.status}" type="button" data-account-tooltip="${text}" aria-label="${text}"><span class="host-health-dot ${view.status}" aria-hidden="true"></span></button><button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
+    const turnState = state.data.turnState292 ?? {};
+    const expected = Number(turnState.expectedByteLength) || 292;
+    const byteLength = Number.isInteger(turnState.byteLength) ? turnState.byteLength : null;
+    const turnStateStatus = turnState.status === "match" ? "match"
+      : turnState.status === "mismatch" ? "mismatch" : "unknown";
+    const turnStateLabel = turnStateStatus === "match" ? String(expected)
+      : turnStateStatus === "mismatch" ? `≠${expected}` : "--";
+    const turnStateDetails = turnStateStatus === "unknown"
+      ? `尚未观察到当前任务的 x-codex-turn-state；目标长度 ${expected} 字节`
+      : `x-codex-turn-state：${byteLength} 字节（${turnStateStatus === "match" ? "符合" : `不等于 ${expected}`}）`;
+    const turnStateMeta = [turnState.model,
+      turnState.observedAt ? `观察时间：${formatUpdatedAt(turnState.observedAt)}` : null]
+      .filter(Boolean).join("\n");
+    const turnStateText = escapeHtml(`${turnStateDetails}${turnStateMeta ? `\n${turnStateMeta}` : ""}`);
+    return `<div class="panel-controls"><span class="turn-state-status ${turnStateStatus}" data-account-tooltip="${turnStateText}" aria-label="${turnStateText}">${escapeHtml(turnStateLabel)}</span><button class="host-health-status status-${view.status}" type="button" data-account-tooltip="${text}" aria-label="${text}"><span class="host-health-dot ${view.status}" aria-hidden="true"></span></button><button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
   }
 
   function hostToolLabel(name) {

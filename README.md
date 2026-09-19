@@ -20,7 +20,7 @@
 - OpenAI OAuth 使用客户端登记的固定回调地址 `http://localhost:1455/auth/callback`；
 - macOS 和 Windows 的 Codex 客户端均支持 DeepSeek Flash（`deepseek-flash`，原生图片输入）与官方模型共存；
 - 模型管理内置 DeepSeek 官方预设，只需填写 API Key、选择模型并启用；模型下拉列表通过 DeepSeek 官方 `/models` 接口实时刷新，DeepSeek 卡片内可查询余额，窗口最底部继续显示余额汇总；上下文由用户按 K 填写，不用不可靠的请求压测猜测上限；其他兼容 Responses 或 Chat 的第三方平台仍可手动添加。保存与检测相互独立：保存不发起检测请求；设置内每个模型都有检测按钮，检测完成填入表单后需单独保存，也可手动填写接口、工具兼容、图片、推理和上下文参数。外层每个模型显示检测通过、部分可用、检测失败、手动配置等简明状态，并保留已检测配置的接口、工具、推理强度、联网和图片参数；失败原因和部分可用详情在设置内显示，最近检测结果持久保留；收起再打开悬浮框保留当前页面、编辑内容与滚动位置，拖动尺寸不保存。检测时按模型实际探测 Responses/Chat、流式输出、函数与原始文本/命名空间工具、工具结果续接、并行与指定工具、服务端网页搜索、`low/medium/high/xhigh/max` 推理强度、推理模式工具选择、推理历史和图片输入，再以一条包含 Codex 复杂工具 schema 的组合请求验收。第三方请求统一把本地 `$defs/$ref` 工具 schema 编译成无引用的可移植结构；Responses 的核心续接、必要工具转换、流式输出和组合请求全部通过时保留 Responses，只把供应商未原生支持的 custom/namespace 工具自动转换为标准 function；图片可通过另一协议时只对含图片的请求自动分流，不改变文本和工具请求的默认协议。其中任一必需阶段明确不兼容时自动尝试 Chat，认证、限流、网络及服务端临时故障不会触发协议降级，默认每次请求最多等待 90 秒，暂时性故障最多尝试 3 次并显示重试进度；图片等可选能力耗尽重试后标记暂不可用并保留原因，不将网络故障伪装成已确认不支持。核心连接与工具续接失败不能标记检测通过，但仍可手动配置并保存；
-- 接管 app-server 时持续检查 `codex_app` 任务工具；悬浮面板关闭按钮左侧始终显示彩色状态点（绿色正常、黄色启动中、红色异常、蓝色直连），不显示状态文字且使用普通鼠标指针。悬停时正常状态展示四项常用功能的易读名称，不显示状态码和 API 名；异常状态只列缺失功能，并补充处理建议、诊断、状态码和状态更新时间。状态文件变化会在 100 毫秒防抖后刷新；正常时仅每 30 秒兜底检查，启动中或异常时每 3 秒自愈检查，监听不可用时自动回退快速轮询。检查本身不重绘页面，Tooltip 可稳定保持；启动失败或缺少常用只读入口 `list_threads`、`read_thread`、`list_projects`、`get_usage_limits` 时还会显示常驻诊断，并提供重新检查、重启 Codex 和打开日志；
+- 接管 app-server 时持续检查 `codex_app` 任务工具；悬浮面板关闭按钮左侧始终显示彩色状态点（绿色正常、黄色启动中、红色异常、蓝色直连），其左侧按当前任务显示最近一次官方 `x-codex-turn-state` 是否为 292 字节：`292` 表示符合、`≠292` 表示不符合、`--` 表示尚未观察到。Relay 通过现有用量事件通道传递并缓存任务 ID、长度、模型和时间，不保存 state 原值，因此 WSL/Windows 分进程运行时也能显示。任务工具状态不显示文字且使用普通鼠标指针。悬停时正常状态展示四项常用功能的易读名称，不显示状态码和 API 名；异常状态只列缺失功能，并补充处理建议、诊断、状态码和状态更新时间。状态文件变化会在 100 毫秒防抖后刷新；正常时仅每 30 秒兜底检查，启动中或异常时每 3 秒自愈检查，监听不可用时自动回退快速轮询。检查本身不重绘页面，Tooltip 可稳定保持；启动失败或缺少常用只读入口 `list_threads`、`read_thread`、`list_projects`、`get_usage_limits` 时还会显示常驻诊断，并提供重新检查、重启 Codex 和打开日志；
 - macOS 使用原生无界面启动器接收 Finder 的重复打开事件；重复双击会接管旧注入器，Codex 已开放调试端口时保留当前客户端；
 - 退出 Codex 后，后台注入工作进程与 macOS 原生入口都会同步退出，不残留后台进程；
 - 不修改官方客户端，不依赖 Cockpit，不要求用户安装 Node.js。
@@ -90,6 +90,8 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。�
 
 - macOS：`~/Library/Logs/Codex Quota Injector/injector.log`
 - Windows：`%LOCALAPPDATA%\Codex Quota Injector\Logs\injector.log`
+
+模型 Router 的全量请求记录默认关闭。仅在启动环境显式设置 `CODEX_QUOTA_FULL_REQUEST_DIAGNOSTICS=1` 时，才会在上述**数据目录**创建 `model-request-diagnostics.jsonl`，记录所有经过 Router 转发的模型请求、辅助 HTTP 接口和 WebSocket 消息；其中包含完整正文、Authorization/API Key、Cookie 和 state 原值。日志保留在本机，已加入 Git 忽略。字段、风险、原文还原与启用条件见[请求记录说明](docs/model-request-diagnostics.md)。右上角 292 状态不依赖该日志开关。
 
 ## 自动打包
 

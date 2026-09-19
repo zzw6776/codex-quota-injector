@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { appendEvents, createManager, event, protocolUsage } from "./token-usage/support.mjs";
+import { TokenUsageManager } from "../src/token-usage.mjs";
+import { appendEvents, createManager, event, pricing, protocolUsage } from "./token-usage/support.mjs";
 
 test("空刷新复用用量视图，追加真实用量后更新统计", async t => {
   const usage = protocolUsage({ input: 10, output: 5 });
@@ -48,4 +49,41 @@ test("复用视图不能隐藏读取错误及恢复状态", async t => {
   assert.equal(recovered.error, null);
   assert.equal(recovered.status, "ready");
   assert.strictEqual(await manager.refresh(), recovered);
+});
+
+test("Relay 的 turn state 长度事件按任务进入跨进程视图、缓存恢复且不保存原值", async t => {
+  const observedAt = Date.now() - 1_000;
+  const { manager, codexHome, dataDir } = await createManager(t, { events: [
+    event("state-a", "turn-state-observed", "thread-a", null, {
+      model: "gpt-5.6-sol", byteLength: 292, expectedByteLength: 292, recordedAt: observedAt,
+    }),
+    event("state-b", "turn-state-observed", "thread-b", null, {
+      model: "gpt-6-astra", byteLength: 312, expectedByteLength: 292,
+    }),
+  ] });
+  assert.deepEqual(manager.getTurnStateViewModel("thread-a"), {
+    status: "match", expectedByteLength: 292, byteLength: 292,
+    model: "gpt-5.6-sol", observedAt,
+  });
+  assert.equal(manager.getTurnStateViewModel("thread-b").status, "mismatch");
+  assert.equal(manager.getTurnStateViewModel("missing").status, "unknown");
+
+  await manager.flush();
+  const cache = await readFile(join(dataDir, "token-usage-cache.json"), "utf8");
+  assert.match(cache, /"turnStates"/);
+  assert.doesNotMatch(cache, /x-codex-turn-state|current_turn_state/);
+
+  const restored = new TokenUsageManager({
+    codexHome,
+    dataDir,
+    discoveryIntervalMs: 0,
+    pricingManager: pricing(dataDir),
+  });
+  t.after(() => restored.close());
+  await restored.initialize();
+  assert.deepEqual(restored.getTurnStateViewModel("thread-a"), {
+    status: "match", expectedByteLength: 292, byteLength: 292,
+    model: "gpt-5.6-sol", observedAt,
+  });
+  assert.equal(restored.getTurnStateViewModel("thread-b").status, "mismatch");
 });

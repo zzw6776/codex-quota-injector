@@ -2,6 +2,7 @@ import { request as requestHttp } from "node:http";
 import { request as requestHttps } from "node:https";
 import { MODEL_ROUTER_TOKEN_HEADER, HOP_BY_HOP_HEADERS, safeTokenEqual, httpError, MAX_REQUEST_BYTES, REQUEST_DECODERS, nonEmptyString } from "./contract.mjs";
 import { observeResponse } from "./response-observation.mjs";
+import { observeDiagnosticResponse } from "./transport-diagnostics.mjs";
 
 function requestHeaders(source, target, contentLength) {
   const headers = upstreamHeaders(source, target);
@@ -216,10 +217,20 @@ function closeWebSocketServer(server) {
   });
 }
 
-async function forwardModelResponse(request, response, targetUrl, payload, target, context, { onUsage, onToolCall, onGeneration }) {
+async function forwardModelResponse(request, response, targetUrl, payload, target, context, {
+  onUsage,
+  onToolCall,
+  onGeneration,
+  onResponseHeaders,
+  onResponsePayload,
+  createDiagnostic,
+}) {
     const headers = target.kind === "official"
       ? rawRequestHeaders(request.headers, target, payload.length)
       : requestHeaders(request.headers, target, payload.length);
+    const diagnostic = createDiagnostic?.({ context, transport: "http", method: "POST",
+      endpoint: "/v1/responses", url: targetUrl, headers, wireBody: payload,
+      body: context.diagnosticBody });
     const transport = targetUrl.protocol === "https:" ? requestHttps : requestHttp;
     return new Promise((resolve) => {
       let accepted = false;
@@ -233,6 +244,8 @@ async function forwardModelResponse(request, response, targetUrl, payload, targe
         method: "POST",
         headers,
       }, (upstreamResponse) => {
+        if (diagnostic) observeDiagnosticResponse(upstreamResponse, diagnostic);
+        onResponseHeaders?.(upstreamResponse.headers);
         const statusCode = upstreamResponse.statusCode ?? 502;
         accepted = statusCode >= 200 && statusCode < 300;
         if (statusCode >= 400 && target.kind === "custom") {
@@ -251,6 +264,7 @@ async function forwardModelResponse(request, response, targetUrl, payload, targe
             onUsage: onUsage,
             onToolCall: onToolCall,
             onGeneration: onGeneration,
+            onPayload: onResponsePayload,
             onFailure: target.kind === "custom" ? () => {
               console.error(
                 `[model-router] ${target.displayName} 上游响应失败；` +
@@ -268,15 +282,19 @@ async function forwardModelResponse(request, response, targetUrl, payload, targe
         upstreamResponse.pipe(response);
       });
       upstream.once("error", (error) => {
+        diagnostic?.error(error);
+        diagnostic?.finish("request-error");
         writeError(response, 502, `模型上游请求失败：${error.message}`);
         finish();
       });
       response.once("close", () => {
         if (!response.writableFinished) {
+          diagnostic?.finish("client-closed");
           upstream.destroy();
           finish();
         }
       });
+      diagnostic?.requestHeaders(upstream.getHeaders());
       upstream.end(payload);
     });
   }

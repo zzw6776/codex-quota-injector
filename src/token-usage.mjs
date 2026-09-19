@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { defaultAccountDataDir } from "./platform.mjs";
 import { TokenPricingManager } from "./token-pricing.mjs";
 import { createToolExecutionLedger } from "./tool-executions.mjs";
-import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
+import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
 import { RolloutWorkerClient } from "./token-usage/rollout-worker.mjs";
 import { buildUsageViewModel } from "./token-usage/display.mjs";
 import { applySubagentMetadata } from "./token-usage/subagents.mjs";
@@ -13,6 +13,32 @@ import { normalizeCachedTurn, normalizeCachedFileState, normalizeCachedHistory, 
 import { readAppendedChunks, refreshRolloutCatalogFiles } from "./token-usage/rollout-files.mjs";
 import { processRolloutRecord } from "./token-usage/rollout-records.mjs";
 import { processTurnUsageEvent } from "./token-usage/usage-events.mjs";
+import { EXPECTED_CODEX_TURN_STATE_BYTES } from "./relay-contract.mjs";
+
+function unknownTurnStateViewModel() {
+  return {
+    status: "unknown",
+    expectedByteLength: EXPECTED_CODEX_TURN_STATE_BYTES,
+    byteLength: null,
+    model: null,
+    observedAt: null,
+  };
+}
+
+function normalizedTurnState(value) {
+  const threadId = nonEmptyString(value?.threadId);
+  const byteLength = Number(value?.byteLength);
+  const observedAt = positiveNumber(value?.observedAt ?? value?.recordedAt);
+  if (!threadId || !Number.isInteger(byteLength) || byteLength < 0 || !observedAt) return null;
+  return {
+    threadId,
+    status: byteLength === EXPECTED_CODEX_TURN_STATE_BYTES ? "match" : "mismatch",
+    expectedByteLength: EXPECTED_CODEX_TURN_STATE_BYTES,
+    byteLength,
+    model: nonEmptyString(value?.model),
+    observedAt,
+  };
+}
 
 export class TokenUsageManager {
   constructor({
@@ -32,6 +58,7 @@ export class TokenUsageManager {
     this.seenEventIds = new Set();
     this.fileStates = new Map();
     this.turns = new Map();
+    this.turnStates = new Map();
     this.historicalSegmentsByThread = new Map();
     this.historicalCostCache = new Map();
     this.activeThreadId = null;
@@ -161,6 +188,14 @@ export class TokenUsageManager {
     });
     this.viewModelDirty = false;
     return this.viewModelCache;
+  }
+
+  getTurnStateViewModel(threadId) {
+    const normalized = nonEmptyString(threadId);
+    const state = normalized ? this.turnStates.get(normalized) : null;
+    if (!state) return unknownTurnStateViewModel();
+    const { threadId: _threadId, ...view } = state;
+    return { ...view };
   }
 
   close() {
@@ -299,6 +334,13 @@ export class TokenUsageManager {
       });
       if (turn) this.turns.set(turn.turnId, turn);
     }
+    for (const value of Array.isArray(cached.turnStates) ? cached.turnStates : []) {
+      const state = normalizedTurnState(value);
+      if (state) this.turnStates.set(state.threadId, state);
+    }
+    while (this.turnStates.size > MAX_TRACKED_TURN_STATES) {
+      this.turnStates.delete(this.turnStates.keys().next().value);
+    }
     for (const value of Array.isArray(cached.fileStates) ? cached.fileStates : []) {
       const state = normalizeCachedFileState(value);
       if (!state) continue;
@@ -327,6 +369,7 @@ export class TokenUsageManager {
     this.seenEventIds.clear();
     this.fileStates.clear();
     this.turns.clear();
+    this.turnStates.clear();
     this.historicalSegmentsByThread.clear();
     this.historicalCostCache.clear();
     this.turnCostCache.clear();
@@ -417,6 +460,7 @@ export class TokenUsageManager {
       activeThreadHintAt: this.activeThreadHintAt,
       fileStates: [...this.fileStates.values()],
       historicalSegmentsByThread: [...this.historicalSegmentsByThread.values()],
+      turnStates: [...this.turnStates.values()],
       turns: [...this.turns.values()].filter((turn) => turn.totalTokens > 0),
     };
   }
@@ -443,6 +487,7 @@ export class TokenUsageManager {
           this.turnCostCache.delete(turnId);
         }
       }
+      this.turnStates.clear();
       this.#markCacheDirty();
       this.#invalidateViewModel();
     }
@@ -473,6 +518,17 @@ export class TokenUsageManager {
     if (!threadId) return;
     const model = nonEmptyString(event.model);
     const updatedAt = positiveNumber(event.recordedAt) || Date.now();
+
+    if (event.type === "turn-state-observed") {
+      const state = normalizedTurnState({ ...event, observedAt: updatedAt });
+      if (!state) return;
+      this.turnStates.delete(threadId);
+      this.turnStates.set(threadId, state);
+      while (this.turnStates.size > MAX_TRACKED_TURN_STATES) {
+        this.turnStates.delete(this.turnStates.keys().next().value);
+      }
+      return;
+    }
 
     if (event.type === "thread-active") {
       this.activeThreadId = threadId;

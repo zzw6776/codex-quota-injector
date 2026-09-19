@@ -3,7 +3,14 @@ import { MAX_REQUEST_BYTES, nonEmptyString } from "./contract.mjs";
 import { decodeObservedStream, parseSseBlock } from "./response-stream.mjs";
 import { normalizeUsage } from "./usage.mjs";
 
-function observeResponse(stream, { requestStartedAt, onUsage, onToolCall, onGeneration, onFailure }) {
+function observeResponse(stream, {
+  requestStartedAt,
+  onUsage,
+  onToolCall,
+  onGeneration,
+  onFailure,
+  onPayload = () => {},
+}) {
   const contentType = String(stream.headers["content-type"] ?? "").toLowerCase();
   const observedStream = decodeObservedStream(stream);
   const decoder = new StringDecoder("utf8");
@@ -17,6 +24,7 @@ function observeResponse(stream, { requestStartedAt, onUsage, onToolCall, onGene
     onToolCall,
     onGeneration,
     onFailure,
+    onPayload,
   });
   observedStream.on("data", (chunk) => {
     const text = decoder.write(chunk);
@@ -54,6 +62,7 @@ function createResponseObservation({
   onToolCall = () => {},
   onGeneration,
   onFailure = () => {},
+  onPayload = () => {},
   clock = Date.now,
 }) {
   let firstResponseAt = Number(responseStartedAt) || 0;
@@ -168,6 +177,7 @@ function createResponseObservation({
     markResponseStarted,
     recordPayload(payload) {
       markResponseStarted();
+      onPayload(payload);
       const now = clock();
       if (!responseFailureObserved && (payload?.type === "response.failed" ||
         payload?.status === "failed" || payload?.response?.status === "failed")) {

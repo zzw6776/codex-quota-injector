@@ -66,6 +66,8 @@ function installQuotaWidget(
       extraModels: { platforms: [] },
       tokenUsage: { status: "ready", turns: [] },
       hostHealth: { required: false, status: "direct" },
+      turnState292: { status: "unknown", expectedByteLength: 292, byteLength: null,
+        model: null, observedAt: null },
     },
     dataJson: "",
     dataRevision: null,
@@ -345,12 +347,13 @@ function installQuotaWidget(
   function patchPanelChrome(wrap, health) {
     const template = document.createElement("template");
     template.innerHTML = renderPanelControls(health);
-    const nextStatus = template.content.querySelector(".host-health-status");
-    const status = wrap.querySelector(".host-health-status");
-    if (status && !status.isEqualNode(nextStatus)) {
+    const nextControls = template.content.firstElementChild;
+    const controls = wrap.querySelector(".panel-controls");
+    if (controls && !controls.isEqualNode(nextControls)) {
       hideAccountTooltip();
-      status.replaceWith(nextStatus);
-      bindGeneralEvents(wrap.querySelector(".panel-controls"));
+      controls.replaceWith(nextControls);
+      bindGeneralEvents(nextControls);
+      bindPanelEvents(nextControls);
     }
     template.innerHTML = renderHostHealthBanner(health);
     const nextBanner = template.content.firstElementChild;
@@ -424,6 +427,7 @@ function installQuotaWidget(
     // A detail page does not display quota timestamps or live network samples.
     // Compare its actual inputs, not the complete app view or editable DOM.
     const chromeKey = JSON.stringify([state.data.version, state.data.injectionMode, hostHealth,
+      state.data.turnState292,
       state.hostHealthDetailsThread, state.hostHealthMoreThread]);
     const common = JSON.stringify([state.page, state.data.operation]);
     const pageData = state.page === "context" ? state.data.context

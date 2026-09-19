@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { nonEmptyString, httpError, MAX_REQUEST_BYTES } from "./contract.mjs";
 import { apiTargetUrl, upstreamWebSocketHeaders } from "./http-transport.mjs";
+import { diagnosticWebSocketHandshake } from "./transport-diagnostics.mjs";
 
 function sendWebSocketPrewarm(client, body, streamId) {
   const id = `resp_${randomUUID().replace(/-/g, "")}`;
@@ -136,8 +137,9 @@ function validWebSocketCloseCode(code) {
     ![1004, 1005, 1006, 1015].includes(code);
 }
 
-function proxyAuxiliaryWebSocket(client, request, route, resolveTarget) {
+function proxyAuxiliaryWebSocket(client, request, route, resolveTarget, createDiagnostic) {
     let upstream;
+    let diagnostic;
     try {
       const target = resolveTarget(null, request.headers);
       const targetUrl = webSocketApiTargetUrl(
@@ -145,8 +147,12 @@ function proxyAuxiliaryWebSocket(client, request, route, resolveTarget) {
         route.pathname,
         route.incoming.search,
       );
+      const headers = upstreamWebSocketHeaders(request.headers, target);
+      diagnostic = createDiagnostic?.({ context: { target }, transport: "websocket-auxiliary",
+        method: "GET", endpoint: route.pathname, url: targetUrl, headers });
       upstream = new WebSocket(targetUrl, webSocketProtocols(request.headers), {
-        headers: upstreamWebSocketHeaders(request.headers, target),
+        headers,
+        ...(diagnostic ? { finishRequest: diagnosticWebSocketHandshake(diagnostic) } : {}),
         maxPayload: MAX_REQUEST_BYTES,
         perMessageDeflate: true,
         handshakeTimeout: 15_000,
@@ -180,6 +186,7 @@ function proxyAuxiliaryWebSocket(client, request, route, resolveTarget) {
     };
 
     client.on("message", (data, isBinary) => {
+      diagnostic?.raw(data, { direction: "request", binary: isBinary });
       if (upstreamOpen) {
         sendWebSocketData(upstream, data, isBinary);
         return;
@@ -206,13 +213,16 @@ function proxyAuxiliaryWebSocket(client, request, route, resolveTarget) {
       pendingBytes = 0;
     });
     upstream.on("message", (data, isBinary) => {
+      diagnostic?.raw(data, { binary: isBinary });
       sendWebSocketData(client, data, isBinary);
     });
     upstream.once("close", (code, reason) => {
+      diagnostic?.finish(`websocket-close:${code}`);
       upstreamClosed = true;
       closeClient(code, reason);
     });
-    upstream.once("error", () => {
+    upstream.once("error", (error) => {
+      diagnostic?.error(error);
       closeClient(1011, "官方 WebSocket 连接失败");
     });
   }

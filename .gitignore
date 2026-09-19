@@ -6,4 +6,5 @@ dist/
 build/
 release/
 *.log
+model-request-diagnostics*.jsonl
 .idea

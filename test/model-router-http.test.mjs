@@ -13,7 +13,10 @@ test("Router 可在没有第三方模型时单独观察官方请求并记录生�
     assert.equal(request.url, "/v1/responses");
     assert.equal(request.headers.authorization, "Bearer sk-official-fixture");
     await readJsonRequest(request);
-    response.writeHead(200, { "content-type": "application/json" });
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "x-codex-turn-state": "s".repeat(292),
+    });
     response.end(JSON.stringify({
       id: "resp_official_observer",
       status: "completed",
@@ -62,6 +65,11 @@ test("Router 可在没有第三方模型时单独观察官方请求并记录生�
     event.threadId === "thread-official-observer" &&
     event.turnId === "turn-official-observer" &&
     event.generation?.responseId === "resp_official_observer"));
+  assert.ok(events.some((event) => event.type === "turn-state-observed" &&
+    event.threadId === "thread-official-observer" &&
+    event.model === "official-model" &&
+    event.byteLength === 292 &&
+    !Object.hasOwn(event, "state")));
 });
 
 test("Router 拒绝未认证与非 API 请求，认证后的新 API 路径默认透传官方上游", async (t) => {
