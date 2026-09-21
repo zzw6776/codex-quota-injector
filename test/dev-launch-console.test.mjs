@@ -120,7 +120,7 @@ if (process.platform !== 'win32') {
     const logRoot = join(directory, 'Library', 'Logs', 'Codex Quota Injector');
     await mkdir(logRoot, { recursive: true });
     const runtime = join(logRoot, 'injector.log');
-    await writeFile(join(directory, 'scripts', 'start-injector-macos.sh'), `#!/bin/bash\necho BOOT-EARLY\necho BOOT-FINAL-ERROR >&2\nexit ${code}\n`);
+    await writeFile(join(directory, 'scripts', 'start-injector-macos.sh'), `#!/bin/bash\necho BOOT-EARLY\necho EXTERNAL-START=$CODEX_QUOTA_DEV_EXTERNAL_START\necho BOOT-FINAL-ERROR >&2\nexit ${code}\n`);
     const run = observe(t, 'bash', [join(directory, 'start.command')], { env: { ...process.env, HOME: directory } });
     if (code) {
       await waitFor(() => run.output().includes('Press Enter to close'), { timeoutMs: 15000 });
@@ -136,6 +136,7 @@ if (process.platform !== 'win32') {
     }
     await waitFor(() => run.output().includes('BOOT-FINAL-ERROR'), { timeoutMs: 15000 });
     assert.match(run.output(), /BOOT-EARLY/);
+    assert.match(run.output(), /EXTERNAL-START=1/);
     const names = await readdir(logRoot);
     assert.match(await readFile(join(logRoot, names.find(n => n.startsWith('dev-launch-'))), 'utf8'), /BOOT-FINAL-ERROR/);
   });

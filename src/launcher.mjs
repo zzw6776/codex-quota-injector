@@ -82,7 +82,9 @@ async function runLauncher() {
   let reloadWidget = null;
   const launchStatus = { phase: "starting", revision: 0 };
   const devRuntime = instanceMode === "dev" ? await import("./dev-runtime.mjs") : null;
-  if (devRuntime?.isCodexHostedDevLaunch()) {
+  const codexHostedDevLaunch = devRuntime?.isCodexHostedDevLaunch() ?? false;
+  delete process.env.CODEX_QUOTA_DEV_EXTERNAL_START;
+  if (codexHostedDevLaunch) {
     console.warn(
       "[launcher] 检测到开发版由 Codex 任务内部启动，拒绝接管；" +
       "请从 Finder 打开“启动开发版.command”或在外部终端执行 npm run launch",

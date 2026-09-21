@@ -126,7 +126,7 @@ function installQuotaWidget(
     escapeHtml,
   });
 
-  const { renderHostHealthBanner, renderPanelControls, presentation: presentHostHealth } = features.host_health({
+  const { renderHostHealthBanner, renderHostHealthFlyout, renderPanelControls, presentation: presentHostHealth } = features.host_health({
     state,
     formatUpdatedAt,
     escapeHtml,
@@ -363,6 +363,18 @@ function installQuotaWidget(
       else if (nextBanner) wrap.querySelector(".panel-scroll").prepend(nextBanner);
       if (nextBanner) bindGeneralEvents(nextBanner);
     }
+    template.innerHTML = renderHostHealthFlyout(health);
+    const nextFlyout = template.content.firstElementChild;
+    const flyout = wrap.querySelector(".host-health-flyout");
+    if (!flyout?.isEqualNode(nextFlyout)) {
+      if (flyout) flyout.replaceWith(...(nextFlyout ? [nextFlyout] : []));
+      else if (nextFlyout) wrap.append(nextFlyout);
+      if (nextFlyout) {
+        nextFlyout.showPopover();
+        bindGeneralEvents(nextFlyout);
+        positionPopover(wrap);
+      }
+    }
     template.innerHTML = renderVersionFooter();
     const nextFooter = template.content.firstElementChild;
     const footer = wrap.querySelector(".panel-version");
@@ -428,7 +440,7 @@ function installQuotaWidget(
     // Compare its actual inputs, not the complete app view or editable DOM.
     const chromeKey = JSON.stringify([state.data.version, state.data.injectionMode, hostHealth,
       state.data.turnState292,
-      state.hostHealthDetailsThread, state.hostHealthMoreThread]);
+      state.hostHealthDetailsThread]);
     const common = JSON.stringify([state.page, state.data.operation]);
     const pageData = state.page === "context" ? state.data.context
       : state.page === "wakeup" ? accounts.map(({ id, email, current, authMode, authStatus, wakeup }) =>
@@ -478,6 +490,7 @@ function installQuotaWidget(
     state.renderedPage = state.page;
     state.panelRefreshPending = false;
     const hostHealthBanner = renderHostHealthBanner(hostHealth);
+    const hostHealthFlyout = renderHostHealthFlyout(hostHealth);
     const accountHtml = state.page !== "accounts" ? "" : accounts.length
       ? accounts.map(renderAccount).join("")
       : '<div class="empty">暂无账号，点击下方按钮添加</div>';
@@ -532,13 +545,15 @@ function installQuotaWidget(
         </section>`;
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="${chipLabel}">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${renderVersionFooter()}</div></section>`;
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${renderVersionFooter()}</div></section>
+      ${hostHealthFlyout}`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
       const nextScroller = nextPopover.querySelector(".panel-scroll");
       const header = nextScroller.querySelector(".panel-head");
       if (header) nextPopover.prepend(header);
       nextPopover.showPopover();
+      wrap.querySelector(".host-health-flyout")?.showPopover();
       positionPopover(wrap);
       restoreInputs();
       // Native time inputs may scroll their internal editor even with

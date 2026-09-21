@@ -98,6 +98,29 @@ const WIDGET_STYLES = {
     }
     .host-health-status:hover, .host-health-status:focus-visible { background: rgba(255,255,255,.075); outline: none; }
     .host-health-status .host-health-dot { width: 8px; height: 8px; flex-basis: 8px; box-shadow: none; }
+    .host-health-flyout {
+      position: fixed; inset: auto; margin: 0; display: flex; flex-direction: column;
+      width: min(280px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: hidden;
+      padding: 0; border: 1px solid rgba(255,255,255,.12); border-radius: 12px;
+      color: var(--token-foreground, #f4f4f7); background: var(--token-main-surface-primary, #191923);
+      box-shadow: 0 8px 28px rgba(0,0,0,.24); font-size: 10.5px; line-height: 15px;
+    }
+    .host-health-flyout-head {
+      display: flex; flex-shrink: 0; align-items: flex-start; justify-content: space-between; gap: 8px;
+      padding: 12px 10px 10px 14px; border-bottom: 1px solid rgba(255,255,255,.07);
+    }
+    .host-health-flyout-head .host-health-title { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+    .host-health-flyout-summary { margin-top: 5px; color: var(--token-text-secondary, #b5b5bf); }
+    .host-health-flyout-head .icon-btn { flex: 0 0 auto; }
+    .host-health-flyout-head .icon-btn svg { width: 12px; height: 12px; }
+    .host-health-flyout-message { margin-top: 3px; color: var(--token-text-secondary, #b5b5bf); }
+    .host-health-flyout-scroll { display: grid; gap: 12px; min-height: 0; overflow: auto; padding: 10px 14px 12px; overflow-wrap: anywhere; }
+    .host-health-flyout .host-health-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .host-health-flyout .host-health-action-grid .btn { min-width: 0; min-height: 30px; padding: 5px 6px; border-radius: 7px; font-size: 10.5px; text-align: center; }
+    .host-health-flyout .host-health-recheck { border-color: rgba(102,153,230,.4); background: rgba(102,153,230,.12); }
+    .host-health-flyout-footer { display: flex; justify-content: space-between; align-items: center; gap: 6px; color: var(--token-text-secondary, #b5b5bf); font-size: 9px; }
+    .host-health-open-logs { appearance: none; flex-shrink: 0; border: 0; padding: 2px 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    .host-health-open-logs:hover { text-decoration: underline; }
     .icon-btn { appearance: none; width: 26px; height: 26px; border: 0; border-radius: 8px; cursor: pointer; color: inherit; background: transparent; }
     .icon-btn:hover { background: rgba(255,255,255,.07); }
     .provider-icon-btn {
@@ -167,7 +190,12 @@ const WIDGET_STYLES = {
     .host-health-missing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
     .host-health-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .host-health-actions .btn { padding: 4px 8px; }
-    .host-health-checks { margin: 8px 0; padding-left: 18px; display: grid; gap: 6px; }
+    .host-health-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+    .host-health-check-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 24px; }
+    .host-health-check-status { flex-shrink: 0; border-radius: 5px; padding: 1px 6px; font-size: 9px; background: rgba(138,138,149,.1); color: var(--token-text-secondary, #b5b5bf); }
+    .host-health-check-status.passed { color: #43a665; background: rgba(67,166,101,.1); }
+    .host-health-check-status.failed { color: #dc4c3f; background: rgba(220,76,63,.1); }
+    .host-health-check-status.unconfirmed, .host-health-check-status.checking { color: #c89136; background: rgba(217,119,6,.1); }
     .host-health-details-content { display: grid; gap: 7px; }
     .host-health-banner.ready { color: #43a665; border-color: rgba(67,166,101,.3); background: rgba(67,166,101,.07); }
     .host-health-banner.starting { color: #aaaab5; border-color: rgba(138,138,149,.22); background: rgba(138,138,149,.06); }
@@ -339,6 +367,11 @@ const WIDGET_STYLES = {
     .quota-wrap.is-light .host-health-banner.idle { color: #666672; border-color: rgba(138,138,149,.22); background: rgba(138,138,149,.06); }
     .quota-wrap.is-light .host-health-banner.degraded { color: #a7352e; border-color: rgba(181,61,53,.24); background: rgba(181,61,53,.06); }
     .quota-wrap.is-light .host-health-detail { color: #6f6f79; }
+    .quota-wrap.is-light .host-health-flyout { color: #202124; background: #fff; border-color: rgba(0,0,0,.1); box-shadow: 0 8px 28px rgba(0,0,0,.12); }
+    .quota-wrap.is-light .host-health-flyout-head { border-color: rgba(0,0,0,.09); }
+    .quota-wrap.is-light .host-health-flyout-message, .quota-wrap.is-light .host-health-flyout-summary, .quota-wrap.is-light .host-health-flyout-footer { color: #6f6f79; }
+    .quota-wrap.is-light .host-health-check-status.passed { color: #287d44; }
+    .quota-wrap.is-light .host-health-check-status.unconfirmed, .quota-wrap.is-light .host-health-check-status.checking { color: #946100; }
     .quota-wrap.is-light .host-health-status:hover, .quota-wrap.is-light .host-health-status:focus-visible { background: rgba(0,0,0,.065); }
     .quota-wrap.is-light .turn-state-status { color: #6f6f79; background: rgba(138,138,149,.1); }
     .quota-wrap.is-light .turn-state-status.match { color: #2f7f4a; background: rgba(67,166,101,.1); }

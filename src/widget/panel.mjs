@@ -14,6 +14,21 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
       popover.style.removeProperty("width");
       popover.style.removeProperty("height");
     }
+    positionHostHealthFlyout(wrap, popover);
+  }
+
+  function positionHostHealthFlyout(wrap, popover = wrap.querySelector(".quota-popover")) {
+    const flyout = wrap.querySelector(".host-health-flyout");
+    if (!popover || !flyout) return;
+    const edge = 12;
+    const gap = 10;
+    const panelBounds = popover.getBoundingClientRect();
+    const width = flyout.getBoundingClientRect().width;
+    const top = Math.max(edge, Math.min(Math.round(panelBounds.top), window.innerHeight - edge * 2));
+    const left = Math.max(edge, Math.min(panelBounds.right + gap, window.innerWidth - width - edge));
+    flyout.style.left = `${Math.round(left)}px`;
+    flyout.style.top = `${top}px`;
+    flyout.style.maxHeight = `${Math.max(0, Math.floor(window.innerHeight - top - edge))}px`;
   }
 
   function captureDetailPanelBaseSize(wrap) {
@@ -130,6 +145,10 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
     };
     state.pinned = false;
     state.dismissed = true;
+    state.hostHealthDetailsThread = null;
+    const healthFlyout = wrap?.querySelector(".host-health-flyout");
+    healthFlyout?.hidePopover();
+    healthFlyout?.remove();
     cancelDetailPanelResize();
     state.detailPanelSize = null;
     wrap?.classList.remove("is-open");
@@ -139,22 +158,21 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
   function bindGeneralEvents(wrap) {
 bindDetailPanelResize(wrap);
 for (const name of ["recheck", "reload", "diagnose"]) {
-  wrap.querySelector(`.host-health-${name}`)?.addEventListener("click", (event) => {
+  wrap.querySelectorAll(`.host-health-${name}`).forEach(button => button.addEventListener("click", (event) => {
     event.currentTarget.disabled = true;
     enqueue({ type: `host-health-${name}`, threadId: state.data.hostHealth?.threadId });
-  });
+  }));
 }
 for (const selector of [".host-health-details", ".host-health-status"]) {
   wrap.querySelector(selector)?.addEventListener("click", () => {
     const key = state.data.hostHealth?.threadId ?? "global";
     state.hostHealthDetailsThread = state.hostHealthDetailsThread === key ? null : key;
-    render();
+    render({ background: true });
   });
 }
-wrap.querySelector(".host-health-more")?.addEventListener("click", () => {
-  const key = state.data.hostHealth?.threadId ?? "global";
-  state.hostHealthMoreThread = state.hostHealthMoreThread === key ? null : key;
-  render();
+wrap.querySelector(".host-health-flyout-close")?.addEventListener("click", () => {
+  state.hostHealthDetailsThread = null;
+  render({ background: true });
 });
 wrap.querySelector(".host-health-restart")?.addEventListener("click", (event) => {
       event.currentTarget.disabled = true;

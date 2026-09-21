@@ -18,6 +18,11 @@ trap 'exit 130' INT TERM
 set -e
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+# This named launcher is an explicit user entry point. Terminal.app may retain
+# Codex's task-tool environment after it was opened from Codex, so pass a
+# separate provenance marker instead of treating that inherited value as the
+# current caller.
+export CODEX_QUOTA_DEV_EXTERNAL_START=1
 LOG_DIR="$HOME/Library/Logs/Codex Quota Injector"
 mkdir -p "$LOG_DIR"
 STARTUP_LOG="$(mktemp "$LOG_DIR/dev-launch-XXXXXXXX")"

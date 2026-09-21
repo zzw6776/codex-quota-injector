@@ -80,7 +80,7 @@ test("[UI-02 UI-03] 模型编辑时公共状态继续更新，表单节点和焦
   await b.fill('.extra-platform-form [name="name"]', '正在编辑的平台');
   await b.client.evaluate(`window.editingForm = ${SHADOW}.querySelector('.extra-platform-form')`);
   const data = fixtureData({ version: 'updated', windows: [{ remainingPercent: 42 }],
-    hostHealth: { required: true, status: 'degraded', message: 'fixture unavailable', canOpenLogs: true } });
+    hostHealth: { required: true, threadId: 'task', status: 'degraded', message: 'fixture unavailable', canCheck: true, canOpenLogs: true } });
   await b.update(data);
   assert.match(await b.value('.quota-chip'), /42%/);
   assert.equal(await b.value('.panel-version-text'), 'vupdated');

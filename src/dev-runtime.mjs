@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export function isCodexHostedDevLaunch(environment = process.env) {
-  return Boolean(String(environment.CODEX_APP_TOOLS_PIPE_PATH ?? "").trim());
+  const taskToolPipe = String(environment.CODEX_APP_TOOLS_PIPE_PATH ?? "").trim();
+  const explicitExternalStart = environment.CODEX_QUOTA_DEV_EXTERNAL_START === "1";
+  return Boolean(taskToolPipe) && !explicitExternalStart;
 }
 
 // The Widget entry and its browser feature modules can be reloaded in place. Any other
@@ -16,7 +18,8 @@ export async function readDevRuntimeIdentity(root = fileURLToPath(new URL("../",
   const add = (name, value) => hash.update(name).update("\0").update(value).update("\0");
   add("runtime", JSON.stringify([directory, process.execPath, process.version]));
   add("environment", JSON.stringify(Object.entries(process.env)
-    .filter(([name]) => name.startsWith("CODEX_QUOTA_") || name === "NODE_OPTIONS")
+    .filter(([name]) => (name.startsWith("CODEX_QUOTA_") &&
+      name !== "CODEX_QUOTA_DEV_EXTERNAL_START") || name === "NODE_OPTIONS")
     .sort(([left], [right]) => left.localeCompare(right))));
   async function visit(relative) {
     const entries = await readdir(join(directory, relative), { withFileTypes: true });

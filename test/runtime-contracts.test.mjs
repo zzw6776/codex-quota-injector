@@ -8,7 +8,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { CdpClient, findCodexTarget, isCodexDebugPortReady } from "../src/cdp-client.mjs";
-import { isCodexHostedDevLaunch } from "../src/dev-runtime.mjs";
+import { isCodexHostedDevLaunch, readDevRuntimeIdentity } from "../src/dev-runtime.mjs";
 import {
   codexLaunchEnvironment,
   isRelayConfigCurrent,
@@ -71,8 +71,27 @@ test("[HAR-04 LCH-04] 测试进程回收等待 sidecar 释放继承的 stdio", a
 
 test("[LCH-05] 开发版拒绝从 Codex 内部工具进程接管生命周期", () => {
   assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "/tmp/codex-app-tools" }), true);
+  assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "/tmp/codex-app-tools",
+    CODEX_QUOTA_DEV_EXTERNAL_START: "1" }), false,
+  "明确打开开发版入口时，不能被 Terminal 继承的 Codex 环境误拦截");
+  assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "/tmp/codex-app-tools",
+    CODEX_QUOTA_DEV_EXTERNAL_START: "true" }), true,
+  "只有启动入口写入的精确标记可以解除保护");
   assert.equal(isCodexHostedDevLaunch({ CODEX_APP_TOOLS_PIPE_PATH: "  " }), false);
   assert.equal(isCodexHostedDevLaunch({}), false);
+});
+
+test("[LCH-05] 外部启动来源标记不改变开发运行时身份", async () => {
+  const previous = process.env.CODEX_QUOTA_DEV_EXTERNAL_START;
+  try {
+    delete process.env.CODEX_QUOTA_DEV_EXTERNAL_START;
+    const withoutMarker = await readDevRuntimeIdentity();
+    process.env.CODEX_QUOTA_DEV_EXTERNAL_START = "1";
+    assert.equal(await readDevRuntimeIdentity(), withoutMarker);
+  } finally {
+    if (previous == null) delete process.env.CODEX_QUOTA_DEV_EXTERNAL_START;
+    else process.env.CODEX_QUOTA_DEV_EXTERNAL_START = previous;
+  }
 });
 
 test("[platform:macos-native] [LCH-05] macOS 关闭 Codex 使用标准退出事件，不直接发送终止信号", async () => {
