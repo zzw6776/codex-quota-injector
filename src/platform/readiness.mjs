@@ -25,6 +25,46 @@ async function isRelayStateCurrent(path, generation, options = {}) {
   return (await readRelayStateReadiness(path, generation, options)).ready;
 }
 
+async function signalWslRelayProcess(path, generation, { execFileImpl = execFileAsync } = {}) {
+  let state;
+  try {
+    state = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    throw new Error(`WSL 中继状态不可读：${error.code ?? error.message}`);
+  }
+  if (state?.generation !== generation) throw new Error("WSL 中继 generation 不匹配");
+  const processId = Number(state?.pid);
+  const processStartTicks = Number(state?.processStartTicks);
+  const bootId = String(state?.bootId ?? "");
+  if (!Number.isInteger(processId) || processId <= 0 ||
+      !Number.isSafeInteger(processStartTicks) || processStartTicks < 0 ||
+      !/^[0-9a-f-]{8,64}$/i.test(bootId)) {
+    throw new Error("WSL 中继缺少稳定进程身份");
+  }
+  const script = [
+    "set -eu",
+    `process_id=${processId}`,
+    `expected_boot_id='${bootId}'`,
+    `expected_start_ticks=${processStartTicks}`,
+    'test -r "/proc/$process_id/stat"',
+    'test "$(cat /proc/sys/kernel/random/boot_id)" = "$expected_boot_id"',
+    'stat_line=$(cat "/proc/$process_id/stat")',
+    'stat_fields=${stat_line##*) }',
+    'set -- $stat_fields',
+    'shift 19',
+    'test "$1" = "$expected_start_ticks"',
+    'kill -s USR2 "$process_id"',
+  ].join("; ");
+  try {
+    await execFileImpl("wsl.exe", ["-e", "sh", "-c", script], {
+      windowsHide: true,
+      timeout: 5_000,
+    });
+  } catch (error) {
+    throw new Error(`无法通知 WSL 任务工具中继：${error.code ?? error.message}`);
+  }
+}
+
 async function readRelayStateReadiness(path, generation, { wslNative = false, execFileImpl = execFileAsync } = {}) {
   let state;
   try {
@@ -226,4 +266,4 @@ function formatCodexReadinessError(port, readiness) {
     `模型中继配置=${relayConfigStatus}，模型中继进程=${relayStateStatus}`;
 }
 
-export { waitForCodexLaunchReady, formatCodexReadinessError, isCodexLaunchReady, getCodexLaunchReadiness, isRelayConfigCurrent, isRelayStateCurrent };
+export { waitForCodexLaunchReady, formatCodexReadinessError, isCodexLaunchReady, getCodexLaunchReadiness, isRelayConfigCurrent, isRelayStateCurrent, signalWslRelayProcess };

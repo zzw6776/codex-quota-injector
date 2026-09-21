@@ -12,7 +12,10 @@ export function classifyHostToolResult(tool, result, error, { targetThreadId } =
   if (error || result?.isError === true) {
     const detail = (error?.message ?? (typeof error === "string" ? error : null) ??
       content.filter(x => x.type === "text").map(x => x.text).join(" ")) || "工具调用失败";
-    return { status: /timeout|timed out|超时/i.test(detail) ? "unconfirmed" : "failed", detail };
+    const expectedUnavailable = tool === "read_thread" &&
+      /not materialized yet|unavailable before first user message/i.test(detail);
+    return { status: expectedUnavailable || /timeout|timed out|超时/i.test(detail)
+      ? "unconfirmed" : "failed", detail };
   }
   let data = result?.structuredContent;
   if (!data) {

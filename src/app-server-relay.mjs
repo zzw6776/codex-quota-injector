@@ -309,6 +309,10 @@ export async function runAppServerRelay() {
     generation: relayConfig?.generation ??
       process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
   }, {
+    // Windows explicitly wakes the WSL Relay after publishing a control file;
+    // this avoids a permanent directory poll on /mnt/c.
+    signalEmitter: wslNative ? process : null,
+    wakeSignal: wslNative ? "SIGUSR2" : null,
     onRequest: (request) => {
       if (request.action === "reload") requestCodexAppToolsReload(relayState);
       else if (request.action === "diagnose") requestCodexAppToolsDiagnostic(relayState, request.threadId);

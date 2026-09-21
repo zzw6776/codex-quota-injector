@@ -14,7 +14,9 @@ import {
   HOST_HEALTH_STATE_VERSION,
   HOST_HEALTH_WATCH_DEBOUNCE_MS,
   hostHealthPollInterval,
+  requestHostToolReload,
   watchHostHealthFiles,
+  watchHostToolReloadRequests,
 } from "../src/host-health.mjs";
 import {
   windowsOpenLogScript,
@@ -362,6 +364,99 @@ test("[LCH-04] 健康文件监听兼容原子替换、防抖并在错误时关�
   assert.equal(observedError, failure);
   assert.equal(watcher.active, false);
   assert.equal(watchers[0].closed, true);
+});
+
+test("[LCH-04] Windows 写入未触发 WSL 文件事件时信号仍消费重检请求", async (t) => {
+  const directory = await useTempDir(t, "host-health-reload-signal-");
+  const healthPath = join(directory, "app-server-health.json");
+  let debounceHandler = null;
+  const requests = [];
+  const signalEmitter = new EventEmitter();
+  const watcher = watchHostToolReloadRequests({
+    healthPath,
+    generation: "generation-signal",
+  }, {
+    watchImpl() {
+      const handle = new EventEmitter();
+      handle.close = () => {};
+      return handle;
+    },
+    setTimer(handler) {
+      debounceHandler = handler;
+      return { unref() {} };
+    },
+    clearTimer() {},
+    signalEmitter,
+    wakeSignal: "SIGUSR2",
+    onRequest(request) {
+      requests.push(request);
+    },
+  });
+  assert.equal(watcher.active, true);
+  debounceHandler();
+  await new Promise(resolve => setImmediate(resolve));
+  await requestHostToolReload({
+    healthPath,
+    generation: "generation-signal",
+    hostToolsRequired: true,
+  }, {
+    requestId: "signalrequest01",
+    action: "check",
+    threadId: "task",
+  });
+  assert.deepEqual(requests, [], "测试不发送文件事件，必须由主动信号发现请求");
+  signalEmitter.emit("SIGUSR2");
+  debounceHandler();
+  await waitFor(() => requests.length === 1);
+  assert.equal(requests[0].requestId, "signalrequest01");
+  assert.equal(requests[0].action, "check");
+  watcher.close();
+  assert.equal(signalEmitter.listenerCount("SIGUSR2"), 0);
+  assert.equal(watcher.active, false);
+});
+
+test("[platform:windows-native] [platform:wsl-native] WSL 重检写入后主动通知 Relay", async (t) => {
+  const directory = await useTempDir(t, "host-health-reload-notify-");
+  const healthPath = join(directory, "app-server-health.json");
+  const statePath = join(directory, "app-server-relay-state.json");
+  let notified = null;
+  const request = await requestHostToolReload({
+    healthPath,
+    statePath,
+    generation: "generation-notify",
+    hostToolsRequired: true,
+    wslNative: true,
+  }, {
+    requestId: "notifyrequest01",
+    action: "check",
+    threadId: "task",
+  }, {
+    async signalWslRelay(actualStatePath, generation) {
+      notified = { actualStatePath, generation };
+      assert.equal(JSON.parse(await readFile(
+        `${healthPath}.reload-notifyrequest01.json`, "utf8",
+      )).action, "check", "必须先落盘请求再通知 Relay");
+    },
+  });
+  assert.equal(request.path, `${healthPath}.reload-notifyrequest01.json`);
+  assert.deepEqual(notified, { actualStatePath: statePath, generation: "generation-notify" });
+
+  await assert.rejects(requestHostToolReload({
+    healthPath,
+    statePath,
+    generation: "generation-notify",
+    hostToolsRequired: true,
+    wslNative: true,
+  }, {
+    requestId: "failednotify01",
+    action: "check",
+    threadId: "task",
+  }, {
+    async signalWslRelay() { throw new Error("signal failed"); },
+  }), /signal failed/);
+  await assert.rejects(readFile(
+    `${healthPath}.reload-failednotify01.json`, "utf8",
+  ), { code: "ENOENT" }, "通知失败不能留下以后误执行的请求");
 });
 
 test("[platform:windows-native] [LCH-01 UI-02] Windows 原生提示脚本只包含通用错误和明确日志路径", () => {

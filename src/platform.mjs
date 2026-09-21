@@ -12,7 +12,7 @@ export { stopCodex, requestWindowsCodexQuit, launchCodex, codexLaunchEnvironment
 
 export { stopMacCodex, requestMacCodexQuit } from "./platform/macos-lifecycle.mjs";
 
-export { isCodexLaunchReady, getCodexLaunchReadiness, isRelayConfigCurrent, isRelayStateCurrent } from "./platform/readiness.mjs";
+export { isCodexLaunchReady, getCodexLaunchReadiness, isRelayConfigCurrent, isRelayStateCurrent, signalWslRelayProcess } from "./platform/readiness.mjs";
 
 export { codexRunsInWindowsSubsystemForLinux, parseWindowsSubsystemSetting, updateWindowsSubsystemSetting } from "./platform/wsl-settings.mjs";
 

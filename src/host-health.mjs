@@ -3,7 +3,7 @@ import { watch as watchFs } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-import { isRelayStateCurrent } from "./platform.mjs";
+import { isRelayStateCurrent, signalWslRelayProcess } from "./platform.mjs";
 import { classifyHostToolResult } from "./host-tool-probes.mjs";
 
 export const HOST_HEALTH_STATE_VERSION = 4;
@@ -35,11 +35,17 @@ export async function requestHostToolReload(binding, {
   now = Date.now(),
   action = "reload",
   threadId = null,
+} = {}, {
+  signalWslRelay = signalWslRelayProcess,
 } = {}) {
   const healthPath = String(binding?.healthPath ?? "").trim();
+  const statePath = String(binding?.statePath ?? "").trim();
   const generation = String(binding?.generation ?? "").trim();
   if (!binding?.hostToolsRequired || !healthPath || !generation) {
     throw new Error("当前启动入口没有可重载的 Codex 任务工具中继");
+  }
+  if (binding.wslNative === true && !statePath) {
+    throw new Error("当前 WSL 任务工具中继缺少进程状态路径");
   }
   const normalizedRequestId = String(requestId ?? "").trim();
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(normalizedRequestId)) {
@@ -52,6 +58,7 @@ export async function requestHostToolReload(binding, {
   const directory = dirname(healthPath);
   const path = `${healthPath}.reload-${normalizedRequestId}.json`;
   const temporaryPath = `${path}.${process.pid}.tmp`;
+  let published = false;
   await mkdir(directory, { recursive: true, mode: 0o700 });
   try {
     await writeFile(temporaryPath, `${JSON.stringify({
@@ -63,8 +70,15 @@ export async function requestHostToolReload(binding, {
       threadId,
     }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await rename(temporaryPath, path);
+    published = true;
+    if (binding.wslNative === true) {
+      // Writes made by Windows do not reliably produce inotify events in WSL.
+      // Wake the verified Relay once instead of polling the shared directory.
+      await signalWslRelay(statePath, generation);
+    }
   } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
+    if (published) await unlink(path).catch(() => undefined);
     throw error;
   }
   return { requestId: normalizedRequestId, path };
@@ -77,6 +91,8 @@ export function watchHostToolReloadRequests({ healthPath, generation } = {}, {
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   debounceMs = HOST_HEALTH_WATCH_DEBOUNCE_MS,
+  signalEmitter = null,
+  wakeSignal = null,
 } = {}) {
   const normalizedHealthPath = String(healthPath ?? "").trim();
   const normalizedGeneration = String(generation ?? "").trim();
@@ -87,6 +103,7 @@ export function watchHostToolReloadRequests({ healthPath, generation } = {}, {
   const prefix = `${basename(normalizedHealthPath)}.reload-`;
   let watcher = null;
   let timer = null;
+  let wakeListener = null;
   let closed = false;
   let scanning = false;
   let scanAgain = false;
@@ -96,6 +113,8 @@ export function watchHostToolReloadRequests({ healthPath, generation } = {}, {
     closed = true;
     if (timer != null) clearTimer(timer);
     timer = null;
+    if (wakeListener && wakeSignal) signalEmitter?.off?.(wakeSignal, wakeListener);
+    wakeListener = null;
     watcher?.close?.();
     watcher = null;
   };
@@ -152,18 +171,27 @@ export function watchHostToolReloadRequests({ healthPath, generation } = {}, {
     timer?.unref?.();
   };
   try {
+    if (signalEmitter && wakeSignal) {
+      wakeListener = schedule;
+      signalEmitter.on(wakeSignal, wakeListener);
+    }
     watcher = watchImpl(directory, { persistent: false }, (_eventType, fileName) => {
       if (fileName && !String(fileName).startsWith(prefix)) return;
       schedule();
     });
-    watcher.on?.("error", onError);
-    schedule();
+    watcher.on?.("error", (error) => {
+      onError(error);
+      watcher?.close?.();
+      watcher = null;
+      if (!wakeListener) close();
+    });
   } catch (error) {
     onError(error);
-    close();
+    if (!wakeListener) close();
   }
+  schedule();
   return {
-    get active() { return !closed && watcher != null; },
+    get active() { return !closed && (watcher != null || wakeListener != null); },
     close,
   };
 }
