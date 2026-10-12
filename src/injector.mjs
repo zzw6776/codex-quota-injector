@@ -356,6 +356,9 @@ export async function runInjector({
     widgetSession.markWidgetDataDirty();
     try {
       switch (action?.type) {
+        case "app-update-check":
+          void appUpdateManager.check();
+          break;
         case "app-update-open":
           await appUpdateManager.open({ threadId: hostHealthSession.selectedTask?.threadId,
             launchOptions: getLaunchOptions?.(), cdpPort: port, requestId: action.requestId });

@@ -26,11 +26,17 @@ export class AppUpdateManager {
     this.checking = (async () => {
       try {
         const result = await this.fetchLatest({ etag: this.etag });
-        if (this.closed || result.unchanged) return;
+        if (this.closed) return false;
+        if (result.unchanged) {
+          this.publish({ status: "ready", checkError: null, error: null });
+          return true;
+        }
         this.etag = result.etag;
         this.asset = releaseUpdate(result.release, this);
-        this.publish({ status: "ready", available: this.asset != null, version: this.asset?.version ?? null, error: null });
-      } catch (error) { this.publish({ status: "failed", checkError: error.message }); }
+        this.publish({ status: "ready", available: this.asset != null, version: this.asset?.version ?? null,
+          checkError: null, error: null });
+        return true;
+      } catch (error) { this.publish({ status: "failed", checkError: error.message }); return false; }
     })().finally(() => { this.checking = null; });
     return this.checking;
   }
@@ -38,7 +44,10 @@ export class AppUpdateManager {
     if (this.opening) return this.opening;
     this.publish({ error: null, opening: true, requestId: options.requestId ?? null });
     this.opening = (async () => {
-      if (!this.asset) { await this.check(); if (!this.asset) throw new Error("没有当前平台可安装的正式发布包"); }
+      // A click must start its own check after any older background request.
+      if (this.checking) await this.checking;
+      if (!await this.check()) throw new Error(this.view.checkError ?? "无法确认远端最新版本，请重试");
+      if (!this.asset) return null;
       const owner = await this.readOwner();
       if (owner.pid !== process.pid || owner.mode !== this.mode) throw new Error("运行实例已变化，请重新打开更新入口");
       return this.launch(this.asset, { ...options, dataDir: this.dataDir, owner });

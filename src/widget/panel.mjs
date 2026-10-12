@@ -4,6 +4,10 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
     const chip = wrap.querySelector(".quota-chip");
     const popover = wrap.querySelector(".quota-popover");
     if (!chip || !popover) return;
+    // Reparenting the host or one of its ancestors closes native popovers.
+    // Restore the top layer before measuring; sidebar containment otherwise
+    // clips the panel and changes the fixed-position containing block.
+    if (!popover.matches(":popover-open")) popover.showPopover();
     const chipRect = chip.getBoundingClientRect();
     const availableHeight = calculateMaxHeight(chipRect.top);
     popover.style.bottom = `${Math.max(12, window.innerHeight - chipRect.top + 10)}px`;
@@ -31,6 +35,7 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
   function positionHostHealthFlyout(wrap, popover = wrap.querySelector(".quota-popover")) {
     const flyout = wrap.querySelector(".host-health-flyout");
     if (!popover || !flyout) return;
+    if (!flyout.matches(":popover-open")) flyout.showPopover();
     const edge = 12;
     const gap = 10;
     const panelBounds = popover.getBoundingClientRect();
@@ -223,6 +228,7 @@ chip?.addEventListener("click", () => {
       state.pinned = true;
       wrap.classList.remove("is-dismissed");
       wrap.classList.add("is-open");
+      if (state.data.appUpdate) enqueue({ type: "app-update-check" });
       if (state.panelRefreshPending) render({ background: true });
       positionPopover(wrap);
       const scroller = wrap.querySelector(".panel-scroll");

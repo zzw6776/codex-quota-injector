@@ -5,19 +5,26 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { writeOfficialCredentials } from "./account-manager.mjs";
+import { defaultAccountDataDir } from "./platform/directories.mjs";
+import { resolveCodexHome } from "./account-manager/contract.mjs";
+import { accountCatalogCache } from "./official-model-catalog-cache.mjs";
 
 const execFileAsync = promisify(execFile);
 const REFRESH_TIMEOUT_MS = 15_000;
 const MAX_CATALOG_OUTPUT_BYTES = 16 * 1024 * 1024;
 const TEMP_HOME_PREFIX = "codex-quota-model-catalog-";
 
-export async function fetchOfficialModelCatalog({ executable, account, runCli = execFileAsync }) {
+export async function fetchOfficialModelCatalog({ executable, account, runCli = execFileAsync,
+  dataDir = defaultAccountDataDir(), codexHome = resolveCodexHome(), now = Date.now }) {
   if (!executable) throw new Error("Codex CLI 路径为空");
   const hasOAuth = account?.authMode === "oauth" && account.tokens?.accessToken;
   const hasApiKey = account?.authMode === "apiKey" && account.openaiApiKey;
   if (!hasOAuth && !hasApiKey) {
     return { catalog: null, skipped: true, source: null };
   }
+
+  const cacheState = hasOAuth ? await accountCatalogCache({ executable, account, dataDir, codexHome, now }) : null;
+  if (cacheState?.catalog) return { catalog: cacheState.catalog, skipped: false, source: "cache" };
 
   const temporaryHome = await mkdtemp(join(tmpdir(), TEMP_HOME_PREFIX));
   try {
@@ -54,6 +61,7 @@ export async function fetchOfficialModelCatalog({ executable, account, runCli = 
       if (!isUsableCatalog(cache)) {
         throw new Error("Codex 未写入账号在线模型缓存，已保留上次可用目录");
       }
+      await cacheState.save(cache);
       return { catalog: cache, skipped: false, source: "online" };
     }
     // API-key auth does not use the Codex account-catalog endpoint. The command

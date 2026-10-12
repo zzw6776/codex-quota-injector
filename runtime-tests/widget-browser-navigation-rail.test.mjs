@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { widgetInstallExpression } from "../src/widget.mjs";
 import { SHADOW, startBrowser, fixtureData } from "./support/browser.mjs";
 
 async function installRail(b) {
@@ -25,6 +26,81 @@ function quotaData(credits = { usdAmount: 2500, formattedUsd: "US$2500.00", cred
     windows: [{ label: "Weekly", remainingPercent: 2, windowDurationMins: 10080 },
       { label: "5h", remainingPercent: 1, windowDurationMins: 300 }] });
 }
+
+test("[UI-03] 侧栏重挂载后主面板与诊断浮窗恢复顶层，不被裁切或遮挡", { timeout: 30000 }, async t => {
+  const b = await startBrowser(t);
+  await installRail(b);
+  await b.client.evaluate(`(() => {
+    const sidebar=document.createElement('aside');
+    sidebar.id='contained-sidebar';
+    sidebar.style.cssText='position:fixed;top:44px;bottom:0;left:0;width:290px;contain:layout paint;isolation:isolate';
+    document.body.append(sidebar);
+    const rail=document.getElementById('rail');
+    sidebar.append(rail);
+    rail.style.top='0';
+    const list=document.createElement('div');
+    list.id='sidebar-list';
+    list.style.cssText='position:absolute;inset:0 0 0 52px;z-index:1;background:#ddd';
+    sidebar.append(list);
+  })()`);
+  await b.settled();
+  await b.client.evaluate('window.__codexQuotaWidget.destroy()');
+  await b.client.evaluate(widgetInstallExpression());
+  await b.update(quotaData());
+  await b.click('.quota-chip');
+  await b.click('.host-health-status');
+  await b.client.evaluate(`window.retainedPanel=${SHADOW}.querySelector('.quota-popover')`);
+  const assertTopLayer = async (expectFlyout = true) => {
+    const result=await b.client.evaluate(`(() => {
+      const root=document.getElementById('codex-quota-injector-root');
+      const panel=root.shadowRoot.querySelector('.quota-popover');
+      const flyout=root.shadowRoot.querySelector('.host-health-flyout');
+      const r=panel.getBoundingClientRect();
+      const f=flyout?.getBoundingClientRect();
+      const chip=root.shadowRoot.querySelector('.quota-chip').getBoundingClientRect();
+      return {samePanel:panel===retainedPanel,open:panel.matches(':popover-open'),
+        left:r.left,bottom:r.bottom,chipTop:chip.top,
+        insideHit:document.elementFromPoint(r.left+100,r.top+60)===root,
+        outsideHit:document.elementFromPoint(r.right-20,r.top+60)===root,
+        flyoutOpen:flyout?.matches(':popover-open'),
+        flyoutHit:f && document.elementFromPoint(f.left+30,f.top+30)===root};
+    })()`);
+    assert.equal(result.samePanel, true, '迁移不能重建面板或丢失输入');
+    assert.equal(result.open, true, JSON.stringify(result));
+    assert.ok(result.left >= 52 && result.bottom <= result.chipTop - 9, JSON.stringify(result));
+    assert.equal(result.insideHit, true, '面板在侧栏内的部分应盖住任务列表');
+    assert.equal(result.outsideHit, true, '超出侧栏的部分不能被 contain:paint 裁切');
+    if (expectFlyout) {
+      assert.equal(result.flyoutOpen, true);
+      assert.equal(result.flyoutHit, true);
+    } else {
+      assert.equal(result.flyoutOpen, undefined, '关闭过的诊断浮窗不能随迁移重新出现');
+    }
+  };
+  // React-style reparenting closes native popovers, even when the shadow DOM
+  // and logical "is-open" state survive. The mount observer must restore them.
+  await b.client.evaluate(`(() => {
+    const next=document.createElement('div');
+    document.getElementById('rail').append(next);
+    next.append(document.getElementById('rail-bottom'));
+  })()`);
+  await b.settled();
+  await assertTopLayer();
+  // Also cover the injector moving its own root back to its profile anchor.
+  await b.client.evaluate(`document.getElementById('rail').append(document.getElementById('codex-quota-injector-root'))`);
+  await b.settled();
+  await assertTopLayer();
+  await b.click('.close-panel');
+  await b.client.evaluate(`(() => {
+    const next=document.createElement('div');
+    document.getElementById('rail').append(next);
+    next.append(document.getElementById('rail-bottom'));
+  })()`);
+  await b.settled();
+  assert.equal(await b.client.evaluate(`getComputedStyle(${SHADOW}.querySelector('.quota-popover')).visibility`), 'hidden');
+  await b.click('.quota-chip');
+  await assertTopLayer(false);
+});
 
 test("[UI-01 UI-02] 新导航栏三行额度完整显示，头像与官方导航项不受挤压", { timeout: 30000 }, async t => {
   const b = await startBrowser(t);
@@ -132,6 +208,9 @@ test("[UI-01 UI-03] 活节点迁移、导航栏替换及新旧结构动态切换
 
 test("[UI-03] 新导航栏弹层在窄窗口和明暗主题中仍可操作", { timeout: 30000 }, async t => {
   const b = await startBrowser(t);
+  // Match the desktop host: its viewport does not have document scrollbars.
+  // Otherwise x=466 hits the fixture's 15px scrollbar instead of the panel.
+  await b.client.evaluate("document.documentElement.style.overflow = document.body.style.overflow = 'hidden'");
   await b.update(quotaData());
   await installRail(b);
   await b.client.request('Emulation.setDeviceMetricsOverride', { width:480,height:420,deviceScaleFactor:1,mobile:false });

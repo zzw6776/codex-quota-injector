@@ -14,7 +14,9 @@ export async function activeUpdate(registryPath) {
     process.kill(descriptor.pid, 0);
     if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-f0-9]{48}\/$/.test(descriptor.url) || Number(new URL(descriptor.url).port) > 65535) return null;
     const state = await fetch(`${descriptor.url}state`, { signal: AbortSignal.timeout(1500) }).then(response => response.json());
-    return state.id === descriptor.id ? { ...descriptor, windowReady: state.windowReady !== false } : null;
+    return state.id === descriptor.id ? { ...descriptor, windowReady: state.windowReady !== false,
+      windowError: state.windowError ?? null, status: state.status, version: state.version,
+      assetId: state.assetId, ownerPid: state.ownerPid, currentVersion: state.currentVersion } : null;
   } catch { return null; }
 }
 
@@ -26,18 +28,38 @@ export async function waitForUpdateWindow({ registryPath, id, logPath, childStat
     const exit = childState();
     if (exit) throw new Error(`更新状态窗口进程已退出（${exit}），日志：${logPath}`);
     const descriptor = await readActive(registryPath);
+    if (descriptor?.id === id && descriptor.windowError) {
+      throw new Error(`${descriptor.windowError}，日志：${logPath}`);
+    }
     if (descriptor?.id === id && descriptor.windowReady) return descriptor;
     if (now() >= deadline) throw new Error(`更新状态窗口启动超时，日志：${logPath}`);
     await sleep(100);
   }
 }
 
+export function canReuseUpdateWindow(window, asset, owner) {
+  if (!window) return false;
+  if (!["confirm", "success", "failed", "cancelled"].includes(window.status)) return true;
+  return window.status === "confirm" && window.version === asset.version && window.assetId === asset.assetId &&
+    window.ownerPid === owner.pid && window.currentVersion === owner.version;
+}
+
 export async function launchUpdateWindow(asset, { dataDir, owner, threadId, launchOptions, cdpPort = 9229 } = {}) {
   const registryPath = join(dataDir, "update-window.json");
   const existing = await activeUpdate(registryPath);
-  if (existing) {
-    await fetch(`${existing.url}show`, { method: "POST", signal: AbortSignal.timeout(1500) });
+  if (canReuseUpdateWindow(existing, asset, owner)) {
+    const response = await fetch(`${existing.url}show`, { method: "POST", signal: AbortSignal.timeout(1500) });
+    if (!response.ok) throw new Error(`无法打开更新状态窗口，日志：${existing.logPath ?? join(dataDir, "updates")}`);
     return waitForUpdateWindow({ registryPath, id: existing.id, logPath: existing.logPath ?? join(dataDir, "updates") });
+  }
+  if (existing?.status === "confirm") {
+    const response = await fetch(`${existing.url}close`, { method: "POST", signal: AbortSignal.timeout(1500) });
+    if (!response.ok) throw new Error("更新已经开始，请先终止当前更新，再打开最新版本");
+    const deadline = Date.now() + 5000;
+    while ((await activeUpdate(registryPath))?.id === existing.id) {
+      if (Date.now() >= deadline) throw new Error("旧确认窗口尚未关闭，请稍后重新打开更新入口");
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
   const updateRoot = join(dataDir, "updates");
   await mkdir(updateRoot, { recursive: true, mode: 0o700 });

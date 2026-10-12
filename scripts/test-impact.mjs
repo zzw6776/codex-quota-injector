@@ -9,7 +9,8 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 // Narrow rules describe separable entry points, not guessed functional equivalence.
 export function testImpactForPath(path) {
   path = path.replaceAll('\\', '/');
-  const devLauncherRuntime = ['启动开发版.command', 'scripts/start-injector-macos.sh'].includes(path)
+  const devLauncherRuntime = ['启动开发版.command', 'scripts/start-injector-macos.sh',
+    'scripts/macos-dev-environment.sh', 'scripts/macos-dev-console-owner.mjs'].includes(path)
     ? ['macos-native']
     : ['启动开发版.cmd', 'scripts/start-injector-windows.ps1', 'scripts/windows-dev-dependencies.ps1',
       'scripts/dev-launch-console.ps1', 'scripts/dev-launch-log-reader.ps1'].includes(path)
@@ -20,6 +21,8 @@ export function testImpactForPath(path) {
     scopes = []; reason = '说明文档或展示预览';
   } else if (devLauncherRuntime) {
     scopes = ['free']; reason = '独立开发启动入口与日志观察，不被模型验收或正式启停执行器加载';
+  } else if (path === 'src/macos-dev-console.mjs') {
+    scopes = ['free', 'lifecycle']; reason = 'macOS 正式接管时结束开发日志观察，不改变模型链路';
   } else if (path === 'src/widget.mjs' || path.startsWith('src/widget/')) {
     scopes = ['free', 'desktop']; reason = '页面运行时，不改变后台模型与启停编排';
   } else if (path === 'src/lifecycle-host.mjs') {

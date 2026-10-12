@@ -3,8 +3,9 @@
 finish_console() {
   local result=$?
   trap - EXIT
-  [[ -n "${runtime_tail_pid:-}" ]] && kill "$runtime_tail_pid" 2>/dev/null
-  [[ -n "${startup_tail_pid:-}" ]] && kill "$startup_tail_pid" 2>/dev/null
+  [[ -n "${runtime_tail_pid:-}" ]] && kill "$runtime_tail_pid" 2>/dev/null || true
+  [[ -n "${startup_tail_pid:-}" ]] && kill "$startup_tail_pid" 2>/dev/null || true
+  [[ -n "${console_owner_pid:-}" ]] && kill "$console_owner_pid" 2>/dev/null || true
   if [[ "$result" -ne 0 ]]; then
     echo
     echo "Development launcher failed (exit code $result). See the output above."
@@ -15,9 +16,12 @@ finish_console() {
 }
 trap finish_console EXIT
 trap 'exit 130' INT TERM
+trap 'exit 0' USR1
+trap 'exit 1' USR2
 set -e
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/scripts/macos-dev-environment.sh"
 # This named launcher is an explicit user entry point. Terminal.app may retain
 # Codex's task-tool environment after it was opened from Codex, so pass a
 # separate provenance marker instead of treating that inherited value as the
@@ -28,6 +32,8 @@ mkdir -p "$LOG_DIR"
 STARTUP_LOG="$(mktemp "$LOG_DIR/dev-launch-XXXXXXXX")"
 RUNTIME_LOG="$LOG_DIR/injector.log"
 touch "$RUNTIME_LOG"
+node "$SCRIPT_DIR/scripts/macos-dev-console-owner.mjs" "$LOG_DIR" &
+console_owner_pid=$!
 echo "Starting Codex Quota Injector development version..."
 echo "Startup log: $STARTUP_LOG"
 echo "Runtime log: $RUNTIME_LOG"

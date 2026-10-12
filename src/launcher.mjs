@@ -2,6 +2,8 @@
 
 import packageJson from "../package.json" with { type: "json" };
 import { isSea } from "node:sea";
+import { dirname } from "node:path";
+import { endDevConsoleOnFormalTakeover } from "./macos-dev-console.mjs";
 
 // A launch argument belongs to this invocation; an inherited environment variable
 // or the SEA packaging format cannot distinguish an app launch from a CLI call.
@@ -104,6 +106,9 @@ async function runLauncher() {
     if (takeoverInProgress) return;
     takeoverInProgress = true;
     console.log(`[launcher] ${request?.mode ?? "unknown"} v${request?.version ?? "unknown"} 请求接管，正在退出当前实例`);
+    await endDevConsoleOnFormalTakeover({
+      mode: instanceMode, requestMode: request?.mode, logRoot: dirname(logPath),
+    }).catch(error => console.warn(`[launcher] 开发日志终端退出通知失败：${error.message}`));
     await closeSingleInstance(instanceLock);
     process.exit(0);
   };

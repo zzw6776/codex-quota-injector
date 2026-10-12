@@ -7,9 +7,10 @@ const STEPS = ["downloading", "verifying", "waiting", "installing", "launching",
 const LABELS = ["下载安装包", "校验安装包", "确认任务已结束并落盘", "替换正式版本", "启动正式版本", "更新成功"];
 
 export function updateWindowFragment(state) {
-  const current = STEPS.indexOf(state.status === "failed" ? state.failedStage : state.status);
+  const current = STEPS.indexOf(state.status === "failed" ? state.failedStage
+    : state.status === "cancelled" ? state.cancelledStage : state.status);
   const confirm = state.status === "confirm";
-  const finished = ["success", "failed"].includes(state.status);
+  const finished = ["success", "failed", "cancelled"].includes(state.status);
   const percent = state.total ? Math.min(100, Math.floor(state.received / state.total * 100)) : 0;
   return `<h1>更新 Codex Quota Injector</h1><div class="versions">${escape(state.currentVersion)}${state.mode === "dev" ? " · dev" : ""} → ${escape(state.version)} · 正式版</div>
     <div class="status ${escape(state.status)}">${escape(state.message)}</div>
@@ -17,7 +18,7 @@ export function updateWindowFragment(state) {
       `<ol>${STEPS.map((step, index) => `<li class="${index < current || state.status === "success" ? "done" : index === current ? "current" : ""}">${LABELS[index]}</li>`).join("")}</ol>`}
     ${state.status === "downloading" ? `<div class="meter"><div style="width:${percent}%"></div></div><p>${percent}% · ${(Number(state.received) / 1048576).toFixed(1)} / ${(Number(state.total) / 1048576).toFixed(1)} MB</p>` : ""}
     ${state.status === "success" ? '<p>正式版已启动，窗口将保留，直到你手动关闭。</p>' : ""}
-    <div class="actions">${confirm ? '<button onclick="action(\'close\')">取消</button><button class="primary" onclick="action(\'confirm\')">立即更新</button>' : `<button onclick="action('close')" ${finished ? "" : "disabled"}>关闭</button>`}</div>`;
+    <div class="actions">${confirm ? '<button onclick="action(\'close\')">取消</button><button class="primary" onclick="action(\'confirm\')">立即更新</button>' : `${finished ? "" : `<button class="danger" onclick="action('terminate')" ${state.terminating ? "disabled" : ""}>${state.terminating ? "终止中…" : "终止更新"}</button>`}<button onclick="action('close')" ${finished ? "" : "disabled"}>关闭</button>`}</div>`;
 }
 
 export function updateWindowHtml() {
@@ -35,10 +36,10 @@ export function updateWindowHtml() {
     </script></body></html>`;
 }
 
-export async function startUpdateWindowServer({ state, confirm, close, show = () => {}, port = 0 }) {
+export async function startUpdateWindowServer({ state, confirm, close, terminate = () => {}, show = () => {}, port = 0 }) {
   const token = randomBytes(24).toString("hex");
   const prefix = `/${token}`;
-  let focus = false, windowReady = false;
+  let focus = false, windowReady = false, closingRequested = false;
   const server = createServer(async (request, response) => {
     const origin = request.headers.origin;
     const expected = `127.0.0.1:${server.address().port}`;
@@ -47,6 +48,7 @@ export async function startUpdateWindowServer({ state, confirm, close, show = ()
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
     const path = request.url.slice(prefix.length);
+    if (closingRequested && request.method === "POST") { response.writeHead(409); response.end(); return; }
     try {
       if (request.method === "GET" && path === "/") {
         response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(updateWindowHtml());
@@ -62,13 +64,17 @@ export async function startUpdateWindowServer({ state, confirm, close, show = ()
         focus = true; show(); response.end("ok");
       } else if (request.method === "POST" && path === "/confirm") {
         confirm(); response.end("ok");
+      } else if (request.method === "POST" && path === "/terminate") {
+        terminate(); response.writeHead(202); response.end("ok");
       } else if (request.method === "POST" && path === "/close") {
-        if (!["confirm", "success", "failed"].includes(state().status)) { response.writeHead(409); response.end(); return; }
+        if (!["confirm", "success", "failed", "cancelled"].includes(state().status)) { response.writeHead(409); response.end(); return; }
+        closingRequested = true;
         response.end("ok"); setTimeout(close, 100);
       } else { response.writeHead(404); response.end(); }
     } catch (error) { response.writeHead(409); response.end(escape(error.message)); }
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
   return { url: `http://127.0.0.1:${server.address().port}${prefix}/`, server,
+    invalidateReady() { windowReady = false; },
     close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }) };
 }

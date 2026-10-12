@@ -29,11 +29,13 @@ export async function refreshCodexModelCatalog({
     account = await accountManager?.getCurrentModelCatalogAccount();
     contextManager.selectModelCatalogAccount(account);
     await contextManager.refresh({ sync: false });
-    const refresh = await fetchOfficialModelCatalog({ executable: upstreamExecutable, account });
+    const refresh = await fetchOfficialModelCatalog({ executable: upstreamExecutable, account,
+      dataDir: contextManager.dataDir, codexHome: accountManager?.codexHome ?? contextManager.codexHome });
     const changed = refresh.catalog
       ? (await contextManager.useOfficialCatalog(refresh.catalog, {
-          source: refresh.source === "bundled" ? "official-bundled" : "official-online",
-          persist: refresh.source === "online",
+          source: refresh.source === "bundled" ? "official-bundled"
+            : refresh.source === "cache" ? "official-cache" : "official-online",
+          persist: refresh.source === "online" || refresh.source === "cache",
         })).changed
       : false;
     return {

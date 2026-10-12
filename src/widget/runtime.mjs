@@ -370,8 +370,11 @@ function installQuotaWidget(
     const footerTitle = injectionRuntime?.title ? ` title="${injectionRuntime.title}"` : "";
     const update = state.data.appUpdate;
     const opening = state.appUpdateOpening || update?.opening;
-    const versionHtml = update?.available
-      ? `<button class="app-update-open" type="button" ${opening ? 'disabled aria-busy="true"' : ""}>${opening ? "正在打开更新窗口…" : `${appVersion ? `v${appVersion} → ` : ""}v${escapeHtml(update.version)}`}</button>`
+    const versionLabel = opening
+      ? update?.available ? "正在打开更新窗口…" : "正在检查更新…"
+      : update?.available ? `${appVersion ? `v${appVersion} → ` : ""}v${escapeHtml(update.version)}` : footerMeta;
+    const versionHtml = update
+      ? `<button class="app-update-open${update.available ? "" : " panel-version-text"}" type="button"${footerTitle} ${opening ? 'disabled aria-busy="true"' : ""}>${versionLabel}</button>`
       : `<span class="panel-version-text"${footerTitle}>${footerMeta}</span>`;
     return footerMeta
       ? `<div class="panel-version">${balanceHtml}${versionHtml}${update?.error ? `<span class="app-update-error" role="alert">${escapeHtml(update.error)}</span>` : ""}</div>`

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import test from "node:test";
@@ -9,10 +10,11 @@ import { downloadUpdate } from "../src/app-update/download.mjs";
 import { createUpdateRun } from "../src/app-update/runner.mjs";
 import { inspectUpdateHistory } from "../src/app-update/history.mjs";
 import { startUpdateWindowServer, updateWindowFragment } from "../src/app-update/window.mjs";
-import { cleanUpdateEnvironment, loadedFileMatches } from "../src/app-update/native-install.mjs";
-import { useTempDir } from "./helpers.mjs";
+import { cleanUpdateEnvironment, loadedFileMatches, installNativeUpdate } from "../src/app-update/native-install.mjs";
+import { startHttpServer, useTempDir, waitFor } from "./helpers.mjs";
+import { createUpdateViewer } from "../src/app-update/viewer.mjs";
 import { resolveDevUpdateWindow } from "../src/app-update/window-executable.mjs";
-import { activeUpdate, waitForUpdateWindow } from "../src/app-update/launch.mjs";
+import { activeUpdate, waitForUpdateWindow, canReuseUpdateWindow } from "../src/app-update/launch.mjs";
 
 function release(version = "0.1.295", platform = "macos-arm64.dmg") {
   const name = `Codex-Quota-Injector-${version}-${platform}`;
@@ -41,7 +43,9 @@ test("检查合并、ETag 304 保留结果；网络异常不清除候选，重�
   let calls = 0, launches = 0, resolveWindow;
   const manager = new AppUpdateManager({ version: "0.1.308", mode: "dev", platform: "darwin", arch: "arm64",
     async fetchLatest({ etag }) { calls++; if (!etag) return { release: release(), etag: "cached" };
-      if (calls === 2) return { unchanged: true }; throw new Error("offline"); },
+      if (calls === 2) return { unchanged: true };
+      if (calls === 3) throw new Error("offline");
+      return { release: release("0.1.312"), etag: "latest" }; },
     readOwner: async () => ({ pid: process.pid, mode: "dev", version: "0.1.308" }),
     launch: async () => { launches++; return new Promise(resolve => { resolveWindow = resolve; }); },
   });
@@ -53,7 +57,9 @@ test("检查合并、ETag 304 保留结果；网络异常不清除候选，重�
   assert.equal(manager.getViewModel().error, null);
   const first = manager.open(), second = manager.open();
   assert.equal(manager.getViewModel().opening, true);
-  await Promise.resolve(); await Promise.resolve();
+  await waitFor(() => launches === 1);
+  assert.equal(manager.getViewModel().version, "0.1.312");
+  assert.equal(calls, 4, "已有候选也必须检查后才能打开");
   assert.equal(launches, 1); resolveWindow("window");
   assert.deepEqual(await Promise.all([first, second]), ["window", "window"]);
   assert.equal(manager.getViewModel().opening, false);
@@ -61,6 +67,75 @@ test("检查合并、ETag 304 保留结果；网络异常不清除候选，重�
   const unchanged = await fetchRelease({ etag: "cached", fetchImpl: async (_url, options) => {
     headers.push(options.headers); return new Response(null, { status: 304 }); } });
   assert.equal(unchanged.unchanged, true); assert.equal(headers[0]["If-None-Match"], "cached");
+});
+
+test("打开更新窗口必须等本次最新检查，旧后台请求不能代替点击检查；失败不安装缓存候选", async t => {
+  let finishBackground, calls = 0, launched;
+  const manager = new AppUpdateManager({ version: "0.1.311", mode: "dev", platform: "darwin", arch: "arm64",
+    fetchLatest: async () => {
+      if (++calls === 1) return new Promise(resolve => { finishBackground = resolve; });
+      if (calls === 2) return { release: release("0.1.312"), etag: "latest" };
+      throw new Error("GitHub temporarily offline");
+    }, readOwner: async () => ({ pid: process.pid, mode: "dev", version: "0.1.311" }),
+    launch: async asset => { launched = asset.version; },
+  });
+  t.after(() => manager.close());
+  const background = manager.check(), open = manager.open();
+  finishBackground({ release: release("0.1.295"), etag: "old" });
+  await Promise.all([background, open]);
+  assert.equal(calls, 2); assert.equal(launched, "0.1.312");
+  launched = null;
+  await assert.rejects(manager.open(), /GitHub temporarily offline/);
+  assert.equal(launched, null);
+  assert.equal(manager.getViewModel().version, "0.1.312");
+  assert.equal(manager.getViewModel().opening, false);
+});
+
+test("最新发布不再适用于当前平台时清除候选，不打开过时安装包", async t => {
+  let calls = 0, launches = 0;
+  const manager = new AppUpdateManager({ version: "0.1.311", mode: "dev", platform: "darwin", arch: "arm64",
+    fetchLatest: async () => ({ release: ++calls === 1 ? release() : release("0.1.312", "windows-x64-Setup.exe") }),
+    readOwner: async () => ({ pid: process.pid, mode: "dev" }), launch: async () => { launches++; },
+  });
+  t.after(() => manager.close());
+  await manager.check(); assert.equal(await manager.open(), null);
+  assert.equal(manager.getViewModel().available, false);
+  assert.equal(manager.getViewModel().version, null); assert.equal(launches, 0);
+});
+
+test("没有更新时点击版本重新检查，仍无更新不报错；发现新发布后打开最新确认页", async t => {
+  let calls = 0, launches = 0, latest = "0.1.312";
+  const manager = new AppUpdateManager({ version: "0.1.312", mode: "formal", platform: "darwin", arch: "arm64",
+    fetchLatest: async () => { calls++; return { release: release(latest) }; },
+    readOwner: async () => ({ pid: process.pid, mode: "formal", version: "0.1.312" }),
+    launch: async asset => { launches++; return asset.version; },
+  });
+  t.after(() => manager.close());
+  await manager.check(); assert.equal(manager.getViewModel().available, false);
+  assert.equal(await manager.open({ requestId: "unchanged" }), null);
+  assert.equal(calls, 2); assert.equal(launches, 0);
+  assert.equal(manager.getViewModel().error, null);
+  assert.equal(manager.getViewModel().opening, false);
+  assert.equal(manager.getViewModel().requestId, "unchanged");
+  latest = "0.1.313";
+  assert.equal(await manager.open({ requestId: "new-release" }), latest);
+  assert.equal(calls, 3); assert.equal(launches, 1);
+  assert.equal(manager.getViewModel().version, latest);
+  assert.equal(manager.getViewModel().available, true);
+});
+
+test("确认页只复用同一发布包和运行实例，终态开新确认页，执行中的任务保持原目标", () => {
+  const asset = { version: "0.1.312", assetId: 2 }, owner = { pid: 10, version: "0.1.311" };
+  const old = { status: "confirm", version: "0.1.295", assetId: 1, ownerPid: 10, currentVersion: "0.1.311" };
+  assert.equal(canReuseUpdateWindow(old, asset, owner), false);
+  const matching = { ...old, version: asset.version, assetId: asset.assetId };
+  assert.equal(canReuseUpdateWindow(matching, asset, owner), true);
+  assert.equal(canReuseUpdateWindow(matching, asset, { ...owner, pid: 20 }), false);
+  assert.equal(canReuseUpdateWindow(matching, { ...asset, assetId: 3 }, owner), false);
+  for (const status of ["success", "failed", "cancelled"]) assert.equal(canReuseUpdateWindow({ ...matching, status }, asset, owner), false);
+  for (const status of ["downloading", "verifying", "waiting", "installing", "launching"]) {
+    assert.equal(canReuseUpdateWindow({ ...old, status }, asset, owner), true);
+  }
 });
 
 test("dev 只跳过版本比较，下载仍校验全部字节；网络/摘要/大小异常不产生可安装文件", async t => {
@@ -155,6 +230,8 @@ test("独立状态窗口在终态前拒绝关闭，终态不会自动关闭；�
   assert.equal((await fetch(`${window.url}state`)).status, 200);
   assert.equal(closes, 0);
   assert.equal((await fetch(`${window.url}close`, { method: "POST" })).status, 200);
+  assert.equal((await fetch(`${window.url}confirm`, { method: "POST" })).status, 409);
+  assert.equal(confirmations, 1, "关闭已确认后不能开始新的更新");
   await new Promise(resolve => setTimeout(resolve, 125));
   assert.equal(closes, 1);
 });
@@ -234,4 +311,123 @@ test("窗口进程早退立即报告退出原因；页面未就绪超时保留�
     ...options, timeoutMs: 300, readActive: async () => ({ id: "expected", windowReady: false }),
   }), /启动超时.*fixture.log/);
   assert.equal(time, 300);
+});
+
+function fakeViewer(pid) {
+  const child = new EventEmitter();
+  Object.assign(child, { pid, exitCode: null, signalCode: null, kill: () => true });
+  return child;
+}
+
+test("窗口在启动阶段退出，随后更新失败；再次打开重建窗口并保留同一任务失败状态", async t => {
+  const directory = await useTempDir(t, "update-viewer-recovery-");
+  const children = [];
+  let viewer, status = "launching", closed = 0;
+  const window = await startUpdateWindowServer({
+    state: () => ({ id: "existing", status, message: "正式版未确认启动", ...viewer?.state }),
+    confirm() {}, show: () => viewer.show(), close: () => { closed++; viewer.close(); },
+  });
+  t.after(() => { viewer.close(); return window.close(); });
+  viewer = createUpdateViewer({ spawn() { const child = fakeViewer(100 + children.length); children.push(child); return child; },
+    invalidate: () => window.invalidateReady() });
+  const registryPath = join(directory, "window.json");
+  await writeFile(registryPath, JSON.stringify({ id: "existing", pid: process.pid, url: window.url }));
+  viewer.show();
+  await fetch(`${window.url}ready`, { method: "POST" });
+  assert.equal((await activeUpdate(registryPath)).windowReady, true);
+  children[0].exitCode = 0; children[0].emit("exit", 0, null);
+  status = "failed";
+  const gone = await activeUpdate(registryPath);
+  assert.equal(gone.windowReady, false); assert.match(gone.windowError, /退出码 0/);
+  await assert.rejects(waitForUpdateWindow({ registryPath, id: "existing", logPath: "fixture.log" }), /退出码 0/);
+  assert.equal(closed, 0);
+  await fetch(`${window.url}show`, { method: "POST" });
+  assert.equal(children.length, 2);
+  assert.equal((await activeUpdate(registryPath)).windowReady, false);
+  await fetch(`${window.url}ready`, { method: "POST" });
+  await waitForUpdateWindow({ registryPath, id: "existing", logPath: "fixture.log" });
+  const state = await fetch(`${window.url}state`).then(r => r.json());
+  assert.equal(state.status, "failed"); assert.equal(state.id, "existing"); assert.equal(state.windowPid, 101);
+  viewer.show(); assert.equal(children.length, 2, "窗口存活时复用而非重复创建");
+  await fetch(`${window.url}close`, { method: "POST" });
+  await new Promise(resolve => setTimeout(resolve, 125));
+  assert.equal(closed, 1);
+});
+
+test("窗口启动错误可重试，旧窗口迟到的退出事件不能覆盖新窗口；关闭后不再重建", () => {
+  const children = [];
+  let canFocus = true;
+  const viewer = createUpdateViewer({ spawn() { const child = fakeViewer(children.length + 1); children.push(child); return child; },
+    focus: () => canFocus });
+  viewer.show(); children[0].emit("error", new Error("native unavailable"));
+  assert.match(viewer.state.windowError, /native unavailable/);
+  viewer.show(); assert.equal(viewer.state.windowError, null);
+  canFocus = false; viewer.show();
+  assert.equal(viewer.state.windowPid, 3);
+  children[1].emit("exit", 1, null);
+  assert.equal(viewer.state.windowPid, 3);
+  viewer.close(); assert.throws(() => viewer.show(), /已关闭/);
+});
+
+test("终止流式下载会中断请求并清除未完成文件", async t => {
+  const directory = await useTempDir(t, "update-download-cancel-");
+  const { origin } = await startHttpServer(t, (_request, response) => {
+    response.writeHead(200, { "content-type": "application/octet-stream" }); response.write("a");
+  });
+  const controller = new AbortController();
+  await assert.rejects(downloadUpdate({ url: origin, size: 10, sha256: "a".repeat(64) }, join(directory, "pkg"), {
+    signal: controller.signal, onProgress() { controller.abort(new Error("stop download")); },
+  }));
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("终止等待不再接管；重复终止合并，保留已终止窗口到手动关闭", async () => {
+  let entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  const { run, calls } = fakeRun({ history: async () => ({ ready: false, tracked: [], reason: "等待任务" }),
+    sleep: (_ms, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true }); entered();
+    }) });
+  const completion = run.confirm(); await waiting;
+  assert.equal(run.terminate(), completion); assert.equal(run.terminate(), completion);
+  await completion;
+  assert.equal(run.state.status, "cancelled"); assert.equal(run.state.cancelledStage, "waiting");
+  assert.deepEqual(calls, ["download", "prepare"]);
+  assert.match(updateWindowFragment(run.state), /更新已终止/);
+  assert.doesNotMatch(updateWindowFragment(run.state), /disabled|终止更新/);
+});
+
+test("安装和启动确认阶段终止后释放锁，不继续启动或误报成功", async () => {
+  for (const stage of ["install", "ready"]) {
+    let entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const operation = (...args) => new Promise((_resolve, reject) => {
+      const { signal } = args.at(-1);
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true }); entered();
+    });
+    const { run, calls } = fakeRun({ [stage]: operation });
+    const completion = run.confirm(); await waiting; run.terminate(); await completion;
+    assert.equal(run.state.status, "cancelled"); assert.match(run.state.message, /未自动回滚/);
+    assert.equal(calls.filter(call => call === "release").length, 1);
+    if (stage === "install") assert.ok(!calls.includes("launch"));
+  }
+});
+
+test("确认前终止不下载；已终止任务再次确认不重跑", async () => {
+  const { run, calls } = fakeRun();
+  await run.terminate(); await run.confirm();
+  assert.equal(run.state.status, "cancelled"); assert.deepEqual(calls, []);
+});
+
+test("macOS 替换步骤只在新应用放回后响应终止，不停在删除与改名之间", async t => {
+  const directory = await useTempDir(t, "update-install-cancel-");
+  const app = join(directory, "App.app"), stage = join(directory, "stage");
+  await mkdir(app); await writeFile(join(app, "old"), "old");
+  await mkdir(stage); await writeFile(join(stage, "new"), "new");
+  let checkpoints = 0;
+  await assert.rejects(installNativeUpdate({ installedApp: app, asset: { platform: "darwin" } }, { stage }, {
+    signal: { throwIfAborted() { if (++checkpoints === 2) throw new Error("cancel after rename"); } },
+  }), /cancel after rename/);
+  assert.deepEqual(await readdir(app), ["new"]);
+  await assert.rejects(readFile(join(stage, "new")), { code: "ENOENT" });
 });

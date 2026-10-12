@@ -105,6 +105,8 @@ macOS 状态窗使用打包的独立 WebKit 窗口；Windows 使用独立 WinFor
 
 点击更新入口会立即显示“正在打开更新窗口…”，页面实际加载后恢复按钮。状态服务由系统分配独立本机端口，隔离实例不会争抢固定端口；启动异常记录子进程退出信息。macOS dev 启动时预编译窗口程序，相同源码和架构复用缓存，避免每次点击重新编译。
 
+更新窗口意外退出后，再次点击入口会重新创建窗口并保留同一更新任务的进度或结果。执行期间可点“终止更新”：取消下载、等待及可取消的子命令，停止后续步骤；macOS 文件替换先完成删除与改名的连续操作，再响应终止。已发生的接管、替换或启动不会自动回滚，窗口会保留已终止状态并说明需要核对正式应用。
+
 GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 
 - 每次提交到 `master`：读取 `package.json` 版本，分别构建对应版本的 macOS arm64 DMG、macOS x64 DMG 和 Windows x64 Setup，创建或更新 `v版本号` 正式 Release、标记为 Latest，并同时上传到 Actions Artifacts；
@@ -129,6 +131,10 @@ npm run launch
 - Windows：`启动开发版.cmd`
 
 macOS 的 `启动开发版.command` 是明确的外部启动入口，即使 Terminal 继承了 Codex 任务环境也允许接管；从 Codex 任务内部直接运行 `npm run launch` 仍会拒绝接管。
+
+重复打开 macOS 开发终端时，最新窗口接管日志显示，旧日志观察器正常退出；后台按原规则复用或接管。交接只结束日志查看，不停止后台注入器。新机制从使用新版脚本打开的终端开始生效，此前已打开的旧脚本终端需手动关闭一次。
+
+macOS 开发版被正式版接管时，会通知开发日志 Shell 和 follower 正常退出；开发版页面热更新继续保留日志窗口。该通知由新版开发后台发出，已安装的旧正式版也可触发。Terminal 窗口是否随 Shell 结束自动关闭取决于其配置。
 
 Windows 开发入口会先使用项目内或系统中的 Node.js 22 准备 relay，再启动后台注入器并保留终端显示启动流程和持续运行日志。普通 Windows 模式会在首次启动当前项目版本时原子生成版本化的原生 Windows SEA relay；源码开发版若要重建 WSL relay，需要在 `runtime/node-v22.23.1-linux-x64/bin/node` 准备本地 Linux Node。正式 Windows 安装包已经压缩内置构建好的 WSL relay，安装和运行均不需要该开发运行时。启动器根据版本和运行模式协商是否接管已运行的注入器；旧版本协议无法识别时，会在确认旧进程属于本项目后终止旧进程并继续启动。CDP 和模型中继均就绪时保留官方 Codex，否则需要重启以加载配置；Windows 的 CMD 和 macOS 的 `.command` 终端会保留并持续显示日志；准备阶段或启动失败时保留错误输出，失败后需按键关闭。Windows 创建后台进程不代表启动成功，以运行日志中的实际就绪或错误信息为准。关闭日志窗口不会主动关闭后台注入器。启动日志位于 `%LOCALAPPDATA%\Codex Quota Injector\Logs\launcher.log`，运行日志位于同目录的 `injector.log`。
 
