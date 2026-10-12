@@ -89,7 +89,8 @@ export async function installNativeUpdate(control, prepared, { signal } = {}) {
 export async function launchUpdatedApp(control, { signal } = {}) {
   signal?.throwIfAborted();
   if (control.asset.platform === "darwin") await exec("/usr/bin/open", ["-n", control.installedApp,
-    "--env", `CODEX_QUOTA_DATA_DIR=${control.dataDir}`, "--env", `CODEX_QUOTA_CDP_PORT=${control.cdpPort ?? 9229}`], { signal });
+    "--env", `CODEX_QUOTA_DATA_DIR=${control.dataDir}`, "--env", `CODEX_QUOTA_CDP_PORT=${control.cdpPort ?? 9229}`],
+    { signal, env: cleanUpdateEnvironment() });
   else {
     const { spawn } = await import("node:child_process");
     const child = spawn(join(control.installedApp, "Codex Quota Injector.exe"), [], {

@@ -28,6 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: workerPath)
     process.arguments = ["--explicit-start"]
+    // A GUI launch starts the app, even if its shell inherited updater state.
+    var environment = ProcessInfo.processInfo.environment
+    environment.removeValue(forKey: "CODEX_QUOTA_ROLE")
+    environment.removeValue(forKey: "CODEX_QUOTA_UPDATE_CONTROL")
+    process.environment = environment
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
