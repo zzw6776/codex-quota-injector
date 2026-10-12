@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { watch as watchFs } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { isRelayStateCurrent, signalWslRelayProcess } from "./platform.mjs";
 import { classifyHostToolResult, isThreadNotMaterialized } from "./host-tool-probes.mjs";
@@ -24,6 +25,8 @@ const CODEX_APP_SERVER = "codex_app";
 const STARTUP_STATUS_METHOD = "mcpServer/startupStatus/updated";
 const STATUS_LIST_METHOD = "mcpServerStatus/list";
 const HEALTH_DETAIL_LIMIT = 600;
+const HEALTH_RENAME_RETRY_DELAYS_MS = [25, 50, 100, 200];
+const HEALTH_RENAME_TRANSIENT_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 export function hostHealthPollInterval(status) {
   return ["idle", "ready", "direct"].includes(String(status ?? ""))
@@ -289,6 +292,8 @@ export async function createHostHealthTracker({
   now = () => Date.now(),
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  renameFile = rename,
+  platform = process.platform,
 } = {}) {
   const tracker = new HostHealthTracker({
     path,
@@ -301,6 +306,8 @@ export async function createHostHealthTracker({
     now,
     setTimer,
     clearTimer,
+    renameFile,
+    platform,
   });
   await tracker.start({ claim });
   return tracker;
@@ -318,11 +325,15 @@ class HostHealthTracker {
     now,
     setTimer,
     clearTimer,
+    renameFile,
+    platform,
   }) {
     this.path = String(path ?? "").trim();
     this.now = now;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
+    this.renameFile = renameFile;
+    this.platform = platform;
     this.graceMs = Math.max(0, Number(graceMs) || 0);
     this.requiredTools = normalizeToolNames(requiredTools);
     this.sessionId = sessionId;
@@ -627,17 +638,31 @@ class HostHealthTracker {
     if (!this.path) return this.tail;
     const state = this.snapshot();
     this.tail = this.tail.then(async () => {
-      if (!claim && !await healthFileOwnedBy(this.path, this.sessionId)) return;
+      const owner = await readJson(this.path);
+      if (!claim && (owner?.version !== HOST_HEALTH_STATE_VERSION
+          || owner.sessionId !== this.sessionId)) return;
+      const ownerSessionId = owner?.sessionId;
       const temporaryPath = `${this.path}.${process.pid}.${this.sessionId}.tmp`;
       try {
         await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, {
           encoding: "utf8",
           mode: 0o600,
         });
-        await rename(temporaryPath, this.path);
-      } catch (error) {
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await this.renameFile(temporaryPath, this.path);
+            break;
+          } catch (error) {
+            const retryDelay = HEALTH_RENAME_RETRY_DELAYS_MS[attempt];
+            if (this.platform !== "win32" || retryDelay == null
+                || !HEALTH_RENAME_TRANSIENT_ERRORS.has(error.code)) throw error;
+            await delay(retryDelay);
+            // 等待期间可能发生后台接管，旧会话不能重新覆盖新会话。
+            if ((await readJson(this.path))?.sessionId !== ownerSessionId) return;
+          }
+        }
+      } finally {
         await unlink(temporaryPath).catch(() => undefined);
-        throw error;
       }
     }).catch((error) => {
       console.error(`[host-health] 状态写入失败：${error.message}`);
@@ -969,11 +994,6 @@ function errorMessage(value) {
     }
   }
   return value == null ? "" : String(value);
-}
-
-async function healthFileOwnedBy(path, sessionId) {
-  const current = await readJson(path);
-  return current?.version === HOST_HEALTH_STATE_VERSION && current.sessionId === sessionId;
 }
 
 async function readJson(path) {
