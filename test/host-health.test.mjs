@@ -500,7 +500,9 @@ test("[LCH-04] 目录只更新诊断，不能代替或改变独立的任务启�
   assert.equal(tracker.snapshot("current").serverStatus, "ready");
   tracker.observeReloadStarted();
   tracker.observeStatusList(catalog, null, { threadId: "current" });
-  assert.equal(tracker.snapshot("current").status, "idle", "重载后目录不得借用旧启动通知");
+  assert.equal(tracker.snapshot("current").status, "starting", "已知任务等待新的启动通知");
+  assert.equal(tracker.snapshot("current").serverStatus, "notStarted", "重载后目录不得借用旧启动通知");
+  assert.equal(tracker.snapshot("current").toolsVerified, false);
 });
 
 test("[LCH-04] 空全局目录不能推翻同一已就绪任务的完整工具证据", async t => {

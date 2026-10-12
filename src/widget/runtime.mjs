@@ -66,14 +66,16 @@ function installQuotaWidget(
       extraModels: { platforms: [] },
       tokenUsage: { status: "ready", turns: [] },
       hostHealth: { required: false, status: "direct" },
-      turnState292: { status: "unknown", expectedByteLength: 292, byteLength: null,
-        model: null, observedAt: null },
+      turnState: { byteLength: null, model: null, observedAt: null },
     },
     dataJson: "",
     dataRevision: null,
     tokenUsageRevision: null,
     root: null,
     shadow: null,
+    layout: "legacy",
+    mountContainer: null,
+    mountAnchor: null,
     resizeHandler: null,
     documentPointerHandler: null,
     pinned: false,
@@ -120,6 +122,8 @@ function installQuotaWidget(
   const conversationTurnSelector = "[data-content-search-turn-key]";
 
   const { formatContextTier, formatUnitPrice, isLightTheme, formatReset, formatExpiry, formatUpdatedAt, formatPlan, levelClass, formatContextValue, contextTokensToK, contextKToTokens, formatTokenCount, formatGenerationRate, formatFirstTokenLatency, formatMetricDuration, formatCny, formatTooltipPercent, formatExchangeRate, number, escapeHtml } = features.formatting();
+
+  const { renderQuotaChip } = features.quota_chip({ escapeHtml, number, levelClass });
 
   const { renderPanelBalance, patchPanelBalance } = features.balance({
     state,
@@ -273,38 +277,63 @@ function installQuotaWidget(
 
   const styleText = styles.styleText;
 
-  function findProfileButton() {
-    const buttons = document.querySelectorAll("button[aria-label]");
-    for (const button of buttons) {
-      const label = button.getAttribute("aria-label") ?? "";
-      if (
+  function isProfileButton(button) {
+    const label = button.getAttribute("aria-label") ?? "";
+    return button.matches("button[aria-label]") && (
         /open profile menu/i.test(label) || /打开.*个人.*菜单/.test(label) ||
         /開啟.*個人.*選單/.test(label) || /open settings/i.test(label) ||
         /打开设置/.test(label) || /開啟設定/.test(label)
-      ) return button;
+    );
+  }
+
+  function findMount() {
+    const buttons = [...document.querySelectorAll("button[aria-label]")].filter(isProfileButton);
+    const profileButton = buttons.find(button => button.closest('[data-app-navigation-rail="true"]')) ?? buttons[0];
+    if (!profileButton) return null;
+    const rail = profileButton.closest('[data-app-navigation-rail="true"]');
+    if (!rail) return { container: profileButton.parentElement, anchor: profileButton.nextSibling, layout: "legacy" };
+    let anchor = profileButton;
+    // Place the entry immediately above the profile branch in the rail's
+    // native vertical stack, retaining any accessory buttons above it.
+    while (anchor.parentElement !== rail) {
+      const parent = anchor.parentElement;
+      const style = getComputedStyle(parent);
+      if (style.display === "flex" && style.flexDirection === "column") {
+        return { container: parent, anchor, layout: "rail" };
+      }
+      anchor = parent;
     }
-    return null;
+    return { container: rail, anchor, layout: "rail" };
   }
 
   function ensureMounted() {
     ensureGlobalStyle();
-    const profileButton = findProfileButton();
-    const profileRow = profileButton?.parentElement;
-    if (!profileRow) {
+    const mount = findMount();
+    if (!mount) {
       detachRoot();
       return false;
     }
-    if (state.root?.isConnected && state.root.parentElement === profileRow) {
+    // In legacy mode the injected root is itself the profile's next sibling.
+    if (state.root && mount.anchor === state.root) mount.anchor = state.root.nextSibling;
+    const layoutChanged = state.layout !== mount.layout;
+    state.layout = mount.layout;
+    state.mountContainer = mount.container;
+    state.mountAnchor = mount.anchor;
+    if (state.root) {
+      state.root.setAttribute("data-layout", mount.layout);
+      if (state.root.parentElement !== mount.container || state.root.nextSibling !== mount.anchor) {
+        mount.container.insertBefore(state.root, mount.anchor);
+      }
       const wrap = state.shadow?.querySelector(".quota-wrap");
       wrap?.classList.toggle("is-light", isLightTheme());
+      if (layoutChanged) render({ background: true });
       if (wrap) positionPopover(wrap);
       return true;
     }
-    detachRoot();
     document.getElementById(ROOT_ID)?.remove();
     const root = document.createElement("span");
     root.id = ROOT_ID;
-    root.style.marginLeft = "auto";
+    root.setAttribute("data-layout", mount.layout);
     root.setAttribute("data-codex-quota-injector", `v${VERSION}`);
     const shadow = root.attachShadow({ mode: "open" });
     const style = document.createElement("style");
@@ -312,7 +341,7 @@ function installQuotaWidget(
     const wrap = document.createElement("span");
     wrap.className = "quota-wrap";
     shadow.append(style, wrap);
-    profileButton.after(root);
+    mount.container.insertBefore(root, mount.anchor);
     state.root = root;
     state.shadow = shadow;
     render();
@@ -339,8 +368,13 @@ function installQuotaWidget(
       .filter(Boolean)
       .join(" · ");
     const footerTitle = injectionRuntime?.title ? ` title="${injectionRuntime.title}"` : "";
+    const update = state.data.appUpdate;
+    const opening = state.appUpdateOpening || update?.opening;
+    const versionHtml = update?.available
+      ? `<button class="app-update-open" type="button" ${opening ? 'disabled aria-busy="true"' : ""}>${opening ? "正在打开更新窗口…" : `${appVersion ? `v${appVersion} → ` : ""}v${escapeHtml(update.version)}`}</button>`
+      : `<span class="panel-version-text"${footerTitle}>${footerMeta}</span>`;
     return footerMeta
-      ? `<div class="panel-version">${balanceHtml}<span class="panel-version-text"${footerTitle}>${footerMeta}</span></div>`
+      ? `<div class="panel-version">${balanceHtml}${versionHtml}${update?.error ? `<span class="app-update-error" role="alert">${escapeHtml(update.error)}</span>` : ""}</div>`
       : "";
   }
 
@@ -381,6 +415,7 @@ function installQuotaWidget(
     if (!footer?.isEqualNode(nextFooter)) {
       if (footer) footer.replaceWith(...(nextFooter ? [nextFooter] : []));
       else if (nextFooter) wrap.querySelector(".panel-scroll").append(nextFooter);
+      if (nextFooter) bindGeneralEvents(nextFooter);
     }
   }
 
@@ -399,28 +434,8 @@ function installQuotaWidget(
     const accounts = Array.isArray(state.data.accounts) ? state.data.accounts : [];
     const currentAccount = accounts.find((a) => a.current) ?? accounts[0] ?? null;
     const currentCredits = currentAccount?.credits ?? state.data.credits ?? null;
-    const hasPositiveBalance = Boolean(
-      currentCredits && (
-        currentCredits.unlimited ||
-        (Number(currentCredits.usdAmount) > 0) ||
-        (Number(currentCredits.creditQuantity) > 0)
-      )
-    );
-    const chipBalanceText = hasPositiveBalance
-      ? (currentCredits.unlimited
-          ? "无限"
-          : (currentCredits.formattedUsd ?? (Number.isFinite(currentCredits.creditQuantity) ? `${currentCredits.creditQuantity} 点` : "")))
-      : "";
     const windows = Array.isArray(state.data.windows) ? state.data.windows : [];
-    const chipItems = [];
-    if (windows.length) {
-      chipItems.push(...windows.map((quota) => `<span class="quota-chip-item ${levelClass(quota.remainingPercent)}">${number(quota.remainingPercent)}%</span>`));
-    } else {
-      chipItems.push('<span class="quota-chip-item">--</span>');
-    }
-    if (chipBalanceText) {
-      chipItems.push(`<span class="quota-chip-item quota-chip-balance">${escapeHtml(chipBalanceText)}</span>`);
-    }
+    const quotaChip = renderQuotaChip(currentCredits, windows, state.layout);
     const hostHealth = state.data.hostHealth ?? { required: false, status: "direct" };
     const healthStatus = presentHostHealth(hostHealth).status;
     const healthIndicator = healthStatus === "degraded"
@@ -428,7 +443,7 @@ function installQuotaWidget(
       : ["starting", "unconfirmed"].includes(healthStatus)
         ? '<span class="host-health-dot" aria-hidden="true"></span>'
         : "";
-    const chip = `${healthIndicator}${chipItems.join('<span class="quota-divider">·</span>')}`;
+    const chip = `${healthIndicator}${quotaChip.html}${state.data.appUpdate?.available ? '<span class="app-update-dot" aria-hidden="true"></span>' : ""}`;
     const chipLabel = healthStatus === "degraded" ? "任务工具异常；查看账号额度与诊断"
       : healthStatus === "unconfirmed" ? "任务工具状态待确认；查看账号额度与诊断" : "查看账号额度";
     const chipButton = wrap.querySelector(".quota-chip");
@@ -439,7 +454,9 @@ function installQuotaWidget(
     // A detail page does not display quota timestamps or live network samples.
     // Compare its actual inputs, not the complete app view or editable DOM.
     const chromeKey = JSON.stringify([state.data.version, state.data.injectionMode, hostHealth,
-      state.data.turnState292,
+      state.data.appUpdate,
+      state.appUpdateOpening,
+      state.data.turnState,
       state.hostHealthDetailsThread]);
     const common = JSON.stringify([state.page, state.data.operation]);
     const pageData = state.page === "context" ? state.data.context
@@ -591,7 +608,23 @@ function installQuotaWidget(
     }
     // This observer already covers the whole document. A second observer on
     // the conversation and a per-frame root search only duplicate its work.
-    if (state.root?.isConnected || state.mountCheckFrame != null) return;
+    if (state.mountCheckFrame != null) return;
+    const mountValid = state.root?.isConnected && state.root.parentElement === state.mountContainer &&
+      state.root.nextSibling === state.mountAnchor && state.mountAnchor?.isConnected !== false;
+    const mountChanged = !mountValid || mutations.some(mutation => {
+      if (mutation.type === "attributes") {
+        return mutation.attributeName === "data-app-navigation-rail" ||
+          (mutation.attributeName === "aria-label" && (isProfileButton(mutation.target) ||
+            mutation.target.parentElement === state.mountContainer || state.mountAnchor?.contains(mutation.target)));
+      }
+      return [...mutation.addedNodes, ...mutation.removedNodes].some(node => {
+        if (node.nodeType !== Node.ELEMENT_NODE || node.closest?.(`#${ROOT_ID}`)) return false;
+        return node.matches?.("[data-app-navigation-rail]") ||
+          node.querySelector?.("[data-app-navigation-rail]") || isProfileButton(node) ||
+          [...node.querySelectorAll("button[aria-label]")].some(isProfileButton);
+      });
+    });
+    if (!mountChanged) return;
     state.mountCheckFrame = window.requestAnimationFrame(() => {
       state.mountCheckFrame = null;
       ensureMounted();
@@ -601,7 +634,7 @@ function installQuotaWidget(
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["data-content-search-turn-key"],
+    attributeFilter: ["data-content-search-turn-key", "data-app-navigation-rail", "aria-label"],
   });
   // Theme changes need no data revision and must not rebuild an active form.
   const themeQuery = window.matchMedia?.("(prefers-color-scheme: light)");
@@ -637,6 +670,8 @@ function installQuotaWidget(
       state.dataRevision = revision;
       if (data && Object.prototype.hasOwnProperty.call(data, "tokenUsage")) state.tokenUsageRevision = revision;
       state.data = { ...state.data, ...data };
+      if (data?.appUpdate?.requestId && data.appUpdate.requestId === state.appUpdateRequestId &&
+          data.appUpdate.opening === false) state.appUpdateOpening = false;
       ensureMounted();
       if (data && Object.prototype.hasOwnProperty.call(data, "extraModels")) {
         patchExtraModelsDom(data.extraModels, { clearDraftOperation: true });

@@ -84,10 +84,8 @@ function parseLinuxProcessStartTicks(statText) {
 }
 
 function shouldPublishHostState(_args, environment = process.env) {
-  // Only the desktop launch bridge owns these process-global files. Auxiliary
-  // app-servers are not guaranteed to retain their parent's --listen argument;
-  // inferring ownership from argv lets a short-lived task replace the desktop
-  // Relay PID and leave host health permanently stale after it exits.
+  // Backends launched through the desktop bridge publish independent instance
+  // records. Do not infer bridge membership from optional --listen arguments.
   return String(environment?.[PRIMARY_APP_SERVER_ENV] ?? "").trim() === "1";
 }
 

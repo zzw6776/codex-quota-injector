@@ -11,7 +11,7 @@ async function fixture(t) {
   const hostHealth = await createHostHealthTracker({ path: null });
   const sent = [], timers = new Set();
   const state = { hostHealth, pendingRequests: new Map(), sendUpstream: message => sent.push(message),
-    setHostToolTimer(fn) { timers.add(fn); return fn; }, clearHostToolTimer(fn) { timers.delete(fn); } };
+    setHostToolTimer(fn, delay) { fn.delay = delay; timers.add(fn); return fn; }, clearHostToolTimer(fn) { timers.delete(fn); } };
   t.after(async () => { closeHostToolChecks(state); await hostHealth.close({ disconnected: false }); });
   return { state, sent, timers, ready(threadId) {
     hostHealth.observeStartupStatus({ name: "codex_app", status: "ready", threadId });
@@ -65,6 +65,165 @@ test("[LCH-04] 超时仅未确认，同代迟到成功恢复，重试只补未�
   assert.equal(sent[8].params.tool, "get_usage_limits");
   assert.doesNotMatch(JSON.stringify(state.hostHealth.snapshot()), /private-secret/);
 });
+
+const notMaterialized = "thread task is not materialized yet; thread/turns/list is unavailable before first user message";
+
+function notify(state, method, params) {
+  state.threadContexts ??= new Map(); state.turnModels ??= new Map(); state.emitUsageEvent ??= () => {};
+  const line = JSON.stringify({ method, params });
+  assert.equal(rewriteServerLine(line, state), line);
+}
+function userMessage(state, threadId = "task") {
+  notify(state, "item/completed", { threadId, item: { id: "user-1", type: "userMessage", content: [] } });
+}
+function finishInitialRead(sent, reply) {
+  const read = sent.find(request => request.params.tool === "read_thread");
+  sent.filter(request => request !== read).forEach(request => reply(request));
+  reply(read, null, { message: notMaterialized });
+}
+function fireRetry(timers) {
+  const timer = [...timers].find(fn => fn.delay < 15_000);
+  assert.ok(timer, "应存在退避计时器");
+  timers.delete(timer); timer();
+}
+
+test("[LCH-04] 回合开始不能证明可读，用户消息完成后只补测 read_thread", async t => {
+  const { state, sent, ready, reply } = await fixture(t);
+  ready("task"); finishInitialRead(sent, reply);
+  assert.equal(state.hostHealth.snapshot("task").code, "awaiting-first-user-message");
+  notify(state, "turn/started", { threadId: "task", turn: { id: "first-turn" } });
+  state.pendingRequests.set("first-turn", { method: "turn/start", threadId: "task", modelRevision: 0 });
+  const response = JSON.stringify({ id: "first-turn", result: { turn: { id: "turn-1" } } });
+  assert.equal(rewriteServerLine(response, state), response);
+  assert.equal(sent.length, 4, "turn/start 响应和 turn/started 均不能过早补测");
+  userMessage(state, "other");
+  notify(state, "item/completed", { threadId: "task", item: { type: "agentMessage" } });
+  assert.equal(sent.length, 4);
+  userMessage(state);
+  assert.equal(sent.length, 5);
+  assert.equal(sent[4].params.tool, "read_thread");
+  userMessage(state);
+  assert.equal(sent.length, 5, "重复通知不能重复派发");
+  reply(sent[4]);
+  assert.equal(state.hostHealth.snapshot("task").toolsVerified, true);
+});
+
+test("[LCH-04] 用户消息先于旧探针结果，补测的其他错误立即保留", async t => {
+  const { state, sent, ready, reply, timers } = await fixture(t);
+  ready("task"); userMessage(state);
+  assert.equal(sent.length, 4, "旧探针仍在途时不重复派发");
+  finishInitialRead(sent, reply);
+  assert.equal(sent.length, 5);
+  reply(sent[4], null, { message: "Permission denied" });
+  userMessage(state);
+  assert.equal(state.hostHealth.snapshot("task").status, "degraded");
+  assert.equal(sent.length, 5);
+  assert.equal(timers.size, 0);
+});
+
+test("[LCH-04] 用户消息完成后仍未落盘，退避后自动恢复且不重测成功项", async t => {
+  const { state, sent, ready, reply, timers } = await fixture(t);
+  ready("task"); finishInitialRead(sent, reply); userMessage(state);
+  reply(sent[4], null, { message: notMaterialized });
+  assert.equal(state.hostHealth.snapshot("task").code, "awaiting-thread-readable");
+  userMessage(state);
+  assert.equal(timers.size, 1);
+  fireRetry(timers);
+  reply(sent[5], null, { message: notMaterialized });
+  fireRetry(timers);
+  reply(sent[6]);
+  assert.equal(state.hostHealth.snapshot("task").status, "ready");
+  assert.equal(timers.size, 0);
+  assert.ok(sent.slice(4).every(x => x.params.tool === "read_thread"));
+});
+
+test("[LCH-04] 未落盘持续存在时有界停止，重复用户消息不能重置重试预算", async t => {
+  const { state, sent, ready, reply, timers } = await fixture(t);
+  ready("task"); finishInitialRead(sent, reply); userMessage(state);
+  for (let i = 4; i < 8; i++) {
+    reply(sent[i], null, { message: notMaterialized });
+    userMessage(state);
+    if (i < 7) fireRetry(timers);
+  }
+  assert.equal(sent.length, 8);
+  assert.equal(timers.size, 0);
+  assert.equal(state.hostHealth.snapshot("task").status, "unconfirmed");
+  requestCodexAppToolsStatus(state, "task", { retry: true });
+  reply(sent[8]);
+  assert.equal(state.hostHealth.snapshot("task").toolsVerified, true, "仍允许用户主动检查");
+});
+
+test("[LCH-04] 其他读取错误不因用户消息自动重试", async t => {
+  const { state, sent, ready, reply } = await fixture(t);
+  ready("task");
+  const read = sent.find(request => request.params.tool === "read_thread");
+  sent.filter(request => request !== read).forEach(request => reply(request));
+  reply(read, null, { message: "Permission denied" });
+  userMessage(state);
+  assert.equal(sent.length, 4);
+  assert.equal(state.hostHealth.snapshot("task").status, "degraded");
+});
+
+test("[LCH-04] 用户消息早于工具就绪时保留触发事实，不提前派发", async t => {
+  const { state, sent, ready, reply } = await fixture(t);
+  userMessage(state);
+  assert.equal(sent.length, 0);
+  assert.equal(state.hostHealth.snapshot("task").serverStatus, "notStarted");
+  ready("task"); finishInitialRead(sent, reply);
+  assert.equal(sent.length, 5);
+  reply(sent[4]);
+  assert.equal(state.hostHealth.snapshot("task").status, "ready");
+});
+
+for (const action of ["restart", "reload", "close", "manual", "timeout"]) {
+  test(`[LCH-04] 退避期间 ${action} 不遗留或重复派发旧重试`, async t => {
+    const { state, sent, ready, reply, timers } = await fixture(t);
+    ready("task"); finishInitialRead(sent, reply); userMessage(state);
+    reply(sent[4], null, { message: notMaterialized });
+    const oldTimer = [...timers][0];
+    if (action === "restart") {
+      notify(state, "mcpServer/startupStatus/updated", { name: "codex_app", threadId: "task", status: "starting" });
+      assert.equal(timers.size, 0);
+      oldTimer();
+      assert.equal(sent.length, 5);
+      ready("task");
+      sent.slice(5).forEach(x => reply(x));
+      assert.equal(state.hostHealth.snapshot("task").status, "ready");
+    } else if (action === "reload" || action === "close") {
+      if (action === "reload") requestCodexAppToolsReload(state);
+      else closeHostToolChecks(state);
+      const count = sent.length;
+      oldTimer();
+      assert.equal(sent.length, count);
+      assert.equal(timers.has(oldTimer), false);
+      if (action === "reload") {
+        reply(sent[5], {});
+        ready("task");
+        const initial = sent.slice(6);
+        const read = initial.find(x => x.params.tool === "read_thread");
+        initial.filter(x => x !== read).forEach(x => reply(x));
+        reply(read, null, { message: notMaterialized });
+        assert.equal(sent.length, 11, "MCP 重载不能遗忘已观察到的用户消息");
+        reply(sent[10]);
+        assert.equal(state.hostHealth.snapshot("task").status, "ready");
+      }
+    } else {
+      requestCodexAppToolsStatus(state, "task", { retry: true });
+      assert.equal(timers.has(oldTimer), false);
+      if (action === "timeout") {
+        const pending = state.pendingRequests.get(sent[5].id);
+        timers.delete(pending.timer); pending.timer();
+        oldTimer();
+        assert.equal(state.hostHealth.snapshot("task").status, "unconfirmed");
+      } else {
+        reply(sent[5]); oldTimer();
+        assert.equal(state.hostHealth.snapshot("task").status, "ready");
+      }
+      assert.equal(sent.length, 6);
+      assert.equal(timers.size, 0);
+    }
+  });
+}
 
 test("[LCH-04] 重试后旧响应和重连前响应不能覆盖更新的检查", async t => {
   const { state, sent, ready, reply } = await fixture(t);

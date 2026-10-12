@@ -54,7 +54,7 @@ test("正常连接与检查进度仅进浮窗，超时和调用失败仍提醒",
 
 test("按钮分别发送检查、目录诊断和重载动作并绑定任务，详情操作不调用工具", () => {
   const listeners = new Map(), actions = [];
-  const state = { data: { hostHealth: { threadId: "task" } } };
+  const state = { data: { hostHealth: { threadId: "task", sessionId: "session" } } };
   let renders = 0;
   const panel = createPanel({ state, enqueue: x => actions.push(x), render: options => {
     assert.deepEqual(options, { background: true });
@@ -68,7 +68,7 @@ test("按钮分别发送检查、目录诊断和重载动作并绑定任务，�
   for (const name of ["recheck", "reload", "diagnose"]) {
     listeners.get(`.host-health-${name}:click`)({ currentTarget: {} });
   }
-  assert.deepEqual(actions, ["recheck", "reload", "diagnose"].map(name => ({ type: `host-health-${name}`, threadId: "task" })));
+  assert.deepEqual(actions, ["recheck", "reload", "diagnose"].map(name => ({ type: `host-health-${name}`, threadId: "task", sessionId: "session" })));
   listeners.get(".host-health-details:click")();
   assert.equal(state.hostHealthDetailsThread, "task");
   assert.equal(actions.length, 3);
@@ -78,26 +78,29 @@ test("按钮分别发送检查、目录诊断和重载动作并绑定任务，�
   assert.equal(renders, 2);
 });
 
-test("任务状态旁按当前任务显示 292、非 292 与未观察状态", () => {
-  const state = { data: { hostHealth: { status: "ready" }, turnState292: {
-    status: "match", expectedByteLength: 292, byteLength: 292,
+test("任务状态旁直接显示当前任务的长度，不比较目标值", () => {
+  const state = { data: { hostHealth: { status: "ready" }, turnState: {
+    byteLength: 292,
     model: "gpt-5.6-sol", observedAt: 123,
   } } };
   const widget = createHostHealth({ state, escapeHtml: String, formatUpdatedAt: value => `at-${value}` });
   let controls = widget.renderPanelControls();
-  assert.match(controls, /turn-state-status match[^>]*>292<\/span>/);
-  assert.match(controls, /x-codex-turn-state：292 字节（符合）/);
+  assert.match(controls, /turn-state-status"[^>]*>292<\/span>/);
+  assert.match(controls, /x-codex-turn-state：292 字节/);
+  assert.doesNotMatch(controls, /符合|不等于|目标长度/);
   assert.match(controls, /gpt-5\.6-sol/);
 
-  state.data.turnState292 = { status: "mismatch", expectedByteLength: 292,
-    byteLength: 312, model: "gpt-6-astra", observedAt: 456 };
+  state.data.turnState = {
+    byteLength: 780, model: "gpt-6-astra", observedAt: 456 };
   controls = widget.renderPanelControls();
-  assert.match(controls, /turn-state-status mismatch[^>]*>≠292<\/span>/);
-  assert.match(controls, /x-codex-turn-state：312 字节（不等于 292）/);
+  assert.match(controls, /turn-state-status"[^>]*>780<\/span>/);
+  assert.match(controls, /x-codex-turn-state：780 字节/);
+  assert.doesNotMatch(controls, /≠|不等于|目标长度/);
 
-  state.data.turnState292 = { status: "unknown", expectedByteLength: 292,
+  state.data.turnState = {
     byteLength: null, model: null, observedAt: null };
   controls = widget.renderPanelControls();
-  assert.match(controls, /turn-state-status unknown[^>]*>--<\/span>/);
+  assert.match(controls, /turn-state-status"[^>]*>--<\/span>/);
   assert.match(controls, /尚未观察到当前任务/);
+  assert.doesNotMatch(controls, /目标长度/);
 });

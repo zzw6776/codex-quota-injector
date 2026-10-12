@@ -1,22 +1,31 @@
 import { randomUUID } from "node:crypto";
 import { REQUIRED_CODEX_APP_TOOLS } from "../host-health.mjs";
-import { hostToolArguments } from "../host-tool-probes.mjs";
+import { hostToolArguments, isThreadNotMaterialized } from "../host-tool-probes.mjs";
 import { MCP_CONFIG_RELOAD_METHOD, HOST_TOOL_RELOAD_TIMEOUT_MS, MCP_STATUS_LIST_METHOD } from "./contract.mjs";
 import { rememberPendingRequest } from "./thread-context.mjs";
 
 export const MCP_TOOL_CALL_METHOD = "mcpServer/tool/call";
 const MAX_ACTIVE_PROBES = 8;
+// Retry only the explicit pre-materialization error, after an observed user
+// message. A completed item is a trigger, not proof that history is readable.
+const READ_THREAD_RETRY_DELAYS_MS = [0, 250, 1_000, 3_000];
 
 function scheduler(state) {
-  return state.hostToolScheduler ??= { queue: new Map(), active: new Map(), closed: false };
+  return state.hostToolScheduler ??= { queue: new Map(), active: new Map(),
+    readThreadRetries: new Map(), closed: false };
 }
 
-export function requestCodexAppToolsStatus(state, threadId, { retry = false, priority = false } = {}) {
+export function requestCodexAppToolsStatus(state, threadId, { retry = false, priority = false, onlyTool = null } = {}) {
   if (!threadId || !state.hostHealth) return;
   const health = state.hostHealth.snapshot(threadId);
   if (priority) state.hostToolSelectedThread = threadId;
-  if (health.serverStatus !== "ready") return;
   const jobs = scheduler(state);
+  if (jobs.closed) return;
+  const recovery = jobs.readThreadRetries.get(threadId);
+  if (health.serverStatus !== "ready" || recovery?.revision !== state.hostHealth.statusRevision(threadId)) {
+    clearReadThreadRetry(state, threadId);
+  }
+  if (health.serverStatus !== "ready") return;
   for (const [id, job] of jobs.active) {
     if (job.revision === state.hostHealth.statusRevision(job.threadId)) continue;
     const pending = state.pendingRequests.get(id);
@@ -27,12 +36,62 @@ export function requestCodexAppToolsStatus(state, threadId, { retry = false, pri
   const revision = state.hostHealth.statusRevision(threadId);
   const allPassed = REQUIRED_CODEX_APP_TOOLS.every(tool => health.checks?.[tool]?.status === "passed");
   for (const tool of REQUIRED_CODEX_APP_TOOLS) {
+    if (onlyTool && tool !== onlyTool) continue;
     const key = `${threadId}:${tool}`;
     const check = health.checks?.[tool];
     if (check?.status === "checking" || (check && (!retry || (!allPassed && check.status === "passed")))) continue;
     jobs.queue.set(key, { key, threadId, tool, revision });
   }
   drain(state);
+}
+
+export function noteHostToolUserMessage(state, threadId) {
+  if (!threadId || !state.hostHealth) return;
+  state.hostHealth.noteUserMessage(threadId);
+  retryReadThreadAfterUserMessage(state, threadId);
+}
+
+function clearReadThreadRetry(state, threadId) {
+  const jobs = scheduler(state);
+  const recovery = jobs.readThreadRetries.get(threadId);
+  if (recovery?.timer != null) (state.clearHostToolTimer ?? clearTimeout)(recovery.timer);
+  jobs.readThreadRetries.delete(threadId);
+}
+
+function retryReadThreadAfterUserMessage(state, threadId) {
+  const jobs = scheduler(state);
+  const context = state.hostHealth.context(threadId);
+  if (jobs.closed || !context.userMessageObserved || context.state.serverStatus !== "ready") return;
+  const check = context.state.checks?.read_thread;
+  if (check?.status !== "unconfirmed" || !isThreadNotMaterialized(check.detail)) return;
+  const revision = state.hostHealth.statusRevision(threadId);
+  let recovery = jobs.readThreadRetries.get(threadId);
+  if (recovery?.revision !== revision) {
+    clearReadThreadRetry(state, threadId);
+    recovery = { revision, attempts: 0, timer: null };
+    jobs.readThreadRetries.set(threadId, recovery);
+  }
+  if (recovery.timer != null || jobs.queue.has(`${threadId}:read_thread`)) return;
+  if (recovery.attempts === READ_THREAD_RETRY_DELAYS_MS.length) {
+    state.hostHealth.setReadThreadRetryPending(threadId, false);
+    return;
+  }
+  const delay = READ_THREAD_RETRY_DELAYS_MS[recovery.attempts++];
+  state.hostHealth.setReadThreadRetryPending(threadId, true);
+  const retry = () => {
+    recovery.timer = null;
+    if (jobs.closed || jobs.readThreadRetries.get(threadId) !== recovery ||
+        revision !== state.hostHealth.statusRevision(threadId)) return;
+    const health = state.hostHealth.snapshot(threadId);
+    if (health.serverStatus !== "ready" || health.checks?.read_thread?.status !== "unconfirmed" ||
+        !isThreadNotMaterialized(health.checks.read_thread.detail)) return;
+    requestCodexAppToolsStatus(state, threadId, { retry: true, onlyTool: "read_thread" });
+  };
+  if (delay === 0) retry();
+  else {
+    recovery.timer = (state.setHostToolTimer ?? setTimeout)(retry, delay);
+    recovery.timer?.unref?.();
+  }
 }
 
 function drain(state) {
@@ -46,6 +105,13 @@ function drain(state) {
     if (!jobs.queue.delete(job.key)) continue;
     if (job.revision !== state.hostHealth.statusRevision(job.threadId) ||
         state.hostHealth.snapshot(job.threadId).serverStatus !== "ready") continue;
+    if (job.tool === "read_thread") {
+      const recovery = jobs.readThreadRetries.get(job.threadId);
+      if (recovery?.timer != null) {
+        (state.clearHostToolTimer ?? clearTimeout)(recovery.timer);
+        recovery.timer = null;
+      }
+    }
     const id = `codex-quota-tool-check-${randomUUID()}`;
     const proof = state.hostHealth.beginToolCheck(job.threadId, job.tool, id);
     jobs.active.set(id, job);
@@ -87,6 +153,7 @@ export function requestCodexAppToolsReload(state) {
   if (state.hostToolReloadInFlight) return;
   state.hostToolReloadInFlight = true;
   state.hostHealth?.observeReloadStarted();
+  for (const threadId of scheduler(state).readThreadRetries.keys()) clearReadThreadRetry(state, threadId);
   scheduler(state).queue.clear();
   const id = `codex-quota-host-tools-reload-${randomUUID()}`;
   state.hostToolReloadRequestId = id;
@@ -106,8 +173,14 @@ export function handleHostToolReloadResponse(message, pending, state) {
   (state.clearHostToolTimer ?? clearTimeout)(pending.timer);
   pending.timer = null;
   if (pending.phase === "probe") {
-    scheduler(state).active.delete(pending.requestId);
+    const jobs = scheduler(state);
+    jobs.active.delete(pending.requestId);
     state.hostHealth?.observeToolResult(message.result, message.error, pending);
+    if (pending.tool === "read_thread") {
+      if (state.hostHealth.snapshot(pending.threadId).checks?.read_thread?.status === "passed") {
+        clearReadThreadRetry(state, pending.threadId);
+      } else retryReadThreadAfterUserMessage(state, pending.threadId);
+    }
     drain(state);
     return;
   }
@@ -140,6 +213,7 @@ export function closeHostToolChecks(state) {
   jobs.closed = true;
   jobs.queue.clear();
   jobs.active.clear();
+  for (const threadId of jobs.readThreadRetries.keys()) clearReadThreadRetry(state, threadId);
   for (const pending of state.pendingRequests.values()) {
     if (pending.internalHostToolReload) (state.clearHostToolTimer ?? clearTimeout)(pending.timer);
   }

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { RELAY_STATE_VERSION } from "../relay-contract.mjs";
+import { listRelayInstances } from "../relay-instance-paths.mjs";
 import { isCodexDebugPortReady } from "../cdp-client.mjs";
 import { RELAY_PROCESS_START_TIME_TOLERANCE_MS, execFileAsync, runPowerShell, firstNonEmptyLine, delay } from "./contract.mjs";
 
@@ -65,7 +66,17 @@ async function signalWslRelayProcess(path, generation, { execFileImpl = execFile
   }
 }
 
-async function readRelayStateReadiness(path, generation, { wslNative = false, execFileImpl = execFileAsync } = {}) {
+async function readRelayStateReadiness(path, generation, options = {}) {
+  const paths = [path, ...(await listRelayInstances(path)).map(instance => instance.path)];
+  let result;
+  for (const candidate of paths) {
+    result = await readSingleRelayStateReadiness(candidate, generation, options);
+    if (result.ready) return result;
+  }
+  return result;
+}
+
+async function readSingleRelayStateReadiness(path, generation, { wslNative = false, execFileImpl = execFileAsync } = {}) {
   let state;
   try {
     state = JSON.parse(await readFile(path, "utf8"));

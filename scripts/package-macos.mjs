@@ -14,6 +14,7 @@ const executable = resolve(contents, "MacOS", "Codex Quota Injector");
 const resources = resolve(contents, "Resources");
 const worker = resolve(resources, "Codex Quota Injector Worker");
 const shimExecutable = resolve(resources, "Codex Quota Injector Shim");
+const updateWindowExecutable = resolve(resources, "Codex Quota Injector Update Window");
 const launcherSource = resolve(root, "src", "macos-launcher.swift");
 const shimSource = resolve(root, "src", "macos-codex-shim.swift");
 const launcher = resolve(root, "build", `macos-launcher-${options.architecture}`);
@@ -53,6 +54,8 @@ execFileSync("/usr/bin/xcrun", [
   shim,
 ], { stdio: "inherit" });
 await cp(shim, shimExecutable);
+execFileSync("/usr/bin/xcrun", ["swiftc", "-target", `${swiftArchitecture}-apple-macos12.0`, "-O",
+  resolve(root, "src", "macos-update-window.swift"), "-o", updateWindowExecutable], { stdio: "inherit" });
 
 await cp(
   resolve(root, "assets", "AppIcon.icns"),
@@ -61,7 +64,7 @@ await cp(
 await cp(resolve(options.nodeLicense), resolve(resources, "NODE_LICENSE.txt"));
 await writeFile(resolve(contents, "Info.plist"), infoPlist(packageJson.version));
 
-execFileSync("/bin/chmod", ["755", executable, worker, shimExecutable]);
+execFileSync("/bin/chmod", ["755", executable, worker, shimExecutable, updateWindowExecutable]);
 execFileSync("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", appPath], {
   stdio: "inherit",
 });

@@ -1,5 +1,9 @@
 const WIDGET_STYLES = {
   globalStyleText: `
+    button:has(+ #codex-quota-injector-root[data-layout="legacy"]) {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
     button[aria-label*="语音聊天"],
     button[aria-label*="語音聊天"],
     button[aria-label*="voice chat" i],
@@ -17,10 +21,12 @@ const WIDGET_STYLES = {
   `,
   styleText: `
     :host { display: inline-flex; flex: 0 0 auto; align-items: center; align-self: center; margin-left: auto; height: var(--height-token-row, 29px); }
+    :host([data-layout="rail"]) { margin-left: 0; width: 36px; height: auto; }
     * { box-sizing: border-box; }
     button, input, textarea, select { font: inherit; }
     .quota-wrap { position: relative; display: inline-flex; align-items: center; align-self: center; height: var(--height-token-row, 29px); font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .quota-chip {
+      position: relative;
       appearance: none; border: 0; border-radius: var(--radius-lg, 12.5px); corner-shape: var(--codex-corner-shape, superellipse(1.5)); cursor: pointer;
       height: var(--height-token-row, 29px); min-width: 0; padding: 0; padding-inline: var(--padding-row-cell-x, var(--padding-row-x, 8px));
       display: inline-flex; align-items: center; justify-content: center; align-self: center;
@@ -34,7 +40,29 @@ const WIDGET_STYLES = {
       outline: none;
     }
     .quota-divider { opacity: .42; font-weight: 400; }
+    .app-update-dot { position:absolute;top:1px;right:1px;width:5px;height:5px;border-radius:50%;background:#43a665;pointer-events:none; }
+    :host([data-layout="rail"]) .quota-chip > .host-health-dot { right:auto;left:3px; }
+    .app-update-open { appearance:none;border:0;padding:2px 0;margin-left:auto;background:transparent;color:#43a665;font:inherit;cursor:pointer;white-space:nowrap; }
+    .app-update-open:hover { text-decoration:underline; }
+    .panel-version:has(.app-update-error) { flex-wrap:wrap; }
+    .app-update-error { flex-basis:100%;color:#dc4c3f;overflow-wrap:anywhere; }
     .quota-chip-item { display: inline-flex; align-items: baseline; }
+    :host([data-layout="rail"]) .quota-wrap { width: 36px; height: auto; }
+    :host([data-layout="rail"]) .quota-chip {
+      position: relative; width: 36px; height: auto; min-height: 36px; padding: 6px 1px; gap: 6px;
+      flex-direction: column; border-radius: 10px;
+      font-size: 11px; line-height: 16px;
+      color: var(--color-text-tertiary, var(--token-text-secondary, #777780));
+    }
+    :host([data-layout="rail"]) .quota-chip:hover,
+    :host([data-layout="rail"]) .quota-chip:focus-visible {
+      color: var(--color-text-primary-ghost, var(--color-text-primary, #1a1c1f));
+    }
+    :host([data-layout="rail"]) .quota-chip-item { display: block; flex: 0 0 auto; width: 100%; text-align: center; }
+    :host([data-layout="rail"]) .quota-chip-item + .quota-chip-balance {
+      padding-top: 6px; border-top: 1px solid rgba(127,127,137,.22);
+    }
+    :host([data-layout="rail"]) .quota-chip > .host-health-dot { position: absolute; top: 3px; right: 3px; width: 4px; height: 4px; }
     .host-health-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 999px; background: #d97706; box-shadow: 0 0 0 2px rgba(217,119,6,.13); }
     .host-health-dot.ready { background: #43a665; box-shadow: 0 0 0 2px rgba(67,166,101,.13); }
     .host-health-dot.degraded { background: #dc4c3f; box-shadow: 0 0 0 2px rgba(220,76,63,.14); }
@@ -89,8 +117,6 @@ const WIDGET_STYLES = {
       font: 650 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
       font-variant-numeric: tabular-nums; cursor: default;
     }
-    .turn-state-status.match { color: #71c98c; background: rgba(67,166,101,.13); }
-    .turn-state-status.mismatch { color: #ef8e86; background: rgba(220,76,63,.13); }
     .host-health-status {
       appearance: none; display: inline-flex; align-items: center; justify-content: center;
       width: 22px; height: 22px; padding: 0; border: 0; border-radius: 7px; cursor: default;
@@ -374,8 +400,6 @@ const WIDGET_STYLES = {
     .quota-wrap.is-light .host-health-check-status.unconfirmed, .quota-wrap.is-light .host-health-check-status.checking { color: #946100; }
     .quota-wrap.is-light .host-health-status:hover, .quota-wrap.is-light .host-health-status:focus-visible { background: rgba(0,0,0,.065); }
     .quota-wrap.is-light .turn-state-status { color: #6f6f79; background: rgba(138,138,149,.1); }
-    .quota-wrap.is-light .turn-state-status.match { color: #2f7f4a; background: rgba(67,166,101,.1); }
-    .quota-wrap.is-light .turn-state-status.mismatch { color: #a7352e; background: rgba(220,76,63,.09); }
     .quota-wrap.is-light .account-remove { color: #b53d35; border-color: rgba(181,61,53,.2); background: rgba(181,61,53,.045); }
     .quota-wrap.is-light .account-remove:hover { background: rgba(181,61,53,.09); }
     .quota-wrap.is-light .account-tooltip { color: #202124; background: #fff; border-color: rgba(0,0,0,.12); box-shadow: 0 6px 20px rgba(0,0,0,.12); }

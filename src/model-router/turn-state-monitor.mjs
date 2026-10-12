@@ -1,13 +1,10 @@
 import { nonEmptyString } from "./contract.mjs";
 import { turnStateSummaries } from "./turn-state.mjs";
-import { EXPECTED_CODEX_TURN_STATE_BYTES } from "../relay-contract.mjs";
 
 const MAX_TRACKED_THREADS = 256;
 
 function unknownViewModel() {
   return {
-    status: "unknown",
-    expectedByteLength: EXPECTED_CODEX_TURN_STATE_BYTES,
     byteLength: null,
     model: null,
     observedAt: null,
@@ -36,8 +33,6 @@ class CodexTurnStateMonitor {
     const state = states.at(-1);
     if (!state) return false;
     const view = {
-      status: state.byteLength === EXPECTED_CODEX_TURN_STATE_BYTES ? "match" : "mismatch",
-      expectedByteLength: EXPECTED_CODEX_TURN_STATE_BYTES,
       byteLength: state.byteLength,
       model: nonEmptyString(context.model),
       observedAt: this.clock(),
@@ -82,6 +77,5 @@ function withTurnStateObservation(observation, monitor, context) {
 
 export {
   CodexTurnStateMonitor,
-  EXPECTED_CODEX_TURN_STATE_BYTES,
   withTurnStateObservation,
 };

@@ -5,6 +5,7 @@ import test from "node:test";
 import { ROOT, startRuntime } from "./support/offline-runtime.mjs";
 import { waitFor } from "../test/helpers.mjs";
 import { successfulHostToolResult } from "../test/host-tool-fixtures.mjs";
+import { readInstanceJson } from "../test/relay-instance-fixtures.mjs";
 
 function taskToolFixture(source) {
   return source.replace('["record", "read", "fail", "ask"]', '["list_threads", "read_thread", "list_projects", "get_usage_limits"]')
@@ -26,7 +27,7 @@ for (const profile of ["direct", "shim"]) {
     const global = await r.rpc.request("mcpServerStatus/list", {});
     if (profile === "shim") {
       const health = await waitFor(async () => {
-        const state = JSON.parse(await readFile(join(r.directory, "host-health.json"), "utf8"));
+        const state = await readInstanceJson(join(r.directory, "host-health.json"));
         return state.status === "ready" ? state : null;
       });
       assert.equal(health.toolsVerified, true);
@@ -54,13 +55,13 @@ test("[LCH-04 TOOL-04] 正式 Relay 主页按需加载，进入任务后四项�
   assert.deepEqual((await r.rpc.request("mcpServerStatus/list", {})).data, []);
   await new Promise(resolve => setTimeout(resolve, 31_000));
   const healthPath = join(r.directory, "host-health.json");
-  const idle = JSON.parse(await readFile(healthPath, "utf8"));
+  const idle = await readInstanceJson(healthPath);
   assert.equal(idle.status, "idle", "主页不能因没有任务工具启动通知而误报超时");
   assert.equal(idle.toolsVerified, false);
   const { thread } = await r.thread({ ephemeral: true, config: { "mcp_servers.codex_app": server } });
   await r.rpc.event("mcpServer/startupStatus/updated", p => p.name === "codex_app" && p.status === "ready" && p.threadId === thread.id);
   const health = await waitFor(async () => {
-    const value = JSON.parse(await readFile(healthPath, "utf8"));
+    const value = await readInstanceJson(healthPath);
     return value.status === "ready" && value.threadId === thread.id ? value : null;
   });
   assert.equal(health.toolsVerified, true);
@@ -68,6 +69,6 @@ test("[LCH-04 TOOL-04] 正式 Relay 主页按需加载，进入任务后四项�
   assert.ok(Object.values(health.checks).every(check => check.status === "passed"));
   assert.deepEqual(health.missingTools, []);
   assert.deepEqual((await r.rpc.request("mcpServerStatus/list", {})).data, []);
-  assert.equal(JSON.parse(await readFile(healthPath, "utf8")).status, "ready");
+  assert.equal((await readInstanceJson(healthPath)).status, "ready");
   assert.equal(r.requests.filter(request => request.method !== "HEAD" && request.body.generate !== false).length, 0);
 });

@@ -33,6 +33,8 @@ import { delay, debugLog } from "./injector/logging.mjs";
 import { createWidgetSession } from "./injector/widget-session.mjs";
 import { createHostHealthSession } from "./injector/host-health-session.mjs";
 import { readVisibleHostTask } from "./injector/active-task.mjs";
+import { AppUpdateManager } from "./app-update/manager.mjs";
+import packageJson from "../package.json" with { type: "json" };
 
 export async function runInjector({
   port = DEFAULT_PORT,
@@ -59,6 +61,7 @@ export async function runInjector({
   registerWidgetReload = null,
   getLaunchOptions = () => null,
   openLogs = null,
+  updateManager = null,
 } = {}) {
   if (!accountManagerInitialized) await accountManager.initialize();
   if (!managersInitialized) {
@@ -130,7 +133,15 @@ export async function runInjector({
     get wakeupManager() {
       return wakeupManager;
     },
+    get appUpdate() { return appUpdateManager.getViewModel(); },
   });
+
+  const appUpdateManager = updateManager ?? new AppUpdateManager({ version: packageJson.version,
+    onChange() {
+      widgetSession.markWidgetDataDirty();
+      void widgetSession.requestWidgetUpdate().catch(error => console.error(`[update] ${error.message}`));
+    } });
+  if (!once) appUpdateManager.start();
 
   const hostHealthSession = createHostHealthSession({
     getLaunchOptions,
@@ -163,6 +174,7 @@ export async function runInjector({
     registerLaunchRecovery?.(null);
     registerWidgetReload?.(null);
     wakeupManager.close();
+    appUpdateManager.close();
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
     clearTimeout(modelCatalogRefreshTimer);
@@ -344,11 +356,16 @@ export async function runInjector({
     widgetSession.markWidgetDataDirty();
     try {
       switch (action?.type) {
+        case "app-update-open":
+          await appUpdateManager.open({ threadId: hostHealthSession.selectedTask?.threadId,
+            launchOptions: getLaunchOptions?.(), cdpPort: port, requestId: action.requestId });
+          break;
         case "host-health-recheck":
         case "host-health-diagnose":
         case "host-health-reload":
           hostHealthSession.hostHealthActionError = null;
           if (!hostHealthSession.hostHealth.canCheck ||
+              action.sessionId !== hostHealthSession.hostHealth.sessionId ||
               action.threadId !== hostHealthSession.selectedTask?.threadId ||
               hostHealthSession.selectedTask?.hostId !== "local") {
             throw new Error("当前任务已切换或检查服务尚未就绪，请重新打开详情");
@@ -357,6 +374,7 @@ export async function runInjector({
             action: action.type === "host-health-recheck" ? "check"
               : action.type === "host-health-diagnose" ? "diagnose" : "reload",
             threadId: action.threadId,
+            sessionId: action.sessionId,
           });
           hostHealthSession.lastHostHealthCheckAt = 0;
           await hostHealthSession.syncHostHealth({ force: true });

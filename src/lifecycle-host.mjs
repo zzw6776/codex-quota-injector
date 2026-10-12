@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { isCodexDebugPortReady } from "./cdp-client.mjs";
-import { evaluateHostHealth } from "./host-health.mjs";
+import { evaluateHostHealth, resolveHostHealthInstance, readHostHealthViewModel } from "./host-health.mjs";
 import {
   defaultAccountDataDir,
   isRelayStateCurrent,
@@ -64,6 +64,7 @@ export function evaluateLifecycleReadiness({
   debugReady = true,
   expectedProtocol,
   healthState = null,
+  resolvedHostHealth = null,
   threadId = null,
   now = Date.now(),
 } = {}) {
@@ -76,7 +77,7 @@ export function evaluateLifecycleReadiness({
   const singleInjector = Array.isArray(injectorPids) && injectorPids.length === 1;
   const codexRunning = Array.isArray(codexPids) && codexPids.length > 0;
   const protocolMatches = expectedProtocol == null || protocol === expectedProtocol;
-  const hostHealth = evaluateHostHealth({
+  const hostHealth = resolvedHostHealth ?? evaluateHostHealth({
     binding: {
       hostToolsRequired: relayConfig?.hostToolsRequired === true,
       generation: relayConfig?.generation,
@@ -121,7 +122,7 @@ export async function inspectLifecycleHost({
       relayConfig.hostHealthPath.trim()
     ? relayConfig.hostHealthPath
     : defaultHostHealthPath;
-  const [relayState, healthState, accountIndex, codexPids, appServerAndDesktopPids,
+  const [legacyRelayState, legacyHealthState, accountIndex, codexPids, appServerAndDesktopPids,
     injectorPids, installedVersion, debugReady] =
     await Promise.all([
       readJson(relayStatePath),
@@ -134,7 +135,17 @@ export async function inspectLifecycleHost({
       isCodexDebugPortReady(cdpPort),
     ]);
   const pair = selectLifecycleAccountPair(accountIndex);
-  const wslNative = Boolean(relayState?.bootId && relayState?.processStartTicks != null);
+  const wslNative = relayConfig?.runtimeTarget === "wsl-native" ||
+    Boolean(legacyRelayState?.bootId && legacyRelayState?.processStartTicks != null);
+  const binding = { statePath: relayStatePath, healthPath: hostHealthPath,
+    generation: relayConfig?.generation, hostToolsRequired: relayConfig?.hostToolsRequired === true, wslNative };
+  const registry = await resolveHostHealthInstance(binding, { threadId });
+  // Any live instance can prove process readiness; task readiness is resolved
+  // separately and must never inherit that representative's tool results.
+  const representative = registry.instance ?? registry.live[0];
+  const relayState = registry.scoped ? representative?.relayState : legacyRelayState;
+  const healthState = registry.scoped ? registry.instance?.healthState : legacyHealthState;
+  const resolvedHostHealth = registry.scoped ? await readHostHealthViewModel(binding, { threadId }) : null;
   const relayStateCurrent = relayConfig?.generation
     ? await isRelayStateCurrent(relayStatePath, relayConfig.generation, { wslNative })
     : false;
@@ -149,6 +160,7 @@ export async function inspectLifecycleHost({
     debugReady,
     expectedProtocol,
     healthState,
+    resolvedHostHealth,
     threadId,
   });
   const desktopPidSet = new Set(codexPids);

@@ -8,7 +8,7 @@ const official = (threadId, model = "gpt-5.6-sol") => ({
   target: { kind: "official" },
 });
 
-test("292 状态只读取官方 x-codex-turn-state，并按任务隔离且不暴露原值", () => {
+test("只读取官方 x-codex-turn-state 长度，按任务隔离且不暴露原值或目标判断", () => {
   let now = 100;
   const monitor = new CodexTurnStateMonitor({ clock: () => now++ });
   const changes = [];
@@ -24,12 +24,10 @@ test("292 状态只读取官方 x-codex-turn-state，并按任务隔离且不暴
     headers: { "x-codex-turn-state": "x".repeat(292) },
   }), true);
   assert.deepEqual(monitor.getViewModel("one"), {
-    status: "match", expectedByteLength: 292, byteLength: 292,
-    model: "gpt-5.6-sol", observedAt: 100,
+    byteLength: 292, model: "gpt-5.6-sol", observedAt: 100,
   });
   assert.deepEqual(monitor.getViewModel("two"), {
-    status: "unknown", expectedByteLength: 292, byteLength: null,
-    model: null, observedAt: null,
+    byteLength: null, model: null, observedAt: null,
   });
   assert.equal(JSON.stringify(changes).includes("x".repeat(32)), false,
     "公开状态不得包含 state 原值");
@@ -38,7 +36,7 @@ test("292 状态只读取官方 x-codex-turn-state，并按任务隔离且不暴
     headers: { "x-codex-turn-state": "短状态" },
   });
   assert.deepEqual(monitor.getViewModel("one"), {
-    status: "mismatch", expectedByteLength: 292,
     byteLength: Buffer.byteLength("短状态"), model: "gpt-6-astra", observedAt: 101,
   });
+  assert.doesNotMatch(JSON.stringify(changes), /expectedByteLength|match|mismatch/);
 });

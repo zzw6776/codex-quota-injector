@@ -95,6 +95,16 @@ macOS 支持 `/Applications/ChatGPT.app` 和旧版 `/Applications/Codex.app`。�
 
 ## 自动打包
 
+### 应用内更新
+
+注入器启动后检查 GitHub Latest 正式 Release，随后每 6 小时检查一次。有当前系统及架构的安装包时，额度入口显示小绿点，账号浮窗右下角显示绿色“v当前版本 → v目标版本”。点击后打开独立更新窗口，确认后显示下载进度、校验、任务结束与历史落盘等待、安装和正式版启动状态。成功或失败结果均保留，手动关闭窗口才结束；不会因为 Codex 重启或开发实例退出而消失。
+
+正式版只提示更高版本。dev 为测试跳过版本高低比较，只要 Latest 有匹配安装包就显示更新，可以安装同版本或更低的远端正式版；更新目标是正式应用，完成后自动打开正式版，不改开发仓库。dev 仍要求发布包 SHA-256、大小、格式和平台匹配；macOS 另核对应用标识、版本、签名与可执行架构。GitHub 检查失败保留已有候选结果，下载/校验失败不执行应用接管。更新窗口日志与状态存放在账号数据目录的 `updates/` 下。
+
+macOS 状态窗使用打包的独立 WebKit 窗口；Windows 使用独立 WinForms 窗口，并复用正式 NSIS 安装包。Windows/WSL 更新需要当前版本中继提供只读历史核验入口；无法核验活动任务或历史投影时，保留失败状态，不关闭 Codex。
+
+点击更新入口会立即显示“正在打开更新窗口…”，页面实际加载后恢复按钮。状态服务由系统分配独立本机端口，隔离实例不会争抢固定端口；启动异常记录子进程退出信息。macOS dev 启动时预编译窗口程序，相同源码和架构复用缓存，避免每次点击重新编译。
+
 GitHub Actions 工作流位于 `.github/workflows/build-packages.yml`：
 
 - 每次提交到 `master`：读取 `package.json` 版本，分别构建对应版本的 macOS arm64 DMG、macOS x64 DMG 和 Windows x64 Setup，创建或更新 `v版本号` 正式 Release、标记为 Latest，并同时上传到 Actions Artifacts；

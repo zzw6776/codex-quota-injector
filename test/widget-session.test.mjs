@@ -11,7 +11,7 @@ function fixture() {
     account: { id: "one", email: "fixture@example.test", current: true },
     models: { platforms: [] },
     usage: { status: "ready", turns: [{ turnId: "a", totalTokens: 100, updatedAt: 1 }] },
-    turnState292: { status: "match", expectedByteLength: 292, byteLength: 292,
+    turnState: { byteLength: 292,
       model: "gpt-5.6-sol", observedAt: 1 },
     stopped: false,
   };
@@ -51,7 +51,7 @@ function fixture() {
     },
     tokenUsageManager: {
       getViewModel: () => state.usage,
-      getTurnStateViewModel: () => state.turnState292,
+      getTurnStateViewModel: () => state.turnState,
     },
     wakeupManager: { getViewModel: () => null },
   });
@@ -70,7 +70,7 @@ test("网络采样只发送小包，不重传或序列化未变化的回合", as
   };
   await f.push();
   assert.ok(f.calls[0][1].tokenUsage.turns.length);
-  assert.deepEqual(f.calls[0][1].turnState292, f.state.turnState292);
+  assert.deepEqual(f.calls[0][1].turnState, f.state.turnState);
   const before = serializations;
   f.calls.length = 0;
   f.sent.length = 0;

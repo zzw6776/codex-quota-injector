@@ -4,14 +4,15 @@ import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/pro
 import { basename, dirname, join } from "node:path";
 
 import { isRelayStateCurrent, signalWslRelayProcess } from "./platform.mjs";
-import { classifyHostToolResult } from "./host-tool-probes.mjs";
+import { classifyHostToolResult, isThreadNotMaterialized } from "./host-tool-probes.mjs";
+import { listRelayInstances, relayInstancePath, relayInstanceId } from "./relay-instance-paths.mjs";
 
-export const HOST_HEALTH_STATE_VERSION = 4;
+export const HOST_HEALTH_STATE_VERSION = 5;
 export const HOST_HEALTH_STARTUP_GRACE_MS = 30_000;
 export const HOST_HEALTH_ACTIVE_POLL_MS = 3_000;
 export const HOST_HEALTH_READY_POLL_MS = 30_000;
 export const HOST_HEALTH_WATCH_DEBOUNCE_MS = 100;
-export const HOST_TOOL_RELOAD_REQUEST_VERSION = 2;
+export const HOST_TOOL_RELOAD_REQUEST_VERSION = 3;
 export const REQUIRED_CODEX_APP_TOOLS = Object.freeze([
   "list_threads",
   "read_thread",
@@ -35,17 +36,27 @@ export async function requestHostToolReload(binding, {
   now = Date.now(),
   action = "reload",
   threadId = null,
+  sessionId = null,
 } = {}, {
   signalWslRelay = signalWslRelayProcess,
+  relayStateChecker = isRelayStateCurrent,
 } = {}) {
-  const healthPath = String(binding?.healthPath ?? "").trim();
-  const statePath = String(binding?.statePath ?? "").trim();
+  let healthPath = String(binding?.healthPath ?? "").trim();
+  let statePath = String(binding?.statePath ?? "").trim();
   const generation = String(binding?.generation ?? "").trim();
   if (!binding?.hostToolsRequired || !healthPath || !generation) {
     throw new Error("当前启动入口没有可重载的 Codex 任务工具中继");
   }
   if (binding.wslNative === true && !statePath) {
     throw new Error("当前 WSL 任务工具中继缺少进程状态路径");
+  }
+  if (binding.instanceScoped || sessionId) {
+    const selected = await resolveHostHealthInstance(binding, { threadId, relayStateChecker });
+    if (!sessionId || selected.instance?.sessionId !== sessionId) {
+      throw new Error("任务所属后台已变化或尚未确认，请重新打开详情");
+    }
+    healthPath = selected.instance.healthPath;
+    statePath = selected.instance.statePath;
   }
   const normalizedRequestId = String(requestId ?? "").trim();
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(normalizedRequestId)) {
@@ -68,6 +79,7 @@ export async function requestHostToolReload(binding, {
       requestedAt: Number(now) || Date.now(),
       action,
       threadId,
+      sessionId,
     }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await rename(temporaryPath, path);
     published = true;
@@ -84,7 +96,7 @@ export async function requestHostToolReload(binding, {
   return { requestId: normalizedRequestId, path };
 }
 
-export function watchHostToolReloadRequests({ healthPath, generation } = {}, {
+export function watchHostToolReloadRequests({ healthPath, generation, sessionId = null } = {}, {
   onRequest = () => {},
   onError = () => {},
   watchImpl = watchFs,
@@ -141,6 +153,7 @@ export function watchHostToolReloadRequests({ healthPath, generation } = {}, {
           await unlink(path).catch(() => undefined);
         }
         if (request?.version !== HOST_TOOL_RELOAD_REQUEST_VERSION ||
+          (sessionId != null && request?.sessionId !== sessionId) ||
           request?.generation !== normalizedGeneration ||
           !/^[A-Za-z0-9_-]{8,128}$/.test(String(request?.requestId ?? ""))) continue;
         if (!["reload", "check", "diagnose", "select"].includes(request.action) ||
@@ -247,7 +260,8 @@ export function watchHostHealthFiles(binding, {
         directory,
         { persistent: false },
         (_eventType, fileName) => {
-          if (fileName && !names.has(String(fileName))) return;
+          if (fileName && !names.has(String(fileName)) &&
+              ![...names].some(name => relayInstanceId(name, String(fileName)))) return;
           schedule();
         },
       );
@@ -268,6 +282,7 @@ export async function createHostHealthTracker({
   generation,
   runtimeTarget,
   processIdentity = {},
+  sessionId = randomUUID(),
   claim = true,
   requiredTools = REQUIRED_CODEX_APP_TOOLS,
   graceMs = HOST_HEALTH_STARTUP_GRACE_MS,
@@ -280,6 +295,7 @@ export async function createHostHealthTracker({
     generation,
     runtimeTarget,
     processIdentity,
+    sessionId,
     requiredTools,
     graceMs,
     now,
@@ -296,6 +312,7 @@ class HostHealthTracker {
     generation,
     runtimeTarget,
     processIdentity,
+    sessionId,
     requiredTools,
     graceMs,
     now,
@@ -308,7 +325,7 @@ class HostHealthTracker {
     this.clearTimer = clearTimer;
     this.graceMs = Math.max(0, Number(graceMs) || 0);
     this.requiredTools = normalizeToolNames(requiredTools);
-    this.sessionId = randomUUID();
+    this.sessionId = sessionId;
     this.contexts = new Map();
     this.revision = 0;
     this.tail = Promise.resolve();
@@ -348,7 +365,8 @@ class HostHealthTracker {
           message: "任务工具按需加载，进入任务后自动核验", detail: null,
           serverStatus: "notStarted", threadId, requiredTools: this.requiredTools,
           missingTools: [], toolsVerified: false, checks: {}, diagnostic: null, updatedAt: this.now() },
-        startupStatus: null, timer: null, revision: this.revision,
+        startupStatus: null, timer: null, revision: this.revision, userMessageObserved: false,
+        readThreadRetryPending: false,
       });
     }
     return this.contexts.get(threadId);
@@ -369,6 +387,13 @@ class HostHealthTracker {
   }
 
   observeServerMessage(message) {
+    const observedThread = message?.params?.threadId;
+    if (observedThread && ["turn/started", "item/completed"].includes(message.method)) this.noteTask(observedThread);
+    if (message?.method === "thread/closed" && observedThread) {
+      const context = this.context(observedThread);
+      context.observed = false;
+      void this.persist();
+    }
     if (message?.method === STARTUP_STATUS_METHOD) this.observeStartupStatus(message.params);
     const item = message?.params?.item;
     const threadId = message?.params?.threadId;
@@ -393,6 +418,7 @@ class HostHealthTracker {
     const serverStatus = String(params?.status ?? "").trim();
     const threadId = typeof params?.threadId === "string" ? params.threadId : null;
     const context = this.context(threadId);
+    if (threadId) context.observed = true;
     if (serverStatus === "ready" && context.startupStatus === "ready") return;
     context.startupStatus = serverStatus;
     if (serverStatus === "ready") {
@@ -410,6 +436,7 @@ class HostHealthTracker {
     }
     if (["starting", "failed", "cancelled"].includes(serverStatus)) {
       context.revision = ++this.revision;
+      context.readThreadRetryPending = false;
       this.clearGraceTimer(context);
       context.state.checks = {};
       context.state.diagnostic = null;
@@ -430,6 +457,7 @@ class HostHealthTracker {
     if (!this.requiredTools.includes(tool) || ["failed", "cancelled", "starting"].includes(context.startupStatus)) return null;
     const proof = { threadId, tool, requestId, healthRevision: context.revision, targetThreadId,
       startedAt: this.now() };
+    if (tool === "read_thread") context.readThreadRetryPending = false;
     context.state.checks = { ...context.state.checks,
       [tool]: { status: "checking", requestId, startedAt: proof.startedAt, checkedAt: null, detail: null } };
     this.clearGraceTimer(context);
@@ -452,16 +480,52 @@ class HostHealthTracker {
     this.updateCheckSummary(context);
   }
 
+  noteUserMessage(threadId) {
+    const context = this.context(threadId);
+    context.userMessageObserved = true;
+  }
+
+  noteTask(threadId) {
+    if (!threadId) return;
+    const context = this.context(threadId);
+    if (context.observed) return;
+    context.observed = true;
+    if (context.state.status === "idle") {
+      context.state = { ...context.state, status: "starting", code: "awaiting-task-tools",
+        message: "等待当前任务工具启动", updatedAt: this.now() };
+      this.armGraceTimer(context);
+    }
+    void this.persist();
+  }
+
+  ownsTask(threadId) { return this.contexts.get(threadId)?.observed === true; }
+
+  setReadThreadRetryPending(threadId, pending) {
+    const context = this.context(threadId);
+    context.readThreadRetryPending = pending;
+    this.updateCheckSummary(context);
+  }
+
   updateCheckSummary(context) {
     const checks = this.requiredTools.map(tool => context.state.checks?.[tool]);
     const passed = checks.filter(check => check?.status === "passed").length;
     const failed = checks.filter(check => check?.status === "failed").length;
     const checking = checks.some(check => !check || check.status === "checking");
     const ready = passed === checks.length;
-    void this.update({ status: ready ? "ready" : failed ? "degraded" : checking ? "starting" : "unconfirmed",
-      code: ready ? null : failed ? "tool-call-failed" : checking ? "tool-checking" : "tool-check-unconfirmed",
+    const awaitingReadThread = (!context.userMessageObserved || context.readThreadRetryPending) && !checking && !failed &&
+      this.requiredTools.every(tool => {
+        const check = context.state.checks?.[tool];
+        return check?.status === "passed" ||
+          (tool === "read_thread" && check?.status === "unconfirmed" &&
+            isThreadNotMaterialized(check.detail));
+      });
+    void this.update({ status: ready ? "ready" : failed ? "degraded" : checking || awaitingReadThread ? "starting" : "unconfirmed",
+      code: ready ? null : failed ? "tool-call-failed" : checking ? "tool-checking"
+        : awaitingReadThread ? (context.userMessageObserved ? "awaiting-thread-readable" : "awaiting-first-user-message") : "tool-check-unconfirmed",
       message: ready ? `${passed} 项任务工具检查通过` : failed ? `${passed} 项通过，${failed} 项异常`
-        : checking ? `检查中：已通过 ${passed}/${checks.length} 项` : `${passed} 项通过，${checks.length - passed} 项未确认`,
+        : checking ? `检查中：已通过 ${passed}/${checks.length} 项`
+          : awaitingReadThread ? (context.userMessageObserved ? "等待任务内容可读取，正在自动重试" : "等待任务首条消息后自动检查读取任务内容")
+            : `${passed} 项通过，${checks.length - passed} 项未确认`,
       toolsVerified: ready, verification: "calls", missingTools: [], detail: null,
     }, context);
   }
@@ -489,7 +553,13 @@ class HostHealthTracker {
   }
 
   observeReloadStarted() {
+    // Reloading MCP invalidates tool proof, not already observed user input.
+    const observedThreads = [...this.contexts].filter(([, context]) => context.userMessageObserved)
+      .map(([threadId]) => threadId);
+    const ownedThreads = [...this.contexts].filter(([, context]) => context.observed).map(([id]) => id);
     this.resetContexts();
+    for (const threadId of ownedThreads) this.noteTask(threadId);
+    for (const threadId of observedThreads) this.noteUserMessage(threadId);
     void this.update({ status: "starting", code: "reloading-codex-app",
       message: "正在重新加载 Codex 任务工具", toolsVerified: false,
       missingTools: [], detail: null, serverStatus: "starting" });
@@ -524,7 +594,7 @@ class HostHealthTracker {
   snapshot(threadId) {
     if (threadId !== undefined) return structuredClone(this.context(threadId).state);
     return structuredClone({ ...this.state, tasks: Object.fromEntries(
-      [...this.contexts].filter(([id]) => id != null).map(([id, context]) => [id, context.state]),
+      [...this.contexts].filter(([id]) => id != null).map(([id, context]) => [id, { ...context.state, observed: context.observed === true }]),
     ) });
   }
 
@@ -639,12 +709,46 @@ export function classifyCodexAppStatus(entry, requiredTools = REQUIRED_CODEX_APP
   };
 }
 
+export async function resolveHostHealthInstance(binding, {
+  threadId = null, relayStateChecker = isRelayStateCurrent,
+} = {}) {
+  const files = await listRelayInstances(binding?.statePath);
+  const entries = await Promise.all(files.map(async ({ sessionId, path: statePath }) => {
+    const path = relayInstancePath(binding.healthPath, sessionId);
+    const [relayState, healthState] = await Promise.all([readJson(statePath), readJson(path)]);
+    if (!relayState || !healthState || healthState.sessionId !== sessionId ||
+        healthState.generation !== binding.generation || relayState.generation !== binding.generation ||
+        healthState.pid !== relayState.pid || healthState.processStartedAt !== relayState.processStartedAt) return null;
+    const live = await Promise.resolve(relayStateChecker(statePath, binding.generation,
+      { wslNative: binding.wslNative === true })).catch(() => false);
+    return live ? { sessionId, statePath, healthPath: path, relayState, healthState } : null;
+  }));
+  const live = entries.filter(Boolean);
+  const owners = threadId ? live.filter(entry => entry.healthState.tasks?.[threadId]?.observed === true) : live;
+  return { scoped: binding?.instanceScoped === true || files.length > 0,
+    instance: owners.length === 1 ? owners[0] : null, live, ambiguous: owners.length > 1 };
+}
+
 export async function readHostHealthViewModel(binding, {
   now = Date.now(),
   relayStateChecker = isRelayStateCurrent,
   threadId = null,
+  waitingSince = 0,
 } = {}) {
   if (!binding?.hostToolsRequired) return directHostHealth();
+  const selected = await resolveHostHealthInstance(binding, { threadId, relayStateChecker });
+  if (selected.scoped) {
+    if (selected.instance) return evaluateHostHealth({ binding,
+      ...selected.instance, relayCurrent: true, now, threadId });
+    const waiting = !selected.ambiguous && now - waitingSince < HOST_HEALTH_STARTUP_GRACE_MS;
+    return { required: true, status: threadId ? (waiting ? "starting" : "unconfirmed") : "idle",
+      code: selected.ambiguous ? "task-owner-ambiguous" : "task-owner-missing",
+      message: !threadId ? "选择本机任务后自动检查任务工具" : selected.ambiguous
+        ? "多个后台报告同一任务，尚未确认任务所属服务"
+        : waiting ? "正在确认任务所属服务" : "尚未确认任务所属服务，等待新的任务状态通知",
+      canCheck: false, canRestart: true, canOpenLogs: true, threadId, sessionId: null,
+      requiredTools: [...REQUIRED_CODEX_APP_TOOLS], checks: {}, toolsVerified: false, updatedAt: null };
+  }
   const [relayState, healthState] = await Promise.all([
     readJson(binding.statePath),
     readJson(binding.healthPath),

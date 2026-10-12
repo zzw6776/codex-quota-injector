@@ -42,6 +42,46 @@ test("长上下文按单次请求分层，显式短上下文可以覆盖自动�
   );
 });
 
+test("GPT-6.1 Sol、GPT-6 Sol 和 Luna 按官方 Standard 短、长上下文价格计算缓存写入", () => {
+  const pricing = new TokenPricingManager({ fetchImpl: null });
+  for (const [model, shortRates, longRates] of [
+    ["gpt-6.1-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]],
+    ["gpt-6-sol", [2, 0.2, 2.5, 10], [4, 0.4, 5, 15]],
+    ["gpt-6-luna", [0.1, 0.01, 0.125, 0.5], [0.2, 0.02, 0.25, 0.75]],
+  ]) {
+    for (const [contextTier, expected] of [["short", shortRates], ["long", longRates]]) {
+      const cost = pricing.calculate(model, {
+        input_tokens: 3_000_000,
+        cached_input_tokens: 1_000_000,
+        cache_write_input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+      }, { contextTier });
+      assert.equal(cost.available, true);
+      assert.equal(cost.contextTier, contextTier);
+      assert.deepEqual(Object.values(cost.rates), expected);
+      assert.equal(cost.total, expected[0] + expected[1] + expected[2] + expected[3]);
+    }
+  }
+});
+
+test("GPT-6.1 Sol 按请求输入跨过 272K 后全请求计长价，缓存价不借用旧 Sol", () => {
+  const pricing = new TokenPricingManager({ fetchImpl: null });
+  const usage = { input_tokens: 272_000, cached_input_tokens: 100_000,
+    cache_write_input_tokens: 50_000, output_tokens: 10_000, reasoning_output_tokens: 5_000 };
+  const short = pricing.calculate("gpt-6.1-sol", usage);
+  const long = pricing.calculate("gpt-6.1-sol", { ...usage, input_tokens: 272_001 });
+  assert.equal(short.contextTier, "short");
+  assert.equal(long.contextTier, "long");
+  assert.ok(Math.abs(short.total - 0.479) < 1e-10);
+  assert.ok(Math.abs(long.total - 0.908004) < 1e-10);
+  assert.equal(short.components.reasoningOutput, 0.05);
+  assert.equal(getOpenAIShortContextRates("gpt-6.1-sol").cachedInput, 0.1);
+  assert.equal(getOpenAIShortContextRates("gpt-6-sol").cachedInput, 0.2);
+  const repeated = accumulateTokenCost(short, short);
+  assert.deepEqual(repeated.contextTiers, ["short"]);
+  assert.ok(Math.abs(repeated.total - short.total * 2) < 1e-10);
+});
+
 test("未知模型、缺失缓存写入价格和跨供应商聚合不会显示不完整费用", () => {
   const pricing = new TokenPricingManager({ fetchImpl: null });
   assert.equal(pricing.calculate("unknown", {}).available, false);

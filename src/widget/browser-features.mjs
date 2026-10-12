@@ -12,6 +12,7 @@ import { createConversationUsage } from "./conversation-usage.mjs";
 import { createUsageTooltip } from "./usage-tooltip.mjs";
 import { createModelsPage } from "./models-page.mjs";
 import { createModelEditor } from "./model-editor.mjs";
+import { createQuotaChip } from "./quota-chip.mjs";
 
 // Factories carry no module closure into the injected browser expression.
 const WIDGET_FEATURES = {
@@ -29,6 +30,7 @@ const WIDGET_FEATURES = {
   usage_tooltip: createUsageTooltip,
   models_page: createModelsPage,
   model_editor: createModelEditor,
+  quota_chip: createQuotaChip,
 };
 
 export { WIDGET_FEATURES };

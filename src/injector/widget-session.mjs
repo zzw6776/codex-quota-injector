@@ -41,6 +41,7 @@ function createWidgetSession(dependencies) {
     const account = dependencies.accountManager.getViewModel();
     const core = {
       version: dependencies.appDisplayVersion,
+      appUpdate: dependencies.appUpdate ?? null,
       injectionMode: dependencies.injectionMode,
       accounts: account.accounts.map((item) => ({
         ...item,
@@ -51,10 +52,9 @@ function createWidgetSession(dependencies) {
       operation: account.operation,
       context: dependencies.contextManager.getViewModel(),
       hostHealth: dependencies.hostHealth,
-      turnState292: dependencies.tokenUsageManager.getTurnStateViewModel?.(
+      turnState: dependencies.tokenUsageManager.getTurnStateViewModel?.(
         dependencies.hostHealth?.threadId,
-      ) ?? { status: "unknown", expectedByteLength: 292, byteLength: null,
-        model: null, observedAt: null },
+      ) ?? { byteLength: null, model: null, observedAt: null },
     };
     const extraModels = dependencies.extraModelManager.getViewModel();
     const network = dependencies.modelRouterManager.getNetworkViewModel?.() ?? null;

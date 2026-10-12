@@ -6,6 +6,8 @@ import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { useTempDir, waitFor } from "./helpers.mjs";
 import { execFileAsync, baseCatalog } from "./model-configuration/support.mjs";
+import { listRelayInstances, relayInstancePath } from "../src/relay-instance-paths.mjs";
+import { readInstanceJson } from "./relay-instance-fixtures.mjs";
 
 test("[platform:macos-native] macOS 仅在模型目录需要注入时接管", () => {
   assert.equal(selectBridgeMode({
@@ -228,8 +230,8 @@ upstream.pipe(process.stdout);
   assert.equal(noRouterOfficial.args.some((argument) => argument.startsWith("model_provider=")), false);
   assert.equal(noRouterOfficial.env.routerToken, null);
 
-  // Reproduce a plugin launching another shim with the desktop's inherited
-  // primary flag. Both use the real Relay and exchange real stdio messages.
+  // Official local/durable backends both inherit the primary flag.
+  // Both use the real Relay and exchange real stdio messages.
   const ownedStatePath = join(directory, "owned-state.json");
   const ownedHealthPath = join(directory, "owned-health.json");
   const emptyModelsPath = join(directory, "empty-models.json");
@@ -270,24 +272,32 @@ for await (const line of createInterface({ input: process.stdin })) {
   };
   const primary = launch();
   const owner = await waitFor(async () => {
-    const value = JSON.parse(await readFile(ownedStatePath, "utf8").catch(() => "null"));
+    const value = await readInstanceJson(ownedStatePath);
     return value?.pid ? value : null;
   });
   assert.notEqual(owner.pid, primary.child.pid, "状态必须跟踪真实 sidecar");
-  await waitFor(async () => JSON.parse(await readFile(ownedHealthPath, "utf8").catch(() => "null"))?.pid === owner.pid);
+  const [primaryFile] = await listRelayInstances(ownedStatePath);
+  const primaryHealthPath = relayInstancePath(ownedHealthPath, primaryFile.sessionId);
+  await waitFor(async () => JSON.parse(await readFile(primaryHealthPath, "utf8").catch(() => "null"))?.pid === owner.pid);
   const auxiliary = launch();
   auxiliary.child.stdin.write(JSON.stringify({ id: 1, method: "fixture/echo", params: "auxiliary" }) + "\n");
   await waitFor(() => auxiliary.stdout().includes('"echo":"auxiliary"'));
-  assert.equal(JSON.parse(await readFile(ownedStatePath, "utf8")).pid, owner.pid,
-    "继承 primary 标志的辅助 shim 不能覆盖仍存活的主中继");
-  assert.equal(JSON.parse(await readFile(ownedHealthPath, "utf8")).pid, owner.pid);
+  const files = await waitFor(async () => {
+    const values = await listRelayInstances(ownedStatePath);
+    return values.length === 2 ? values : null;
+  });
+  const auxiliaryFile = files.find(file => file.sessionId !== primaryFile.sessionId);
+  assert.notEqual(JSON.parse(await readFile(auxiliaryFile.path, "utf8")).pid, owner.pid);
+  assert.equal(JSON.parse(await readFile(primaryFile.path, "utf8")).pid, owner.pid);
+  assert.equal(JSON.parse(await readFile(primaryHealthPath, "utf8")).pid, owner.pid);
   auxiliary.child.stdin.end();
   assert.equal(await auxiliary.closed, 0, auxiliary.stderr());
-  assert.equal(JSON.parse(await readFile(ownedStatePath, "utf8")).pid, owner.pid,
+  assert.equal(JSON.parse(await readFile(primaryFile.path, "utf8")).pid, owner.pid,
     "辅助中继退出不能删除主中继状态");
   primary.child.stdin.write(JSON.stringify({ id: 2, method: "fixture/echo", params: "primary-still-works" }) + "\n");
   await waitFor(() => primary.stdout().includes('"echo":"primary-still-works"'));
   primary.child.stdin.end();
   assert.equal(await primary.closed, 0, primary.stderr());
+  assert.deepEqual(await listRelayInstances(ownedStatePath), []);
   await assert.rejects(readFile(ownedStatePath, "utf8"), { code: "ENOENT" });
 });

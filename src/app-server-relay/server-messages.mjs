@@ -1,6 +1,6 @@
 import { isCodexAppServer, isMcpStatusListMethod } from "../host-health.mjs";
 import { THREAD_METHODS, MODEL_LIST_METHOD } from "./contract.mjs";
-import { handleHostToolReloadResponse, requestCodexAppToolsStatus } from "./host-tools.mjs";
+import { handleHostToolReloadResponse, noteHostToolUserMessage, requestCodexAppToolsStatus } from "./host-tools.mjs";
 import { rewriteModelListResponse } from "./model-catalog.mjs";
 import { learnThreadContexts, restoreThreadContext, updateThreadContext, rememberTurnModel } from "./thread-context.mjs";
 import { captureUsageNotification } from "./usage.mjs";
@@ -15,8 +15,11 @@ function rewriteServerLine(line, state) {
   }
   state.hostHealth?.observeServerMessage(message);
   if (message?.method === "mcpServer/startupStatus/updated" &&
-    isCodexAppServer(message.params?.name) && message.params.status === "ready") {
+    isCodexAppServer(message.params?.name)) {
     requestCodexAppToolsStatus(state, message.params.threadId ?? null);
+  }
+  if (message?.method === "item/completed" && message.params?.item?.type === "userMessage") {
+    noteHostToolUserMessage(state, message.params.threadId);
   }
   learnThreadContexts(message?.params, state, {
     source: "thread-discovery",
@@ -99,6 +102,7 @@ function rewriteServerLine(line, state) {
     });
   }
   if (threadId && THREAD_METHODS.has(pending.method)) {
+    state.hostHealth?.noteTask(threadId);
     state.emitUsageEvent({
       type: "thread-active",
       threadId,

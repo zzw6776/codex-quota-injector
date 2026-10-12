@@ -69,6 +69,49 @@ test("[UI-01 UI-03 TOOL-06] 真实浏览器挂载、重复注入、换节点、�
   assert.equal(await count(), 0, "销毁后观察器不能重新挂载");
 });
 
+test("[UI-01] 新版占满宽度的资料按钮与额度按钮同排时不越过侧栏", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const layout = await b.client.evaluate(`(() => {
+    const row = document.getElementById('profile-row');
+    const profile = document.getElementById('profile');
+    const style = document.createElement('style');
+    style.textContent = '#profile { display:block; width:100%; flex:0 0 auto; min-width:auto }';
+    document.head.append(style);
+    row.style.justifyContent = 'center';
+    row.style.width = '220px';
+    const root = document.getElementById('codex-quota-injector-root');
+    const parent = row.getBoundingClientRect();
+    const button = profile.getBoundingClientRect();
+    const chip = root.getBoundingClientRect();
+    return { parentLeft: parent.left, parentRight: parent.right,
+      buttonLeft: button.left, buttonRight: button.right,
+      chipLeft: chip.left, chipRight: chip.right };
+  })()`);
+  assert.ok(layout.buttonLeft >= layout.parentLeft, "头像和资料按钮不能被居中布局挤出侧栏左侧");
+  assert.ok(layout.buttonRight <= layout.chipLeft, "资料按钮与额度按钮不能重叠");
+  assert.ok(layout.chipRight <= layout.parentRight, "额度按钮不能越过侧栏右侧");
+});
+
+test("[UI-02] 状态长度更新只显示实际字节数，不保留 292 比较样式", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.update(fixtureData({ turnState: {
+    byteLength: 780, model: "gpt-6-sol", observedAt: 123,
+  } }));
+  await b.click(".quota-chip");
+  assert.equal(await b.value(".turn-state-status"), "780");
+  assert.match(await b.client.evaluate(`${SHADOW}.querySelector('.turn-state-status').getAttribute('aria-label')`),
+    /x-codex-turn-state：780 字节/);
+  assert.equal(await b.value(".turn-state-status", "className"), "turn-state-status");
+
+  await b.update(fixtureData({ turnState: { byteLength: 292, model: "gpt-6-sol", observedAt: 456 } }));
+  assert.equal(await b.value(".turn-state-status"), "292");
+  assert.doesNotMatch(await b.client.evaluate(`${SHADOW}.querySelector('.turn-state-status').getAttribute('aria-label')`),
+    /符合|不等于|目标长度/);
+
+  await b.update(fixtureData({ turnState: { byteLength: null, model: null, observedAt: null } }));
+  assert.equal(await b.value(".turn-state-status"), "--");
+});
+
 test("[LCH-04 UI-02] 逐项检查详情、独立操作、超时颜色和缓存更新在浏览器生效", { timeout: 30000 }, async t => {
   const b = await startBrowser(t);
   const tools = ["list_threads", "read_thread", "list_projects", "get_usage_limits"];

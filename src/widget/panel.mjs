@@ -14,7 +14,18 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
       popover.style.removeProperty("width");
       popover.style.removeProperty("height");
     }
+    positionPanelHorizontal(wrap, popover);
     positionHostHealthFlyout(wrap, popover);
+  }
+
+  function positionPanelHorizontal(wrap, popover) {
+    if (state.layout === "rail") {
+      const chipRect = wrap.querySelector(".quota-chip").getBoundingClientRect();
+      const width = popover.offsetWidth;
+      popover.style.left = `${Math.max(12, Math.min(chipRect.right + 10, window.innerWidth - width - 12))}px`;
+    } else {
+      popover.style.removeProperty("left");
+    }
   }
 
   function positionHostHealthFlyout(wrap, popover = wrap.querySelector(".quota-popover")) {
@@ -71,6 +82,7 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
     const height = Math.min(bounds.maxHeight, Math.max(minimumHeight, requested?.height ?? base.height));
     popover.style.width = `${width}px`;
     popover.style.height = `${height}px`;
+    positionPanelHorizontal(wrap, popover);
     return { width, height };
   }
 
@@ -157,10 +169,18 @@ function createPanel({ calculateMaxHeight, state, render, enqueue, ACCOUNT_TOOLT
 
   function bindGeneralEvents(wrap) {
 bindDetailPanelResize(wrap);
+wrap.querySelector(".app-update-open")?.addEventListener("click", (event) => {
+  if (state.appUpdateOpening || state.data.appUpdate?.opening) return;
+  state.appUpdateRequestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  state.appUpdateOpening = true;
+  enqueue({ type: "app-update-open", requestId: state.appUpdateRequestId });
+  render({ background: true });
+});
 for (const name of ["recheck", "reload", "diagnose"]) {
   wrap.querySelectorAll(`.host-health-${name}`).forEach(button => button.addEventListener("click", (event) => {
     event.currentTarget.disabled = true;
-    enqueue({ type: `host-health-${name}`, threadId: state.data.hostHealth?.threadId });
+    enqueue({ type: `host-health-${name}`, threadId: state.data.hostHealth?.threadId,
+      sessionId: state.data.hostHealth?.sessionId });
   }));
 }
 for (const selector of [".host-health-details", ".host-health-status"]) {

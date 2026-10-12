@@ -262,6 +262,7 @@ export async function prepareCodexLaunch({
     relay: {
       statePath,
       healthPath,
+      instanceScoped: true,
       configPath: relayConfigPath,
       generation: effectiveGeneration,
       hostToolsRequired: true,

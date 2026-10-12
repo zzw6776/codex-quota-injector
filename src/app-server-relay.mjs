@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { relayInstancePath } from "./relay-instance-paths.mjs";
 import { DEEPSEEK_CANONICAL_MODEL_ID, DEEPSEEK_FLASH_MODEL_IDS, DEEPSEEK_ROUTABLE_MODEL_IDS } from "./deepseek-model-profile.mjs";
 import { createHostHealthTracker, watchHostToolReloadRequests } from "./host-health.mjs";
 import { startModelCompatibilityProxy } from "./chat-compat-proxy.mjs";
 import { ModelRouterManager } from "./model-router.mjs";
-import { OPENAI_PROVIDER, RELAY_CLEANUP_INTERVAL_MS, RELAY_OWNERSHIP_POLL_MS, readJson } from "./app-server-relay/contract.mjs";
+import { OPENAI_PROVIDER, RELAY_CLEANUP_INTERVAL_MS, readJson } from "./app-server-relay/contract.mjs";
 import { openSidecarUpstream, pipeLines, pipeRaw, runPassthrough, clearRelayEnvironment, forwardSignals, forwardSidecarSignals, exitLikeChild, fail } from "./app-server-relay/transport.mjs";
 import { rewriteClientLine } from "./app-server-relay/client-messages.mjs";
 import { rewriteServerLine } from "./app-server-relay/server-messages.mjs";
@@ -180,14 +182,17 @@ export async function runAppServerRelay() {
   });
   const upstreamInput = sidecar?.stdin ?? child.stdin;
   const upstreamOutput = sidecar?.stdout ?? child.stdout;
-  const statePath = publishHostState
+  const sessionId = randomUUID();
+  const stateBasePath = publishHostState
     ? await resolveRelayPath(
         relayConfig?.relayStatePath ?? process.env.CODEX_QUOTA_RELAY_STATE ?? "",
       )
     : "";
-  const healthPath = publishHostState
+  const healthBasePath = publishHostState
     ? await resolveRelayPath(relayConfig?.hostHealthPath ?? "")
     : "";
+  const statePath = relayInstancePath(stateBasePath, sessionId);
+  const healthPath = relayInstancePath(healthBasePath, sessionId);
   const processIdentity = await currentRelayProcessIdentity(wslNative);
   const usageEventWriter = createUsageEventWriter(
     publishHostState ? tokenUsageEventsPath : "",
@@ -219,12 +224,11 @@ export async function runAppServerRelay() {
               ? "macos-native"
               : null),
         processIdentity,
+        sessionId,
         claim: ownsRuntimeState,
       })
     : null;
   let relayCleanupTimer = null;
-  let relayOwnershipTimer = null;
-  let relayOwnershipCheck = Promise.resolve();
   let hostToolReloadWatcher = null;
   let relayState = null;
   let cleanedUp = false;
@@ -233,9 +237,6 @@ export async function runAppServerRelay() {
     cleanedUp = true;
     if (relayCleanupTimer) clearInterval(relayCleanupTimer);
     relayCleanupTimer = null;
-    if (relayOwnershipTimer) clearInterval(relayOwnershipTimer);
-    relayOwnershipTimer = null;
-    await relayOwnershipCheck.catch(() => undefined);
     hostToolReloadWatcher?.close();
     hostToolReloadWatcher = null;
     closeHostToolChecks(relayState);
@@ -306,6 +307,7 @@ export async function runAppServerRelay() {
   };
   hostToolReloadWatcher = watchHostToolReloadRequests({
     healthPath,
+    sessionId,
     generation: relayConfig?.generation ??
       process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
   }, {
@@ -314,6 +316,7 @@ export async function runAppServerRelay() {
     signalEmitter: wslNative ? process : null,
     wakeSignal: wslNative ? "SIGUSR2" : null,
     onRequest: (request) => {
+      if (!relayState.hostHealth?.ownsTask(request.threadId)) return;
       if (request.action === "reload") requestCodexAppToolsReload(relayState);
       else if (request.action === "diagnose") requestCodexAppToolsDiagnostic(relayState, request.threadId);
       else requestCodexAppToolsStatus(relayState, request.threadId, {
@@ -326,23 +329,6 @@ export async function runAppServerRelay() {
   });
   relayCleanupTimer = setInterval(() => pruneRelayState(relayState), RELAY_CLEANUP_INTERVAL_MS);
   relayCleanupTimer.unref?.();
-  if (!sidecar && statePath) {
-    relayOwnershipTimer = setInterval(() => {
-      relayOwnershipCheck = relayOwnershipCheck.then(async () => {
-        if (cleanedUp) return;
-        const claimed = await claimRelayState(
-          statePath,
-          relayConfig?.generation ?? process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
-          processIdentity,
-        );
-        if (claimed && !ownsRuntimeState) await hostHealth.claim();
-        ownsRuntimeState = claimed;
-      }).catch((error) => {
-        console.error(`模型中继状态所有权检查失败: ${error.message}`);
-      });
-    }, RELAY_OWNERSHIP_POLL_MS);
-    relayOwnershipTimer.unref?.();
-  }
   pipeLines(process.stdin, upstreamInput, (line) => rewriteClientLine(line, relayState));
   pipeLines(upstreamOutput, process.stdout, (line) => rewriteServerLine(line, relayState));
   if (child) pipeRaw(child.stderr, process.stderr);

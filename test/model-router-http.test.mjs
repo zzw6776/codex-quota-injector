@@ -69,6 +69,8 @@ test("Router 可在没有第三方模型时单独观察官方请求并记录生�
     event.threadId === "thread-official-observer" &&
     event.model === "official-model" &&
     event.byteLength === 292 &&
+    !Object.hasOwn(event, "expectedByteLength") &&
+    !Object.hasOwn(event, "status") &&
     !Object.hasOwn(event, "state")));
 });
 

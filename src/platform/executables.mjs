@@ -34,27 +34,39 @@ async function resolveCodexExecutable({ refresh = false } = {}) {
   return resolved;
 }
 
-async function resolveCodexCliExecutable() {
-  if (process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI) {
-    const overridden = resolve(process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI);
-    if (await exists(overridden)) return overridden;
+async function resolveCodexCliExecutable({
+  environment = process.env,
+  platform = process.platform,
+  resolveApp = () => resolveCodexExecutable({ refresh: true }),
+  existsImpl = exists,
+  materializeCli = materializeWindowsCodexCli,
+} = {}) {
+  if (environment.CODEX_QUOTA_UPSTREAM_CODEX_CLI) {
+    const overridden = resolve(environment.CODEX_QUOTA_UPSTREAM_CODEX_CLI);
+    if (await existsImpl(overridden)) return overridden;
     throw new Error(`指定的 Codex CLI 不存在: ${overridden}`);
   }
-  const appExecutable = await resolveCodexExecutable({ refresh: true });
-  const candidates = process.platform === "win32"
+  const appExecutable = await resolveApp();
+  const candidates = platform === "win32"
     ? [
       join(dirname(appExecutable), "resources", "codex.exe"),
       join(dirname(appExecutable), "resources", "codex"),
       join(dirname(appExecutable), "Resources", "codex.exe"),
       join(dirname(appExecutable), "Resources", "codex"),
     ]
-    : [join(dirname(dirname(appExecutable)), "Resources", "codex")];
-  const candidate = await firstExisting(candidates);
+    : [
+      join(dirname(dirname(appExecutable)), "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex"),
+      join(dirname(dirname(appExecutable)), "Resources", "codex"),
+    ];
+  let candidate = null;
+  for (const path of candidates) {
+    if (await existsImpl(path)) { candidate = path; break; }
+  }
   if (!candidate) {
     throw new Error(`Codex App Server 可执行文件不存在: ${candidates.join(" / ")}`);
   }
-  return process.platform === "win32"
-    ? materializeWindowsCodexCli(candidate)
+  return platform === "win32"
+    ? materializeCli(candidate)
     : candidate;
 }
 

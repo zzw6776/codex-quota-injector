@@ -6,6 +6,8 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { requestHostToolReload } from "../src/host-health.mjs";
+import { listRelayInstances, relayInstancePath } from "../src/relay-instance-paths.mjs";
+import { readInstanceJson } from "./relay-instance-fixtures.mjs";
 import { successfulHostToolResult } from "./host-tool-fixtures.mjs";
 import { MODEL_CAPABILITY_PROBE_VERSION } from "../src/model-capability-probe.mjs";
 import { createTestNodeExecutable as createNodeAlias, useTempDir, waitFor } from "./helpers.mjs";
@@ -265,14 +267,14 @@ test("app-server relay 观察 codex_app 启动失败且不改写官方通知", a
   assert.ok(output.some((message) =>
     message.method === "mcpServer/startupStatus/updated" &&
     message.params?.name === "codex_app" && message.params?.status === "failed"));
-  const health = JSON.parse(await readFile(healthPath, "utf8"));
+  const health = await readInstanceJson(healthPath);
   assert.equal(health.status, "degraded");
   assert.equal(health.code, "missing-code-signing-identity");
   assert.match(health.detail, /Bearer \[redacted\]/);
   assert.doesNotMatch(health.detail, /fixture-secret/);
 });
 
-test("并发 app-server 退出时保留存活 Relay，并在所有者退出后接管状态", async (t) => {
+test("并发 app-server 独立发布状态，任一退出不影响另一后台", async (t) => {
   const directory = await useTempDir(t, "codex-relay-ownership-");
   const fakeCodexPath = join(directory, "persistent-codex.mjs");
   const upstreamExecutable = join(
@@ -309,10 +311,11 @@ for await (const line of lines) {
     if (first.child.exitCode == null) first.child.kill("SIGKILL");
     await first.closed.catch(() => {});
   });
-  await waitFor(async () => {
-    const state = JSON.parse(await readFile(statePath, "utf8").catch(() => "null"));
-    return state?.pid === first.child.pid;
+  const firstState = await waitFor(async () => {
+    const state = await readInstanceJson(statePath);
+    return state?.pid === first.child.pid ? state : null;
   });
+  const [firstFile] = await listRelayInstances(statePath);
 
   const second = spawnRelay({
     configPath,
@@ -322,24 +325,26 @@ for await (const line of lines) {
     if (second.child.exitCode == null) second.child.kill("SIGKILL");
     await second.closed.catch(() => {});
   });
-  await new Promise((resolve) => setTimeout(resolve, 1_200));
-  assert.equal(JSON.parse(await readFile(statePath, "utf8")).pid, first.child.pid);
+  const files = await waitFor(async () => {
+    const instances = await listRelayInstances(statePath);
+    return instances.length === 2 ? instances : null;
+  });
+  const secondFile = files.find(file => file.sessionId !== firstFile.sessionId);
+  assert.deepEqual(JSON.parse(await readFile(firstFile.path, "utf8")), firstState);
+  assert.equal(JSON.parse(await readFile(secondFile.path, "utf8")).pid, second.child.pid);
+  await assert.rejects(readFile(statePath), { code: "ENOENT" });
 
   first.child.stdin.end();
   await first.closed;
-  const takeover = await waitFor(async () => {
-    const state = JSON.parse(await readFile(statePath, "utf8").catch(() => "null"));
-    return state?.pid === second.child.pid ? state : null;
-  }, { timeoutMs: 4_000 });
-  assert.equal(takeover.generation, "concurrent-generation");
+  assert.deepEqual(await listRelayInstances(statePath), [secondFile]);
   await waitFor(async () => {
-    const health = JSON.parse(await readFile(healthPath, "utf8").catch(() => "null"));
+    const health = JSON.parse(await readFile(relayInstancePath(healthPath, secondFile.sessionId), "utf8").catch(() => "null"));
     return health?.pid === second.child.pid;
   });
 
   second.child.stdin.end();
   await second.closed;
-  await waitFor(async () => !await readFile(statePath, "utf8").then(() => true, () => false));
+  assert.deepEqual(await listRelayInstances(statePath), []);
 });
 
 test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部响应不泄漏", async (t) => {
@@ -364,11 +369,8 @@ test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部
     runtimeTarget: process.platform === "win32" ? "windows-native" : "macos-native",
     generation,
   }));
-  await requestHostToolReload({
-    healthPath,
-    generation,
-    hostToolsRequired: true,
-  }, { requestId: "reloadrequest01", now: 1_800_000_000_000 });
+  const binding = { healthPath, statePath, generation, hostToolsRequired: true, instanceScoped: true };
+  await assert.rejects(requestHostToolReload(binding, { threadId: "thread-1" }), /任务所属后台/);
 
   // Reproduce CI startup taking longer than the old one-second stdin lifetime.
   const startupDelayPath = join(directory, "slow-relay-start.mjs");
@@ -387,9 +389,16 @@ test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", chunk => { stdout += chunk; });
   child.stdin.write(`${JSON.stringify({ id: 1, method: "initialize", params: {} })}\n`);
+  child.stdin.write(`${JSON.stringify({ id: 2, method: "thread/start", params: {} })}\n`);
+  const owner = await waitFor(async () => {
+    const health = await readInstanceJson(healthPath);
+    return health?.tasks?.["thread-1"]?.observed ? health : null;
+  }, { timeoutMs: 10_000 });
+  await requestHostToolReload(binding, { threadId: "thread-1", sessionId: owner.sessionId,
+    requestId: "reloadrequest01" });
   // Keep the client connected until reload and catalog verification actually finish.
   await waitFor(async () => {
-    const health = JSON.parse(await readFile(healthPath, "utf8").catch(() => "null"));
+    const health = await readInstanceJson(healthPath);
     return health?.status === "ready" && health.toolsVerified === true;
   }, { timeoutMs: 10_000 });
   child.stdin.end();
@@ -403,7 +412,7 @@ test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部
   assert.ok(requests.every(message => message.method !== "mcpServerStatus/list"));
   assert.doesNotMatch(stdout, /codex-quota-(host-tools|tool-check)-/,
     "中继内部恢复请求和响应不能进入桌面客户端协议");
-  const health = JSON.parse(await readFile(healthPath, "utf8"));
+  const health = await readInstanceJson(healthPath);
   assert.equal(health.status, "ready");
   assert.deepEqual(health.missingTools, []);
 });
@@ -446,13 +455,13 @@ for await(const line of createInterface({input:process.stdin})) {
   child.stdin.write(`${JSON.stringify({id: 1, method: "initialize", params: {}})}\n`);
   child.stdin.write(`${JSON.stringify({id: 2, method: "mcpServerStatus/list", params: {}})}\n`);
   await waitFor(async () => {
-    const health = JSON.parse(await readFile(healthPath, "utf8").catch(() => "null"));
+    const health = await readInstanceJson(healthPath);
     return health?.tasks?.["ready-thread"]?.status === "ready" &&
       health.tasks?.["other-thread"]?.status === "ready";
   }, {timeoutMs: 10_000});
   child.stdin.end();
   await closed;
-  const health = JSON.parse(await readFile(healthPath, "utf8"));
+  const health = await readInstanceJson(healthPath);
   assert.equal(health.status, "ready");
   assert.equal(health.threadId, "ready-thread");
   assert.equal(health.tasks["ready-thread"].toolsVerified, true);

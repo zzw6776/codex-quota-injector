@@ -7,13 +7,17 @@ private let sidecarModeEnvironmentKey = "CODEX_QUOTA_APP_SERVER_SIDECAR"
 private let sidecarUpstreamStdinEnvironmentKey = "CODEX_QUOTA_UPSTREAM_STDIN_FD"
 private let sidecarUpstreamStdoutEnvironmentKey = "CODEX_QUOTA_UPSTREAM_STDOUT_FD"
 private let primaryAppServerEnvironmentKey = "CODEX_QUOTA_PRIMARY_APP_SERVER"
-private let standardOfficialExecutables = [
-  "/Applications/ChatGPT.app/Contents/Resources/codex",
-  "/Applications/Codex.app/Contents/Resources/codex",
+private let standardOfficialBundles = [
+  "/Applications/ChatGPT.app",
+  "/Applications/Codex.app",
   FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Applications/ChatGPT.app/Contents/Resources/codex").path,
+    .appendingPathComponent("Applications/ChatGPT.app").path,
   FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Applications/Codex.app/Contents/Resources/codex").path,
+    .appendingPathComponent("Applications/Codex.app").path,
+].map { URL(fileURLWithPath: $0, isDirectory: true) }
+private let officialCliRelativePaths = [
+  "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+  "Contents/Resources/codex",
 ]
 
 private struct LaunchConfiguration: Decodable {
@@ -53,19 +57,19 @@ private func isUsableOfficialExecutable(_ path: String) -> Bool {
     canonicalPath(path) != canonicalPath(CommandLine.arguments[0])
 }
 
-private func resolveOfficialExecutable(fallback: String?) -> String? {
+private func resolveOfficialExecutable(
+  fallback: String?,
+  bundleURLs: [URL] = NSRunningApplication
+    .runningApplications(withBundleIdentifier: officialBundleIdentifier)
+    .compactMap { $0.bundleURL } + standardOfficialBundles
+) -> String? {
   var candidates: [String] = []
   if let fallback, !fallback.isEmpty {
     candidates.append(fallback)
   }
-  candidates.append(contentsOf: NSRunningApplication
-    .runningApplications(withBundleIdentifier: officialBundleIdentifier)
-    .compactMap { application in
-      application.bundleURL?
-        .appendingPathComponent("Contents/Resources/codex")
-        .path
-    })
-  candidates.append(contentsOf: standardOfficialExecutables)
+  candidates.append(contentsOf: bundleURLs.flatMap { bundle in
+    officialCliRelativePaths.map { bundle.appendingPathComponent($0).path }
+  })
 
   var visited = Set<String>()
   for candidate in candidates {

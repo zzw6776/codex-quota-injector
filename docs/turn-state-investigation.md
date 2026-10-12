@@ -20,6 +20,6 @@
 
 使用[全量日志说明](model-request-diagnostics.md)中的 `npm run analyze:requests`。分析器自动读取基础文件和轮换分片，按连接、请求和回合关联 state，只输出字段路径、长度和 SHA-256，不输出原值、正文或凭据。
 
-应用 0.1.292 起，全量日志默认关闭；右上角的轻量指示独立工作。0.1.293 修复了 WSL Relay 与 Windows 注入器分进程时状态只留在 Relay 内存、Widget 永远读取另一实例的问题：Relay 现在通过现有用量事件文件传递并缓存任务 ID、长度、模型和时间，仍不传递 state 原值。指示器只显示当前任务最近一次官方 `x-codex-turn-state` 是否为 292 字节，不检查 `current_turn_state`，也不能代表模型质量或 HTTP 状态码。
+应用 0.1.292 起，全量日志默认关闭；右上角的轻量指示独立工作。0.1.293 修复了 WSL Relay 与 Windows 注入器分进程时状态只留在 Relay 内存、Widget 永远读取另一实例的问题：Relay 现在通过现有用量事件文件传递并缓存任务 ID、长度、模型和时间，仍不传递 state 原值。0.1.299 起页面直接显示当前任务最近一次官方 `x-codex-turn-state` 的字节长度；0.1.300 起采集、事件和缓存也不再计算或保存与 292 的比较结果。该指示不检查 `current_turn_state`，长度不能代表模型质量或 HTTP 状态码。
 
 `replayObserved=false` 表示捕获范围内没有看到同一个 state 进入后续请求；它可能来自连接未重建、当前客户端实现没有附带，或捕获范围不足，不能单独解释成服务端拒绝 state。

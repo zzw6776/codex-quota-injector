@@ -34,13 +34,25 @@ const DEEPSEEK_PRICES = Object.freeze({
   "deepseek-v4-pro": DEEPSEEK_V41_FLASH_PRICE,
 });
 
-// Standard API USD per 1M tokens, checked 2026-09-06:
-// https://developers.openai.com/api/docs/pricing
-// Sol promotional rates are published through at least 2026-11-21.
+// Standard API USD per 1M tokens; GPT-6.1 Sol checked 2026-10-11:
+// https://developers.openai.com/api/docs/pricing?latest-pricing=standard
+// GPT-5.6 Sol promotional rates are published through at least 2026-11-21.
 const OPENAI_PRICES = Object.freeze({
+  "gpt-6.1-sol": modelPrice(
+    priceTier(2, 0.1, 2.5, 10),
+    priceTier(4, 0.2, 5, 15),
+  ),
   "gpt-6-astra": modelPrice(
     priceTier(10, 1, 12.5, 50),
     priceTier(20, 2, 25, 75),
+  ),
+  "gpt-6-sol": modelPrice(
+    priceTier(2, 0.2, 2.5, 10),
+    priceTier(4, 0.4, 5, 15),
+  ),
+  "gpt-6-luna": modelPrice(
+    priceTier(0.1, 0.01, 0.125, 0.5),
+    priceTier(0.2, 0.02, 0.25, 0.75),
   ),
   "gpt-5.6-sol": modelPrice(
     priceTier(4, 0.4, 5, 20),

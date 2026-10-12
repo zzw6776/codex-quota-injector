@@ -220,7 +220,6 @@ export class RouterRequestLedger {
       threadId: normalizedThreadId,
       model: nonEmptyString(view?.model),
       byteLength,
-      expectedByteLength: Number(view?.expectedByteLength),
     });
   }
 

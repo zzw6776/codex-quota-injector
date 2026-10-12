@@ -29,6 +29,7 @@ function createHostHealthSession(dependencies) {
   let scopeKey = null;
   let selectedTask = null;
   let selectedRuntime = null;
+  let scopeStartedAt = 0;
 
   function closeHostHealthWatcher() {
     hostHealthWatcher?.close();
@@ -107,6 +108,7 @@ function createHostHealthSession(dependencies) {
       scopeKey = nextScopeKey;
       selectedTask = activeTask;
       selectedRuntime = null;
+      scopeStartedAt = now;
       lastHostHealthCheckAt = 0;
       hostHealthActionError = null;
       force = true;
@@ -135,14 +137,16 @@ function createHostHealthSession(dependencies) {
         next = { required: true, status: "idle", threadId: null, canCheck: false,
           message: activeTask ? "当前远程任务未在本机检查" : "选择本机任务后自动检查任务工具" };
       } else {
-        next = await (dependencies.readViewModel ?? readHostHealthViewModel)(binding, { threadId: activeTask?.threadId });
+        next = await (dependencies.readViewModel ?? readHostHealthViewModel)(binding, {
+          threadId: activeTask?.threadId, waitingSince: scopeStartedAt });
       }
       if (scopeKey !== nextScopeKey || dependencies.stopped) return hostHealth;
       if (activeTask && next.canCheck) {
         const runtime = `${nextScopeKey}:${next.sessionId}`;
         if (runtime !== selectedRuntime) {
+          await (dependencies.requestCheck ?? requestHostToolReload)(binding, {
+            action: "select", threadId: activeTask.threadId, sessionId: next.sessionId });
           selectedRuntime = runtime;
-          await (dependencies.requestCheck ?? requestHostToolReload)(binding, { action: "select", threadId: activeTask.threadId });
         }
       }
       if (scopeKey !== nextScopeKey) return hostHealth;

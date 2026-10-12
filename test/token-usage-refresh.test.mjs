@@ -51,27 +51,37 @@ test("复用视图不能隐藏读取错误及恢复状态", async t => {
   assert.strictEqual(await manager.refresh(), recovered);
 });
 
-test("Relay 的 turn state 长度事件按任务进入跨进程视图、缓存恢复且不保存原值", async t => {
+test("Relay 的 turn state 长度按任务缓存，旧缓存判断字段被丢弃", async t => {
   const observedAt = Date.now() - 1_000;
   const { manager, codexHome, dataDir } = await createManager(t, { events: [
     event("state-a", "turn-state-observed", "thread-a", null, {
-      model: "gpt-5.6-sol", byteLength: 292, expectedByteLength: 292, recordedAt: observedAt,
+      model: "gpt-5.6-sol", byteLength: 292, recordedAt: observedAt,
     }),
     event("state-b", "turn-state-observed", "thread-b", null, {
-      model: "gpt-6-astra", byteLength: 312, expectedByteLength: 292,
+      model: "gpt-6-astra", byteLength: 780,
     }),
   ] });
   assert.deepEqual(manager.getTurnStateViewModel("thread-a"), {
-    status: "match", expectedByteLength: 292, byteLength: 292,
-    model: "gpt-5.6-sol", observedAt,
+    byteLength: 292, model: "gpt-5.6-sol", observedAt,
   });
-  assert.equal(manager.getTurnStateViewModel("thread-b").status, "mismatch");
-  assert.equal(manager.getTurnStateViewModel("missing").status, "unknown");
+  assert.equal(manager.getTurnStateViewModel("thread-b").byteLength, 780);
+  assert.deepEqual(manager.getTurnStateViewModel("missing"), {
+    byteLength: null, model: null, observedAt: null,
+  });
 
   await manager.flush();
-  const cache = await readFile(join(dataDir, "token-usage-cache.json"), "utf8");
+  const cachePath = join(dataDir, "token-usage-cache.json");
+  const cache = await readFile(cachePath, "utf8");
   assert.match(cache, /"turnStates"/);
-  assert.doesNotMatch(cache, /x-codex-turn-state|current_turn_state/);
+  assert.doesNotMatch(cache, /x-codex-turn-state|current_turn_state|expectedByteLength|"status":"match"|"status":"mismatch"/);
+
+  const legacyCache = JSON.parse(cache);
+  legacyCache.version = 25;
+  for (const state of legacyCache.turnStates) {
+    state.status = state.byteLength === 292 ? "match" : "mismatch";
+    state.expectedByteLength = 292;
+  }
+  await writeFile(cachePath, JSON.stringify(legacyCache));
 
   const restored = new TokenUsageManager({
     codexHome,
@@ -82,8 +92,12 @@ test("Relay 的 turn state 长度事件按任务进入跨进程视图、缓存�
   t.after(() => restored.close());
   await restored.initialize();
   assert.deepEqual(restored.getTurnStateViewModel("thread-a"), {
-    status: "match", expectedByteLength: 292, byteLength: 292,
-    model: "gpt-5.6-sol", observedAt,
+    byteLength: 292, model: "gpt-5.6-sol", observedAt,
   });
-  assert.equal(restored.getTurnStateViewModel("thread-b").status, "mismatch");
+  assert.equal(restored.getTurnStateViewModel("thread-b").byteLength, 780);
+  await restored.flush();
+  const migrated = JSON.parse(await readFile(cachePath, "utf8"));
+  assert.equal(migrated.version, 26);
+  assert.ok(migrated.turnStates.every(state =>
+    !Object.hasOwn(state, "status") && !Object.hasOwn(state, "expectedByteLength")));
 });

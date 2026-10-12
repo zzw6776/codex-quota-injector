@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { lstat, readdir, statfs } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, rm, statfs, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const MIB = 1024 * 1024;
 const BLOCK_BYTES = 4096;
@@ -42,15 +42,23 @@ export async function createMacDmg({ appPath, dmgPath, run = execFileSync, log =
     }
   }));
   log(`[dmg] ${JSON.stringify({ ...plan, filesystem: "HFS+", diskSpace: await diskSpace() })}`);
+  let stagingDir;
   try {
+    // Keep staging beside the app so hard links share its filesystem and do
+    // not duplicate the large signed bundle before hdiutil copies it.
+    stagingDir = await mkdtemp(join(dirname(appPath), ".codex-dmg-stage-"));
+    execFileSync("/bin/cp", ["-Rlp", appPath, join(stagingDir, basename(appPath))]);
+    await symlink("/Applications", join(stagingDir, "Applications"));
     run("/usr/bin/hdiutil", [
-      "create", "-volname", "Codex Quota Injector", "-srcfolder", appPath,
+      "create", "-volname", "Codex Quota Injector", "-srcfolder", stagingDir,
       "-fs", "HFS+", "-size", `${plan.imageMiB}m`, "-ov", "-format", "UDZO", dmgPath,
     ], { stdio: "inherit" });
     run("/usr/bin/hdiutil", ["verify", dmgPath], { stdio: "inherit" });
   } catch (error) {
     log(`[dmg] failed; diskSpace=${JSON.stringify(await diskSpace())}`);
     throw error;
+  } finally {
+    if (stagingDir) await rm(stagingDir, { recursive: true, force: true });
   }
   return plan;
 }

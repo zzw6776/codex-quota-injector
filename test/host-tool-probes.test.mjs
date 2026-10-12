@@ -25,13 +25,12 @@ test("无错误不等于通过：损坏返回、缺失额度、超时和显式�
   assert.equal(classifyHostToolResult("list_projects", null, { message: "Unknown tool" }).status, "failed");
 });
 
-test("新任务首条消息前 read_thread 不可用只标记未确认", () => {
-  const result = {
-    isError: true,
-    content: [{ type: "text", text: "thread task is not materialized yet; " +
-      "thread/turns/list is unavailable before first user message" }],
-  };
-  const outcome = classifyHostToolResult("read_thread", result, null, { targetThreadId: "task" });
-  assert.equal(outcome.status, "unconfirmed");
-  assert.match(outcome.detail, /not materialized yet/);
+test("首条消息前任务未落盘只标为暂未确认，不当作读取工具故障", () => {
+  const detail = "thread task is not materialized yet; thread/turns/list is unavailable before first user message";
+  assert.equal(classifyHostToolResult("read_thread", null, { message: detail }).status, "unconfirmed");
+  assert.equal(classifyHostToolResult("read_thread", {
+    isError: true, content: [{ type: "text", text: detail }],
+  }).status, "unconfirmed");
+  assert.equal(classifyHostToolResult("read_thread", null,
+    { message: "Permission denied" }).status, "failed");
 });

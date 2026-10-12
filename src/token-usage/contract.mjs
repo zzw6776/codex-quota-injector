@@ -16,7 +16,8 @@ import { join } from "node:path";
 // Version 24 retains sanitized direct child identities for exec fallbacks.
 // Version 25 persists the per-task x-codex-turn-state length summary received
 // from a Relay process; it never stores the state value itself.
-const CACHE_VERSION = 25;
+// Version 26 retains only the measured length, model and observation time.
+const CACHE_VERSION = 26;
 
 const MIN_SUPPORTED_CACHE_VERSION = 11;
 
@@ -38,7 +39,7 @@ const MAX_HISTORICAL_SEGMENTS = 128;
 
 const READ_CHUNK_BYTES = 1024 * 1024;
 
-const COST_CACHE_VERSION = 3;
+const COST_CACHE_VERSION = 4;
 
 const ROLLOUT_PARSER_VERSION = 10;
 

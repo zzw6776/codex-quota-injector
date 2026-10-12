@@ -54,8 +54,8 @@ test("全量请求日志默认关闭，普通用量路径不会隐式创建敏�
   });
   assert.equal(response.status, 200);
   await response.text();
-  assert.equal(manager.getTurnStateViewModel("thread-default-off").status, "match",
-    "轻量 292 状态不得依赖全量日志");
+  assert.equal(manager.getTurnStateViewModel("thread-default-off").byteLength, 292,
+    "轻量长度采集不得依赖全量日志");
   await manager.close();
   await assert.rejects(readFile(join(directory, "model-request-diagnostics.jsonl"), "utf8"),
     { code: "ENOENT" });
@@ -200,7 +200,7 @@ test("WebSocket 握手 101 与逐请求预热/生成分开记录，完整保留�
   }));
   await done;
   assert.deepEqual(f.manager.getTurnStateViewModel("thread-ws"), {
-    status: "match", expectedByteLength: 292, byteLength: 292,
+    byteLength: 292,
     model: "gpt-6-astra", observedAt: f.manager.getTurnStateViewModel("thread-ws").observedAt,
   });
   assert.ok(Number.isFinite(f.manager.getTurnStateViewModel("thread-ws").observedAt));

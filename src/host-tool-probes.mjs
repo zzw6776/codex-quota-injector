@@ -1,4 +1,9 @@
 // Small, read-only probes. Results contain health evidence, never returned user data.
+export function isThreadNotMaterialized(detail) {
+  return /is not materialized yet;\s*thread\/turns\/list is unavailable before first user message/i
+    .test(String(detail ?? ""));
+}
+
 export function hostToolArguments(tool, threadId) {
   if (tool === "list_threads") return { limit: 1 };
   if (tool === "read_thread") return {
@@ -12,10 +17,10 @@ export function classifyHostToolResult(tool, result, error, { targetThreadId } =
   if (error || result?.isError === true) {
     const detail = (error?.message ?? (typeof error === "string" ? error : null) ??
       content.filter(x => x.type === "text").map(x => x.text).join(" ")) || "工具调用失败";
-    const expectedUnavailable = tool === "read_thread" &&
-      /not materialized yet|unavailable before first user message/i.test(detail);
-    return { status: expectedUnavailable || /timeout|timed out|超时/i.test(detail)
-      ? "unconfirmed" : "failed", detail };
+    if (tool === "read_thread" && isThreadNotMaterialized(detail)) {
+      return { status: "unconfirmed", detail };
+    }
+    return { status: /timeout|timed out|超时/i.test(detail) ? "unconfirmed" : "failed", detail };
   }
   let data = result?.structuredContent;
   if (!data) {

@@ -10,7 +10,10 @@ const explicitStartRequested = process.argv.length === 3 &&
 const updatePreparationRequested = process.argv.length === 3 &&
   process.argv[2] === "--prepare-update";
 
-if (updatePreparationRequested) {
+if (process.env.CODEX_QUOTA_ROLE === "app-updater") {
+  void import("./app-update/runner.mjs").then(({ runAppUpdater }) => runAppUpdater())
+    .catch(error => { console.error(error?.stack ?? error); process.exitCode = 1; });
+} else if (updatePreparationRequested) {
   void runUpdatePreparation();
 } else if (process.platform === "darwin" && explicitStartRequested) {
   void runLauncher();

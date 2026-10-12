@@ -13,12 +13,9 @@ import { normalizeCachedTurn, normalizeCachedFileState, normalizeCachedHistory, 
 import { readAppendedChunks, refreshRolloutCatalogFiles } from "./token-usage/rollout-files.mjs";
 import { processRolloutRecord } from "./token-usage/rollout-records.mjs";
 import { processTurnUsageEvent } from "./token-usage/usage-events.mjs";
-import { EXPECTED_CODEX_TURN_STATE_BYTES } from "./relay-contract.mjs";
 
 function unknownTurnStateViewModel() {
   return {
-    status: "unknown",
-    expectedByteLength: EXPECTED_CODEX_TURN_STATE_BYTES,
     byteLength: null,
     model: null,
     observedAt: null,
@@ -27,13 +24,11 @@ function unknownTurnStateViewModel() {
 
 function normalizedTurnState(value) {
   const threadId = nonEmptyString(value?.threadId);
-  const byteLength = Number(value?.byteLength);
+  const byteLength = value?.byteLength;
   const observedAt = positiveNumber(value?.observedAt ?? value?.recordedAt);
   if (!threadId || !Number.isInteger(byteLength) || byteLength < 0 || !observedAt) return null;
   return {
     threadId,
-    status: byteLength === EXPECTED_CODEX_TURN_STATE_BYTES ? "match" : "mismatch",
-    expectedByteLength: EXPECTED_CODEX_TURN_STATE_BYTES,
     byteLength,
     model: nonEmptyString(value?.model),
     observedAt,
