@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { releaseUpdate, fetchRelease } from "../src/app-update/releases.mjs";
 import { AppUpdateManager } from "../src/app-update/manager.mjs";
@@ -189,7 +189,7 @@ test("dev 窗口预编译与点击共享同一构建；相同源码复用，变�
   assert.notEqual(changed, first); assert.equal(compilations, 2);
   await writeFile(source, "failed");
   await assert.rejects(resolveDevUpdateWindow({ ...options, compile: async () => { throw new Error("compiler failed"); } }));
-  assert.deepEqual((await readdir(join(root, "build"))).sort(), [first, changed].map(path => path.split('/').pop()).sort());
+  assert.deepEqual((await readdir(join(root, "build"))).sort(), [first, changed].map(path => basename(path)).sort());
 });
 
 test("独立更新实例自动分配不同端口；登记服务不等于窗口就绪，登记必须匹配任务", async t => {

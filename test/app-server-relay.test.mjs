@@ -394,8 +394,16 @@ test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部
     const health = await readInstanceJson(healthPath);
     return health?.tasks?.["thread-1"]?.observed ? health : null;
   }, { timeoutMs: 10_000 });
+  // This protocol fixture owns the child directly; OS-specific start-time
+  // probes are covered by host-health-instances and readiness tests.
+  const relayStateChecker = async (path, expectedGeneration) => {
+    const state = JSON.parse(await readFile(path, "utf8"));
+    return path === relayInstancePath(statePath, owner.sessionId) &&
+      state.pid === child.pid && state.generation === expectedGeneration &&
+      child.exitCode == null && child.signalCode == null;
+  };
   await requestHostToolReload(binding, { threadId: "thread-1", sessionId: owner.sessionId,
-    requestId: "reloadrequest01" });
+    requestId: "reloadrequest01" }, { relayStateChecker });
   // Keep the client connected until reload and catalog verification actually finish.
   await waitFor(async () => {
     const health = await readInstanceJson(healthPath);

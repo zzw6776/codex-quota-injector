@@ -24,9 +24,10 @@ test("macOS 新旧应用目录均能发现 CLI，新目录存在时优先使用"
 });
 
 test("CLI 显式路径优先且缺失时不静默回退", async () => {
-  const options = { environment: { CODEX_QUOTA_UPSTREAM_CODEX_CLI: "/explicit/codex" },
+  const explicitPath = join(tmpdir(), "explicit", "codex");
+  const options = { environment: { CODEX_QUOTA_UPSTREAM_CODEX_CLI: explicitPath },
     existsImpl: async () => true, resolveApp: () => { throw Error("must not resolve app"); } };
-  assert.equal(await resolveCodexCliExecutable(options), "/explicit/codex");
+  assert.equal(await resolveCodexCliExecutable(options), explicitPath);
   await assert.rejects(resolveCodexCliExecutable({ ...options, existsImpl: async () => false }), /指定的 Codex CLI 不存在/);
 });
 

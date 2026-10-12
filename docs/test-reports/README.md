@@ -1,5 +1,9 @@
 # 测试报告归档
 
+## 2026-10-12 CI 跨平台测试材料修复
+
+[Windows 路径断言与 Linux Relay 协议夹具](macos-native/2026-10-12-ci-platform-fixtures.md)：应用 0.1.312，生产源码及 Widget/Relay 未变化。保留 0.1.311 CI 的 Windows 2 项、Ubuntu 1 项失败及后续打包 skipped 状态；本机 Node 22.23.1 定向 27/27，通过。远端修复后跨平台结果待新 CI 确认，不轮询。
+
 ## 2026-10-12 提交前远端合并
 
 [WSL 通知修复与后台隔离合并](macos-native/2026-10-12-push-merge.md)：应用 0.1.311 / Widget 192 / Relay 97。macOS 定向契约最终 68/68，通过；保留冲突处理脚本导致的首次加载失败。新增双后台通知交叉场景为模拟契约，未做 Windows/WSL 原生验收、构建、安装或日常重启。
