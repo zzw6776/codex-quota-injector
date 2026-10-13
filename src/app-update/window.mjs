@@ -12,13 +12,14 @@ export function updateWindowFragment(state) {
   const confirm = state.status === "confirm";
   const finished = ["success", "failed", "cancelled"].includes(state.status);
   const percent = state.total ? Math.min(100, Math.floor(state.received / state.total * 100)) : 0;
-  return `<h1>更新 Codex Quota Injector</h1><div class="versions">${escape(state.currentVersion)}${state.mode === "dev" ? " · dev" : ""} → ${escape(state.version)} · 正式版</div>
+  return `<div class="update-content${confirm ? " update-confirm" : ""}"><h1>更新 Codex Quota Injector</h1><div class="versions">${escape(state.currentVersion)}${state.mode === "dev" ? " · dev" : ""} → ${escape(state.version)} · 正式版</div>
     <div class="status ${escape(state.status)}">${escape(state.message)}</div>
-    ${confirm ? `<p>确认后自动下载、替换正式应用并打开正式版。正在运行的任务结束并保存后，才会重启 Codex。</p>
+    ${confirm ? `<p>任务结束并保存后，将安装新版并重启 Codex。</p>
       <section class="release-notes" aria-labelledby="release-notes-title"><h2 id="release-notes-title">更新日志</h2><div class="release-notes-content" tabindex="0">${escape(state.releaseNotes || "该版本暂无更新日志")}</div></section>` :
       `<ol>${STEPS.map((step, index) => `<li class="${index < current || state.status === "success" ? "done" : index === current ? "current" : ""}">${LABELS[index]}</li>`).join("")}</ol>`}
     ${state.status === "downloading" ? `<div class="meter"><div style="width:${percent}%"></div></div><p>${percent}% · ${(Number(state.received) / 1048576).toFixed(1)} / ${(Number(state.total) / 1048576).toFixed(1)} MB</p>` : ""}
     ${state.status === "success" ? '<p>正式版已启动，窗口将保留，直到你手动关闭。</p>' : ""}
+    </div>
     <div class="actions">${confirm ? '<button onclick="action(\'close\')">取消</button><button class="primary" onclick="action(\'confirm\')">立即更新</button>' : `${finished ? "" : `<button class="danger" onclick="action('terminate')" ${state.terminating ? "disabled" : ""}>${state.terminating ? "终止中…" : "终止更新"}</button>`}<button onclick="action('close')" ${finished ? "" : "disabled"}>关闭</button>`}</div>`;
 }
 
@@ -26,8 +27,8 @@ export function updateWindowHtml() {
   // ES5/XHR also works in the native Windows WebBrowser control. No user browser
   // profile, registry changes, external scripts or CDN are required.
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><title>Codex Quota Injector 更新</title><style>
-    body{margin:0;background:#f5f6f8;color:#25282b;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{padding:26px;max-width:520px;margin:auto}h1{font-size:20px;margin:0 0 12px}.versions{color:#73777e;font-size:12px}.status{font-size:16px;margin:24px 0 16px}.success,.done{color:#238348}.failed{color:#b43c34}.current{font-weight:600;color:#238348}p{line-height:1.7;color:#73777e}ol{padding-left:24px}li{line-height:2.2;color:#92979e}.actions{text-align:right;margin-top:22px}button{padding:9px 16px;margin-left:8px;border:1px solid #d1d5da;border-radius:8px;background:#fff;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:default}.primary{background:#238348;border-color:#238348;color:white}.meter{height:6px;border-radius:3px;background:#dfe4e0}.meter div{height:6px;background:#238348;border-radius:3px}
-    .release-notes{margin:18px 0}.release-notes h2{font-size:14px;margin:0 0 8px}.release-notes-content{max-height:140px;overflow:auto;padding:12px;border:1px solid #dfe2e6;border-radius:8px;background:#fff;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:break-word;word-wrap:break-word}
+    html,body{height:100%;margin:0}body{background:#f5f6f8;color:#25282b;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{height:100%;min-height:460px;padding:24px;box-sizing:border-box;display:flex;flex-direction:column}.update-content{flex:1 1 0%;min-height:0;overflow:auto}.update-confirm{display:flex;flex-direction:column}.update-confirm>*{flex-shrink:0}h1{font-size:20px;margin:0 0 12px}.versions{color:#73777e;font-size:12px;word-wrap:break-word}.status{font-size:16px;margin:20px 0 12px}.success,.done{color:#238348}.failed{color:#b43c34}.current{font-weight:600;color:#238348}p{line-height:1.7;color:#73777e;margin:0 0 12px}ol{padding-left:24px}li{line-height:2.2;color:#92979e}.actions{flex:0 0 auto;text-align:right;margin-top:16px}button{padding:9px 16px;margin-left:8px;border:1px solid #d1d5da;border-radius:8px;background:#fff;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:default}.primary{background:#238348;border-color:#238348;color:white}.meter{height:6px;border-radius:3px;background:#dfe4e0}.meter div{height:6px;background:#238348;border-radius:3px}
+    .release-notes{flex:1 1 0px;min-height:100px;display:flex;flex-direction:column;margin-top:6px}.release-notes h2{flex:0 0 auto;font-size:14px;margin:0 0 8px}.release-notes-content{flex:1 1 0px;min-height:0;overflow:auto;padding:12px;border:1px solid #dfe2e6;border-radius:8px;background:#fff;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:break-word;word-wrap:break-word}
     </style></head><body><main id="content">正在读取更新状态…</main><script>
     var previous='';var posting=false;var ready=false;var acknowledging=false;var root=location.pathname.slice(0,-1);
     function request(method,path,done){var xhr=new XMLHttpRequest();xhr.open(method,root+path,true);xhr.onreadystatechange=function(){if(xhr.readyState===4)done(xhr.status,xhr.responseText);};xhr.send(null);}

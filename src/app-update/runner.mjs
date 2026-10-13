@@ -104,6 +104,13 @@ export function createUpdateRun(control, { onState = () => {}, download = downlo
     confirm() { if (started) return completion; started = true; completion = run(); return completion; } };
 }
 
+export function updateWindowArguments(control, url, platform = process.platform) {
+  const sizePath = join(control.dataDir, "update-window-size.json");
+  return platform === "darwin" ? [url, sizePath]
+    : ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", control.windowScript,
+      "-Url", url, "-SizePath", sizePath];
+}
+
 export async function runAppUpdater() {
   process.title = "Quota Update Worker";
   const control = JSON.parse(await readFile(process.env.CODEX_QUOTA_UPDATE_CONTROL, "utf8"));
@@ -130,7 +137,7 @@ export async function runAppUpdater() {
   const descriptor = { id: control.id, pid: process.pid, url: window.url, logPath: join(control.directory, "updater.log") };
   await writeFile(`${control.registryPath}.tmp`, JSON.stringify(descriptor), { mode: 0o600 });
   await rename(`${control.registryPath}.tmp`, control.registryPath);
-  const args = process.platform === "darwin" ? [window.url] : ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", control.windowScript, "-Url", window.url];
+  const args = updateWindowArguments(control, window.url);
   console.log(`[update] 状态服务已启动：${window.url}`);
   viewer = createUpdateViewer({
     spawn: () => spawn(control.windowExecutable, args, { stdio: ["ignore", "inherit", "inherit"], windowsHide: true }),

@@ -7,7 +7,7 @@ import test from "node:test";
 import { releaseUpdate, fetchRelease } from "../src/app-update/releases.mjs";
 import { AppUpdateManager } from "../src/app-update/manager.mjs";
 import { downloadUpdate } from "../src/app-update/download.mjs";
-import { createUpdateRun } from "../src/app-update/runner.mjs";
+import { createUpdateRun, updateWindowArguments } from "../src/app-update/runner.mjs";
 import { inspectUpdateHistory } from "../src/app-update/history.mjs";
 import { startUpdateWindowServer, updateWindowFragment } from "../src/app-update/window.mjs";
 import { cleanUpdateEnvironment, loadedFileMatches, installNativeUpdate } from "../src/app-update/native-install.mjs";
@@ -22,6 +22,17 @@ function release(version = "0.1.295", platform = "macos-arm64.dmg") {
     digest: `sha256:${"a".repeat(64)}`,
     browser_download_url: `https://github.com/zzw6776/codex-quota-injector/releases/download/v${version}/${name}` }] };
 }
+
+test("原生窗口大小存储绑定应用数据目录，跨临时更新任务保持同一路径", () => {
+  const dataDir = join("application data", "quota");
+  const control = { dataDir, directory: "temporary-update-one", windowScript: "window.ps1" };
+  const url = "http://127.0.0.1:1234/fixture/";
+  const path = join(dataDir, "update-window-size.json");
+  assert.deepEqual(updateWindowArguments(control, url, "darwin"), [url, path]);
+  assert.deepEqual(updateWindowArguments(control, url, "win32"),
+    ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", "window.ps1", "-Url", url, "-SizePath", path]);
+  assert.deepEqual(updateWindowArguments({ ...control, directory: "temporary-update-two" }, url, "darwin"), [url, path]);
+});
 
 test("dev 忽略同版本/低版本比较，正式版按语义版本比较；仍必须匹配正式发布和架构", () => {
   const base = { version: "0.1.308", platform: "darwin", arch: "arm64" };

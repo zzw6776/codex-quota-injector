@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { SHADOW, startBrowser, fixtureData } from "./support/browser.mjs";
 import { waitFor } from "../test/helpers.mjs";
 import { startUpdateWindowServer } from "../src/app-update/window.mjs";
 import { createUpdateRun } from "../src/app-update/runner.mjs";
 
-test("首次更新确认页展示完整日志，长内容可滚动且立即更新按钮可见", { timeout: 30_000 }, async t => {
+test("更新确认页随窗口伸缩，长短空日志框等大且按钮贴近底部", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   await b.client.request('Emulation.setDeviceMetricsOverride', { width: 500, height: 510, deviceScaleFactor: 1, mobile: false });
   const notes = "## 更新内容\n" + Array.from({ length: 30 }, (_, index) => `- 改进 ${index + 1}：更新功能展示版本说明`).join('\n') + '\n<img src=x onerror="window.injected=true">';
@@ -21,8 +23,32 @@ test("首次更新确认页展示完整日志，长内容可滚动且立即更�
   assert.equal(await b.client.evaluate(`window.injected===true`), false);
   const layout = await b.client.evaluate(`(()=>{const notes=document.querySelector('.release-notes-content'),button=document.querySelector('.primary'),rect=button.getBoundingClientRect();notes.scrollTop=notes.scrollHeight;return {scrollable:notes.scrollHeight>notes.clientHeight,scrolled:notes.scrollTop>0,buttonVisible:rect.bottom<=innerHeight&&rect.top>=0,wrap:getComputedStyle(notes).whiteSpace}})()`);
   assert.deepEqual(layout, { scrollable: true, scrolled: true, buttonVisible: true, wrap: 'pre-wrap' });
-  state = { ...state, releaseNotes: "" };
-  await waitFor(() => b.client.evaluate(`document.querySelector('.release-notes-content').textContent==='该版本暂无更新日志'`));
+  const dimensions = [];
+  for (const [width, height] of [[500, 510], [800, 700], [420, 460]]) {
+    await b.client.request('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    let baseline;
+    for (const content of [notes, '- 更新窗口支持调整大小。', '']) {
+      state = { ...state, releaseNotes: content };
+      await waitFor(() => b.client.evaluate(`document.querySelector('.release-notes-content').textContent===${JSON.stringify(content || '该版本暂无更新日志')}`));
+      const bounds = await b.client.evaluate(`(()=>{const n=document.querySelector('.release-notes-content').getBoundingClientRect(),a=document.querySelector('.actions').getBoundingClientRect(),b=document.querySelector('.primary').getBoundingClientRect();return {width:n.width,height:n.height,gap:a.top-n.bottom,bottomGap:innerHeight-b.bottom,visible:b.top>=0&&b.bottom<=innerHeight,noPageOverflow:document.documentElement.scrollHeight<=innerHeight}})()`);
+      assert.equal(bounds.visible, true);
+      assert.equal(bounds.noPageOverflow, true);
+      assert.ok(bounds.gap >= 14 && bounds.gap <= 18, JSON.stringify(bounds));
+      assert.ok(bounds.bottomGap >= 22 && bounds.bottomGap <= 26, JSON.stringify(bounds));
+      if (baseline) assert.deepEqual(bounds, baseline, '日志数量不能改变展示框和按钮的位置');
+      else baseline = bounds;
+      if (width === 800 && content.length < 100 && content) {
+        const directory = join(import.meta.dirname, '..', '.runtime', 'update-resize-20261012');
+        await mkdir(directory, { recursive: true });
+        const screenshot = await b.client.request('Page.captureScreenshot');
+        await writeFile(join(directory, 'preview.png'), Buffer.from(screenshot.data, 'base64'));
+      }
+    }
+    dimensions.push(baseline);
+  }
+  assert.ok(dimensions[1].height > dimensions[0].height + 150, '拉高窗口后日志框必须同步增高');
+  assert.ok(dimensions[1].width > dimensions[0].width + 250, '拉宽窗口后日志框必须同步增宽');
+  assert.ok(dimensions[2].height < dimensions[0].height && dimensions[2].width < dimensions[0].width);
   state = { ...state, status: 'downloading' };
   await waitFor(() => b.client.evaluate(`document.querySelector('.release-notes')===null`));
 });
