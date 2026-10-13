@@ -39,6 +39,26 @@ test("dev 忽略同版本/低版本比较，正式版按语义版本比较；仍
   assert.equal(releaseUpdate(release("0.1.295", "windows-x64-Setup.exe"), { ...base, mode: "dev", platform: "win32", arch: "x64" }).version, "0.1.295");
 });
 
+test("发布说明经候选和更新 Worker 传到首次确认页；缺失说明兼容旧发布", () => {
+  const notes = "## 更新内容\n- 展示更新日志\n<img src=x onerror=alert(1)>";
+  const options = { version: "0.1.308", mode: "dev", platform: "darwin", arch: "arm64" };
+  const asset = releaseUpdate({ ...release(), body: `\n${notes}\n` }, options);
+  const run = createUpdateRun({ id: "notes", asset, owner: { version: options.version, mode: "dev" } });
+  assert.equal(run.state.status, "confirm");
+  assert.equal(run.state.releaseNotes, notes);
+  const html = updateWindowFragment(run.state);
+  assert.match(html, /更新日志/);
+  assert.ok(html.includes("## 更新内容\n- 展示更新日志\n&lt;img src=x onerror=alert(1)&gt;"));
+  assert.ok(html.indexOf("更新日志") < html.indexOf("立即更新"));
+  assert.doesNotMatch(html, /<img/);
+  assert.doesNotMatch(updateWindowFragment({ ...run.state, status: "downloading" }), /release-notes/);
+  for (const body of [undefined, null, "   ", {}]) {
+    const oldAsset = releaseUpdate({ ...release(), body }, options);
+    assert.equal(oldAsset.releaseNotes, "");
+    assert.match(updateWindowFragment(createUpdateRun({ asset: oldAsset, owner: options }).state), /该版本暂无更新日志/);
+  }
+});
+
 test("检查合并、ETag 304 保留结果；网络异常不清除候选，重复点击只开一个更新窗口", async t => {
   let calls = 0, launches = 0, resolveWindow;
   const manager = new AppUpdateManager({ version: "0.1.308", mode: "dev", platform: "darwin", arch: "arm64",
@@ -132,6 +152,8 @@ test("确认页只复用同一发布包和运行实例，终态开新确认页�
   assert.equal(canReuseUpdateWindow(matching, asset, owner), true);
   assert.equal(canReuseUpdateWindow(matching, asset, { ...owner, pid: 20 }), false);
   assert.equal(canReuseUpdateWindow(matching, { ...asset, assetId: 3 }, owner), false);
+  assert.equal(canReuseUpdateWindow(matching, { ...asset, releaseNotes: "新版说明" }, owner), false);
+  assert.equal(canReuseUpdateWindow({ ...matching, releaseNotes: "新版说明" }, { ...asset, releaseNotes: "新版说明" }, owner), true);
   for (const status of ["success", "failed", "cancelled"]) assert.equal(canReuseUpdateWindow({ ...matching, status }, asset, owner), false);
   for (const status of ["downloading", "verifying", "waiting", "installing", "launching"]) {
     assert.equal(canReuseUpdateWindow({ ...old, status }, asset, owner), true);

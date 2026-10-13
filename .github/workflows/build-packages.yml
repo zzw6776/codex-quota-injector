@@ -19,6 +19,35 @@ env:
   NODE_RUNTIME_VERSION: 22.23.1
 
 jobs:
+  release-notes:
+    name: Validate release notes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+
+      - name: Validate version release notes
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Invalid release version');
+          const path = `docs/releases/${version}.md`;
+          const notes = readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+          const [title, ...body] = notes.split('\n');
+          if (title !== `# ${version}`) throw new Error(`${path}: first line must be # ${version}`);
+          if (!body.some(line => /^[-*]\s+\S/.test(line) && /\p{Script=Han}/u.test(line))) {
+            throw new Error(`${path}: at least one nonempty Chinese change entry is required`);
+          }
+          console.log(`Validated ${path}`);
+          NODE
+
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -64,7 +93,7 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.architecture }} DMG
-    needs: test
+    needs: [test, release-notes]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -126,7 +155,7 @@ jobs:
 
   wsl-relay:
     name: WSL x64 Relay
-    needs: test
+    needs: [test, release-notes]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -173,7 +202,7 @@ jobs:
 
   windows-build:
     name: Windows x64 Build
-    needs: test
+    needs: [test, release-notes]
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -418,6 +447,7 @@ jobs:
           package_version="$(node -p "require('./package.json').version")"
           release_tag="v${package_version}"
           release_title="Codex Quota Injector ${package_version}"
+          notes_file="docs/releases/${package_version}.md"
           if [[ "${GITHUB_REF}" == refs/tags/* && "${GITHUB_REF_NAME}" != "${release_tag}" ]]; then
             echo "Release tag must match package.json: ${release_tag}" >&2
             exit 1
@@ -425,9 +455,13 @@ jobs:
 
           if gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${release_tag}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${release_tag}" \
+              --notes-file "${notes_file}" \
+              --title "${release_title}" \
+              --repo "${GITHUB_REPOSITORY}"
           else
             gh release create "${release_tag}" release-assets/* \
-              --generate-notes \
+              --notes-file "${notes_file}" \
               --latest \
               --target "${GITHUB_SHA}" \
               --title "${release_title}" \

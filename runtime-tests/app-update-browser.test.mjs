@@ -5,6 +5,28 @@ import { waitFor } from "../test/helpers.mjs";
 import { startUpdateWindowServer } from "../src/app-update/window.mjs";
 import { createUpdateRun } from "../src/app-update/runner.mjs";
 
+test("首次更新确认页展示完整日志，长内容可滚动且立即更新按钮可见", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  await b.client.request('Emulation.setDeviceMetricsOverride', { width: 500, height: 510, deviceScaleFactor: 1, mobile: false });
+  const notes = "## 更新内容\n" + Array.from({ length: 30 }, (_, index) => `- 改进 ${index + 1}：更新功能展示版本说明`).join('\n') + '\n<img src=x onerror="window.injected=true">';
+  const run = createUpdateRun({ asset: { version: "0.1.322", size: 1, releaseNotes: notes },
+    owner: { version: "0.1.321", mode: "formal" } });
+  let state = run.state;
+  const window = await startUpdateWindowServer({ state: () => state, confirm() {}, close() {} });
+  t.after(() => window.close());
+  await b.client.request('Page.navigate', { url: window.url });
+  await waitFor(() => b.client.evaluate(`document.querySelector('.release-notes-content') != null`));
+  assert.equal(await b.client.evaluate(`document.querySelector('.release-notes-content').textContent`), notes);
+  assert.equal(await b.client.evaluate(`document.querySelector('.release-notes-content img')`), null);
+  assert.equal(await b.client.evaluate(`window.injected===true`), false);
+  const layout = await b.client.evaluate(`(()=>{const notes=document.querySelector('.release-notes-content'),button=document.querySelector('.primary'),rect=button.getBoundingClientRect();notes.scrollTop=notes.scrollHeight;return {scrollable:notes.scrollHeight>notes.clientHeight,scrolled:notes.scrollTop>0,buttonVisible:rect.bottom<=innerHeight&&rect.top>=0,wrap:getComputedStyle(notes).whiteSpace}})()`);
+  assert.deepEqual(layout, { scrollable: true, scrolled: true, buttonVisible: true, wrap: 'pre-wrap' });
+  state = { ...state, releaseNotes: "" };
+  await waitFor(() => b.client.evaluate(`document.querySelector('.release-notes-content').textContent==='该版本暂无更新日志'`));
+  state = { ...state, status: 'downloading' };
+  await waitFor(() => b.client.evaluate(`document.querySelector('.release-notes')===null`));
+});
+
 test("新旧额度入口小绿点不占行，右下角更新按钮在局部刷新后仍有效且保留表单", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   const update = { available: true, version: "0.1.295" };

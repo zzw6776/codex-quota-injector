@@ -16,7 +16,8 @@ export async function activeUpdate(registryPath) {
     const state = await fetch(`${descriptor.url}state`, { signal: AbortSignal.timeout(1500) }).then(response => response.json());
     return state.id === descriptor.id ? { ...descriptor, windowReady: state.windowReady !== false,
       windowError: state.windowError ?? null, status: state.status, version: state.version,
-      assetId: state.assetId, ownerPid: state.ownerPid, currentVersion: state.currentVersion } : null;
+      assetId: state.assetId, ownerPid: state.ownerPid, currentVersion: state.currentVersion,
+      releaseNotes: state.releaseNotes ?? "" } : null;
   } catch { return null; }
 }
 
@@ -41,7 +42,8 @@ export function canReuseUpdateWindow(window, asset, owner) {
   if (!window) return false;
   if (!["confirm", "success", "failed", "cancelled"].includes(window.status)) return true;
   return window.status === "confirm" && window.version === asset.version && window.assetId === asset.assetId &&
-    window.ownerPid === owner.pid && window.currentVersion === owner.version;
+    window.ownerPid === owner.pid && window.currentVersion === owner.version &&
+    (window.releaseNotes ?? "") === (asset.releaseNotes ?? "");
 }
 
 export async function launchUpdateWindow(asset, { dataDir, owner, threadId, launchOptions, cdpPort = 9229 } = {}) {

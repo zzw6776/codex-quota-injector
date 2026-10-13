@@ -19,6 +19,7 @@ export function releaseUpdate(release, { version, mode, platform = process.platf
       url.pathname !== `/zzw6776/codex-quota-injector/releases/download/${release.tag_name}/${name}`) return null;
   if (mode !== "dev" && compareVersions(remote, version) <= 0) return null;
   return { version: remote, assetId: asset.id, name, size: asset.size, url: url.href,
+    releaseNotes: typeof release.body === "string" ? release.body.trim() : "",
     sha256: DIGEST.exec(String(asset.digest ?? ""))?.[1]?.toLowerCase() ?? null,
     platform, arch };
 }

@@ -19,6 +19,7 @@ export function createUpdateRun(control, { onState = () => {}, download = downlo
   let state = { id: control.id, status: "confirm", mode: control.owner.mode,
     ownerPid: control.owner.pid, assetId: control.asset.assetId,
     currentVersion: control.owner.version, version: control.asset.version, received: 0,
+    releaseNotes: control.asset.releaseNotes ?? "",
     total: control.asset.size, message: "是否更新到这个正式版本？" };
   let started = false, tracked = [], lock = null;
   const cancellation = new AbortController();
