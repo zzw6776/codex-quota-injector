@@ -710,6 +710,8 @@ export class ModelRouterManager {
     const turnId = nonEmptyString(metadata?.turn_id) ??
       turnIdFromMetadata(metadata) ??
       turnIdFromHeaders(headers);
+    // Keep legacy unkeyed notifications separate from the response ledger.
+    // This flag does not prevent the Router from recording exact usage.
     const rolloutUsageFallback = target.kind === "official";
     const effectiveRequestStartedAt = requestStartFromMetadata(metadata, requestStartedAt);
     const measuredConnectionId = target.kind === "official"

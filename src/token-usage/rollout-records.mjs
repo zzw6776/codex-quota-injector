@@ -175,9 +175,9 @@ function processRolloutRecord(record, state, { turns, markDirty }) {
         return;
       }
       if (existing?.source === "event" && !existing.rolloutUsageFallback) {
-        // Relay events are buffered and can arrive after this rollout record.
-        // Do not advance their deduplication watermark without adding usage:
-        // the matching relay event would otherwise be discarded as a duplicate.
+        // Router usage is recorded directly, or its event is still buffered.
+        // Leave summary watermarks untouched so the later event is not lost.
+        // Rollout-only history can still contain independent legacy summaries.
         const modelContextWindow = positiveNumber(record.payload.info?.model_context_window);
         if (modelContextWindow > 0) existing.modelContextWindow = modelContextWindow;
         markDirty();

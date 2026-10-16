@@ -4,6 +4,7 @@
 
 | 症状 | 已确认原因 | 快速核对 | 本机证据 |
 | --- | --- | --- | --- |
+| 临时侧聊回复下显示“本轮未获取到 Token 数据 · 价格无法计算” | 项目缺陷：官方请求统一等待 rollout，临时侧聊没有 rollout，已有旧式 usage 通知又被跳过 | 同一回合的用量事件确有非零 `last`，对应线程无 rollout；只读接口返回 ephemeral 提示；核对是否加载 Relay 98 和缓存 27 | `.runtime/sidebar-stats-diagnosis/`；[原始记录复算、定向测试与三轮恢复](test-reports/macos-native/2026-10-15-ephemeral-token-ledger.md)，macOS arm64；不能作为上游接受项 |
 | macOS 更新后启动或手动重开注入器，又打开同一版本的更新确认页 | 项目缺陷：更新 Worker 调用 `open` 未清理 updater 身份，Swift 外壳继续继承；同一外壳重开重复进入 updater 分支 | 正式包是否包含 0.1.321 的启动环境清理；重复窗口可能使用同一控制文件，控制目录数量不能代表进程数量 | `.runtime/update-role-20261012/`；[旧外壳原生复现及修复](test-reports/macos-native/2026-10-12-update-launch-role.md)，macOS arm64；不能作为上游接受项 |
 | Widget 主面板被任务列表盖住，超出侧栏部分被裁切 | 项目缺陷：侧栏重挂载关闭原生 Popover，但展开样式仍保留；Widget 193 恢复顶层状态 | 只有一个根节点；主面板有 manual 属性但展开时 `:popover-open` 为 false；父侧栏有 layout/paint containment；先核对实际是否加载 Widget 193 | `.runtime/ui-popover-diagnosis/`；[修复前后定向证据](test-reports/macos-native/2026-10-12-widget-popover-remount.md)，macOS 原生确认；不能作为上游接受项 |
 | read_thread 成功返回正确任务，completed 回合显式 items: [] | 官方桌面把旧页面历史游标用于之后产生的回合，过滤了内容 | 实际官方 build/CLI/环境匹配；SQLite 或 rollout 确有完整内容；历史为 paginated；实际页面游标边界早于空回合；相关读取链未改变 | `.runtime/wsl-desktop-attribution-20260916/official-relay-cursor-comparison.json` 与 `desktop-live-cursors.json`；完整排查见 [分页说明](read-thread-pagination-investigation.md) |

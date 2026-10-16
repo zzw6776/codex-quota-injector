@@ -377,7 +377,7 @@ test("自动检测出的纯文本历史模式按能力清理 reasoning 信封且
     "兼容改写不能修改调用方对象");
 });
 
-test("官方 HTTP 路由完整透传 Codex 能力字段且不重复记录 usage", async (t) => {
+test("官方 HTTP 路由完整透传 Codex 能力字段并记录带响应 ID 的 usage", async (t) => {
   const requests = [];
   const upstream = await startHttpServer(t, async (request, response) => {
     if (request.method === "GET") {
@@ -458,7 +458,11 @@ test("官方 HTTP 路由完整透传 Codex 能力字段且不重复记录 usage"
   const events = await readEvents(usageEventPath);
   const started = events.find((event) => event.type === "turn-started");
   assert.equal(started.rolloutUsageFallback, true);
-  assert.equal(events.some((event) => event.type === "usage"), false);
+  const usage = events.filter((event) => event.type === "usage");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].responseId, "resp_official");
+  assert.equal(usage[0].rolloutUsageFallback, false);
+  assert.equal(usage[0].tokenUsage.last.totalTokens, 24);
   assert.equal(events.filter((event) => event.type === "generation").length, 1);
   assert.equal(
     events.find((event) => event.type === "generation").generation.responseId,

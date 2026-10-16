@@ -179,7 +179,11 @@ test("官方 WebSocket 连续预热与 incomplete 响应保持帧透明且只统
   const started = usageEvents.find((event) => event.type === "turn-started");
   assert.equal(started.networkLatencySupported, true);
   assert.equal(started.networkConnectionId, generation.networkLatency.connectionId);
-  assert.equal(usageEvents.some((event) => event.type === "usage"), false);
+  const usages = usageEvents.filter((event) => event.type === "usage");
+  assert.equal(usages.length, 1);
+  assert.equal(usages[0].responseId, "resp_2");
+  assert.equal(usages[0].rolloutUsageFallback, false);
+  assert.equal(usages[0].tokenUsage.last.totalTokens, 14);
 
   for (const upstreamSocket of wss.clients) upstreamSocket.terminate();
   await waitFor(() => manager.getNetworkViewModel().status === "reconnecting");

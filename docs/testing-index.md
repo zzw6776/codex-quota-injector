@@ -88,6 +88,8 @@ macOS 定向启停补测使用 `npm run test:lifecycle -- --plan --task-tools-on
 
 ## 结果总表与证据来源
 
+2026-10-15 的[临时侧聊统计定向验证](test-reports/macos-native/2026-10-15-ephemeral-token-ledger.md)为 macOS arm64 免费公共组件的局部结果：最终提交 0.1.325，58/58 通过（复测 23 项，复用 35 项），保留移除自动迁移前的执行和审查证据；三个真实遗漏回合已由原始事件补回并确认当前页面收到、缓存落盘。源码 Relay 98，日常仍为 Relay 97，永久修复待加载新版；未执行真实模型或启停恢复。
+
 可随 Git 同步的历史报告见[测试报告归档](test-reports/README.md)。按组件、原生环境和架构各保留最近 5 次执行，关键证据额外保留；执行状态和对当前代码的适用性分列。原始 `.runtime/` 材料不自动上传，归档不触发测试。
 
 2026-09-17 的[状态与协议重构定向验证](test-reports/macos-native/2026-09-17-state-protocol-refactor.md)为 macOS arm64 免费公共组件的局部结果：最后统一执行 67/67 通过，零真实模型请求。此前账号 56/56、子任务 2/2 和 Widget 49/49 分别保留原报告，不合并为完整免费或跨平台验收。

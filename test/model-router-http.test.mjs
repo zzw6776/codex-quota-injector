@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { MODEL_ROUTER_TOKEN_HEADER, ModelRouterManager } from "../src/model-router.mjs";
 import { readJsonRequest, startHttpServer, useTempDir, waitFor } from "./helpers.mjs";
-import { routerSettings } from "./model-router/support.mjs";
+import { routerSettings, readEvents } from "./model-router/support.mjs";
 
 test("Router 可在没有第三方模型时单独观察官方请求并记录生成明细", async (t) => {
   const directory = await useTempDir(t, "official-observer-");
@@ -111,4 +111,36 @@ test("Router 拒绝未认证与非 API 请求，认证后的新 API 路径默认
   });
   assert.equal(outOfScope.status, 404);
   assert.equal(received.length, 1);
+});
+
+test("官方响应重放不抬高后续响应的累计用量", async (t) => {
+  let requestCount = 0;
+  const upstream = await startHttpServer(t, async (request, response) => {
+    await readJsonRequest(request);
+    requestCount++;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: requestCount < 3 ? "resp-replayed" : "resp-next",
+      status: "completed", output: [],
+      usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+    }));
+  });
+  const dataDir = await useTempDir(t);
+  const usageEventPath = join(dataDir, "usage.jsonl");
+  const manager = new ModelRouterManager({ officialApiBaseUrl: `${upstream.origin}/v1/` });
+  t.after(() => manager.close());
+  const config = await manager.configure({ ...routerSettings(upstream.origin), usageEventPath });
+  for (let index = 0; index < 3; index++) {
+    const response = await fetch(new URL("responses", config.baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer sk-fixture" },
+      body: JSON.stringify({ model: "official-model", input: "fixture", client_metadata: { thread_id: "replay", turn_id: "same-turn" } }),
+    });
+    assert.equal(response.status, 200);
+    await response.arrayBuffer();
+  }
+  await manager.close();
+  const usage = (await readEvents(usageEventPath)).filter(event => event.type === "usage");
+  assert.deepEqual(usage.map(event => event.responseId), ["resp-replayed", "resp-next"]);
+  assert.deepEqual(usage.map(event => event.tokenUsage.total.totalTokens), [15, 30]);
 });

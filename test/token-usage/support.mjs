@@ -152,4 +152,4 @@ async function createManager(t, { events = [], rollouts = [] } = {}) {
   return { manager, codexHome, dataDir };
 }
 
-export { event, protocolUsage, createManager, pricing, rolloutUsage, turnContext, tokenUsageRecord, tokenCount, taskComplete, compactedCheckpoint, appendEvents };
+export { event, protocolUsage, createManager, pricing, rolloutUsage, turnContext, tokenUsageRecord, tokenCount, taskComplete, compactedCheckpoint, appendEvents, writeRollout };

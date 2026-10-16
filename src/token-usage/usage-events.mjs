@@ -1,6 +1,6 @@
 import { MIN_GENERATION_METRICS_VERSION } from "../relay-contract.mjs";
 import { ROLLOUT_PARSER_VERSION, TERMINAL_TURN_STATUSES, positiveNumber, positiveInteger, nonEmptyString } from "./contract.mjs";
-import { emptyTurn, markUsageResponse, addUsage, fillUnknownSegmentModels, setTurnModel, normalizeProtocolUsage } from "./turns.mjs";
+import { emptyTurn, prepareRolloutUsageTurn, markUsageResponse, addUsage, fillUnknownSegmentModels, setTurnModel, normalizeProtocolUsage } from "./turns.mjs";
 import { recordGenerationSample, resetGenerationMetrics, recordGenerationToolTiming, normalizeNetworkLatency, recordGenerationUsage } from "./generation.mjs";
 
 function processTurnUsageEvent(event, { turns, rolloutFallbackThreads, threadId, model, updatedAt }) {
@@ -9,7 +9,9 @@ function processTurnUsageEvent(event, { turns, rolloutFallbackThreads, threadId,
     if (event.type === "turn-started") {
       const turn = turns.get(turnId) ?? emptyTurn(turnId, threadId, "event");
       turn.source = "event";
-      turn.rolloutUsageFallback ||= Boolean(event.rolloutUsageFallback);
+      if (turn.rolloutParserVersion !== ROLLOUT_PARSER_VERSION) {
+        turn.rolloutUsageFallback ||= Boolean(event.rolloutUsageFallback);
+      }
       if (Object.hasOwn(event, "networkLatencySupported")) {
         const previousConnectionId = turn.networkConnectionId;
         turn.networkLatencySupported = Boolean(event.networkLatencySupported);
@@ -46,9 +48,12 @@ function processTurnUsageEvent(event, { turns, rolloutFallbackThreads, threadId,
       if (!last) return;
       let turn = turns.get(turnId);
       if (!turn) turn = emptyTurn(turnId, threadId, "event");
-      // Relay events are authoritative for live turns, but a rollout record
-      // may have been loaded first. Preserve its counters and append only a
-      // genuinely newer event delta instead of replacing the whole turn.
+      const responseId = nonEmptyString(event.responseId);
+      // Official unkeyed notifications are provisional. Preserve independent
+      // legacy event counters; replace only a view awaiting official rollout.
+      if (!responseId && turn.rolloutParserVersion === ROLLOUT_PARSER_VERSION) return;
+      if (responseId && turn.rolloutUsageFallback) prepareRolloutUsageTurn(turn);
+      if (responseId && event.rolloutUsageFallback === false) turn.rolloutUsageFallback = false;
       turn.source = "event";
       if (!turn.startedAt) turn.startedAt = updatedAt;
       const modelSource = event.modelSource ?? "thread";
@@ -63,20 +68,6 @@ function processTurnUsageEvent(event, { turns, rolloutFallbackThreads, threadId,
         }
         setTurnModel(turn, model, modelSource);
       }
-      const waitForRollout = event.rolloutUsageFallback == null
-        ? turn.rolloutUsageFallback
-        : Boolean(event.rolloutUsageFallback);
-      if (waitForRollout) {
-        // Legacy official usage events and rollout records describe the same
-        // upstream response. Keep rollout authoritative for these events; an
-        // auxiliary event explicitly opts out when Codex may not persist it.
-        const modelContextWindow = positiveNumber(event.tokenUsage?.modelContextWindow);
-        if (modelContextWindow > 0) turn.modelContextWindow = modelContextWindow;
-        turn.updatedAt = updatedAt;
-        turns.set(turnId, turn);
-        return;
-      }
-      const responseId = nonEmptyString(event.responseId);
       const isNewResponse = responseId ? markUsageResponse(turn, responseId) : true;
       const shouldAdd = responseId
         ? isNewResponse

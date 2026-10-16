@@ -97,7 +97,7 @@ test("Relay 的 turn state 长度按任务缓存，旧缓存判断字段被丢�
   assert.equal(restored.getTurnStateViewModel("thread-b").byteLength, 780);
   await restored.flush();
   const migrated = JSON.parse(await readFile(cachePath, "utf8"));
-  assert.equal(migrated.version, 26);
+  assert.equal(migrated.version, 27);
   assert.ok(migrated.turnStates.every(state =>
     !Object.hasOwn(state, "status") && !Object.hasOwn(state, "expectedByteLength")));
 });

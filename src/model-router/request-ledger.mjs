@@ -164,26 +164,29 @@ export class RouterRequestLedger {
 
   recordUsage(context, usage, responseId = null) {
     if (!context.threadId || !context.turnId) return;
-    // Official Codex writes the same response usage to rollout. Keep that
-    // response-level ledger authoritative; TokenUsageManager pairs and ignores
-    // the legacy token_count summary that follows it.
-    if (context.rolloutUsageFallback) return;
+    // Ephemeral threads have no rollout. Record every observed response here;
+    // the consumer deduplicates it against any later rollout by response ID.
     const key = `${context.threadId}\u0000${context.turnId}`;
-    const total = this.turnUsage.get(key) ?? emptyUsage();
-    addUsage(total, usage);
-    this.turnUsage.delete(key);
-    this.turnUsage.set(key, total);
     const usageResponseId = nonEmptyString(responseId) ??
       `router-request:${context.requestId}`;
+    const ledger = this.turnUsage.get(key) ?? { total: emptyUsage(), responseIds: new Set() };
+    if (ledger.responseIds.has(usageResponseId)) return;
+    ledger.responseIds.add(usageResponseId);
+    // Match the consumer's bounded response identity window.
+    if (ledger.responseIds.size > 4096) ledger.responseIds.delete(ledger.responseIds.values().next().value);
+    const total = ledger.total;
+    addUsage(total, usage);
+    this.turnUsage.delete(key);
+    this.turnUsage.set(key, ledger);
     this.usageWriter?.write({
       type: "usage",
       threadId: context.threadId,
       turnId: context.turnId,
       model: context.model,
       modelSource: "usage",
-      rolloutUsageFallback: context.rolloutUsageFallback,
+      rolloutUsageFallback: false,
       responseId: usageResponseId,
-      tokenUsage: { last: usage, total },
+      tokenUsage: { last: usage, total: { ...total } },
     });
     this.#pruneState();
   }

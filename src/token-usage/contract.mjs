@@ -17,7 +17,9 @@ import { join } from "node:path";
 // Version 25 persists the per-task x-codex-turn-state length summary received
 // from a Relay process; it never stores the state value itself.
 // Version 26 retains only the measured length, model and observation time.
-const CACHE_VERSION = 26;
+// Version 27 records official usage directly in the response ledger rather
+// than leaving it pending until a rollout exists. Old history is not replayed.
+const CACHE_VERSION = 27;
 
 const MIN_SUPPORTED_CACHE_VERSION = 11;
 
