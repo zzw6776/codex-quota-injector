@@ -46,3 +46,19 @@ test("HTTP 200 错误包络仍按失败处理并移除不兼容的指定 tool_ch
   assert.ok(chatRequests.some(({ body }) =>
     body.tools?.length === 3 && body.tool_choice == null));
 });
+
+test("Responses 返回 502 Bad Gateway 时自动降级到 Chat 协议验证", async () => {
+  const provider = capabilityProvider({
+    responses: "missing",
+    image: "unsupported",
+  });
+  const fetchImpl = async (url, init) => {
+    if (String(url).endsWith("/responses")) {
+      return jsonResponse({ error: { message: "notion returned empty response after retries" } }, 502);
+    }
+    return provider.fetch(url, init);
+  };
+  const result = await probeModelCompatibility({ ...TARGET, fetchImpl });
+  assert.equal(result.protocol, "chat");
+  assert.equal(result.codexConformance, "passed");
+});

@@ -24,7 +24,9 @@ function createQuotaChip({ escapeHtml, number, levelClass }) {
     });
     const fullBalance = balanceText(credits);
     if (fullBalance) {
-      items.push(`<span class="quota-chip-item quota-chip-balance">${escapeHtml(balanceText(credits, rail))}</span>`);
+      const text = balanceText(credits, rail);
+      const charsAttr = rail && text.length > 4 ? ` data-chars="${text.length}"` : "";
+      items.push(`<span class="quota-chip-item quota-chip-balance"${charsAttr}>${escapeHtml(text)}</span>`);
     }
     if (!items.length) items.push('<span class="quota-chip-item">--</span>');
     return {

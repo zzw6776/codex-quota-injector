@@ -46,7 +46,7 @@ function canTryAlternateAfterProbeError(error) {
 
 function capabilityFromFailure(failure) {
   if (!failure) return "inconclusive";
-  if ([400, 404, 405, 415, 422, 501, 505].includes(failure.status)) return "unsupported";
+  if ([400, 404, 405, 415, 422, 501, 502, 505].includes(failure.status)) return "unsupported";
   return "inconclusive";
 }
 

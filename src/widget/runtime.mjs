@@ -422,6 +422,29 @@ function installQuotaWidget(
     }
   }
 
+  function fitRailChipText(chipButton, layout) {
+    if (!chipButton || layout !== "rail") return;
+    const items = chipButton.querySelectorAll(".quota-chip-item");
+    for (const item of items) {
+      item.style.fontSize = "";
+      item.style.transform = "";
+      item.style.transformOrigin = "";
+      const available = item.clientWidth;
+      const needed = item.scrollWidth;
+      if (available > 0 && needed > available) {
+        const computed = parseFloat(getComputedStyle(item).fontSize) || 11;
+        const ratio = available / needed;
+        const target = Math.max(6.5, Math.floor(computed * ratio * 10) / 10);
+        item.style.fontSize = `${target}px`;
+        if (item.scrollWidth > available) {
+          const finalRatio = Math.max(0.65, available / item.scrollWidth);
+          item.style.transform = `scaleX(${finalRatio.toFixed(3)})`;
+          item.style.transformOrigin = "center center";
+        }
+      }
+    }
+  }
+
   function render({ background = false } = {}) {
     const wrap = state.shadow?.querySelector(".quota-wrap");
     if (!wrap) return;
@@ -453,6 +476,7 @@ function installQuotaWidget(
     if (chipButton) {
       if (chipButton.innerHTML !== chip) chipButton.innerHTML = chip;
       if (chipButton.getAttribute("aria-label") !== chipLabel) chipButton.setAttribute("aria-label", chipLabel);
+      fitRailChipText(chipButton, state.layout);
     }
     // A detail page does not display quota timestamps or live network samples.
     // Compare its actual inputs, not the complete app view or editable DOM.

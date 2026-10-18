@@ -47,9 +47,9 @@ const WIDGET_STYLES = {
     .panel-version:has(.app-update-error) { flex-wrap:wrap; }
     .app-update-error { flex-basis:100%;color:#dc4c3f;overflow-wrap:anywhere; }
     .quota-chip-item { display: inline-flex; align-items: baseline; }
-    :host([data-layout="rail"]) .quota-wrap { width: 36px; height: auto; }
+    :host([data-layout="rail"]) .quota-wrap { width: 44px; margin: 0 -4px; height: auto; }
     :host([data-layout="rail"]) .quota-chip {
-      position: relative; width: 36px; height: auto; min-height: 36px; padding: 6px 1px; gap: 6px;
+      position: relative; width: 44px; height: auto; min-height: 36px; padding: 6px 0px; gap: 6px;
       flex-direction: column; border-radius: 10px;
       font-size: 11px; line-height: 16px;
       color: var(--color-text-tertiary, var(--token-text-secondary, #777780));
@@ -58,10 +58,26 @@ const WIDGET_STYLES = {
     :host([data-layout="rail"]) .quota-chip:focus-visible {
       color: var(--color-text-primary-ghost, var(--color-text-primary, #1a1c1f));
     }
-    :host([data-layout="rail"]) .quota-chip-item { display: block; flex: 0 0 auto; width: 100%; text-align: center; }
+    :host([data-layout="rail"]) .quota-chip-item {
+      display: flex; justify-content: center; align-items: center;
+      flex: 0 0 auto; width: 100%; max-width: 100%; text-align: center;
+      white-space: nowrap; overflow: hidden; box-sizing: border-box;
+    }
     :host([data-layout="rail"]) .quota-chip-item + .quota-chip-balance {
       padding-top: 6px; border-top: 1px solid rgba(127,127,137,.22);
     }
+    :host([data-layout="rail"]) .quota-chip-balance {
+      font-variant-numeric: normal; padding-left: 0; padding-right: 0;
+      width: 100%; max-width: 100%;
+    }
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="5"] { font-size: 10.5px; letter-spacing: -0.2px; }
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="6"] { font-size: 10.2px; letter-spacing: -0.2px; }
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="7"] { font-size: 10px; letter-spacing: -0.25px; }
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="8"] { font-size: 9.8px; letter-spacing: -0.3px; }
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="9"] { font-size: 9.2px; letter-spacing: -0.35px; }
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="10"] { font-size: 8.5px; letter-spacing: -0.4px; }
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="11"],
+    :host([data-layout="rail"]) .quota-chip-item[data-chars="12"] { font-size: 8.0px; letter-spacing: -0.4px; }
     :host([data-layout="rail"]) .quota-chip > .host-health-dot { position: absolute; top: 3px; right: 3px; width: 4px; height: 4px; }
     .host-health-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 999px; background: #d97706; box-shadow: 0 0 0 2px rgba(217,119,6,.13); }
     .host-health-dot.ready { background: #43a665; box-shadow: 0 0 0 2px rgba(67,166,101,.13); }
