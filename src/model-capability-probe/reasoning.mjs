@@ -3,22 +3,27 @@ import { chatFunctionTool } from "./tools.mjs";
 import { capabilityFromFailure, probeError, isToolChoiceRejection, continuationFailure, isReasoningEnvelopeRejection } from "./failures.mjs";
 import { hasReasoningEvidence, hasProtocolToolCall, hasResponseContinuation, responseOutput, findResponseToolCall, stripReasoningEnvelope } from "./payloads.mjs";
 
-async function probeReasoning(request, modelId, protocol, { onEffort = null } = {}) {
+async function probeReasoning(request, modelId, protocol, { onEffort = null, delayMs = 2000 } = {}) {
   const efforts = [];
   let inconclusive = false;
   for (const effort of PROBE_REASONING_EFFORTS) {
     onEffort?.(effort);
+    if ((efforts.length > 0 || inconclusive) && delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    const nonce = Math.random().toString(36).slice(2, 8);
+    const prompt = `Think briefly, then reply with exactly OK. (probe: ${nonce})`;
     const response = protocol === "responses"
       ? await request("responses", {
           model: modelId,
-          input: "Think briefly, then reply with exactly OK.",
+          input: prompt,
           reasoning: { effort },
           max_output_tokens: 256,
           store: false,
         })
       : await request("chat/completions", {
           model: modelId,
-          messages: [{ role: "user", content: "Think briefly, then reply with exactly OK." }],
+          messages: [{ role: "user", content: prompt }],
           reasoning_effort: effort,
           max_tokens: 256,
           stream: false,

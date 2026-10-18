@@ -128,3 +128,26 @@ test("推理历史续接默认提供 1024 Token 输出预算且不误降级历�
   assert.ok(continuations.every(({ body }) => body.input.some((item) => item?.encrypted_content)),
     "输出预算不足不能触发 reasoning 历史降级");
 });
+
+test("推理强度探测注入独立动态 nonce 并按 delayMs 间隔请求", async () => {
+  const provider = capabilityProvider({
+    responses: "missing",
+    thinkingByDefault: true,
+    image: "unsupported",
+  });
+  const result = await probeModelCompatibility({
+    ...TARGET,
+    fetchImpl: provider.fetch,
+  });
+
+  assert.equal(result.supportsReasoning, true);
+  const reasoningRequests = provider.requests.filter(({ body }) =>
+    body.reasoning_effort && body.messages?.[0]?.content?.includes("probe:"));
+  assert.equal(reasoningRequests.length, 5, "5 个档位探测请求均应包含独立 probe nonce");
+  const nonces = reasoningRequests.map(({ body }) => {
+    const match = body.messages[0].content.match(/probe:\s*([a-z0-9]+)/);
+    return match ? match[1] : null;
+  });
+  assert.equal(new Set(nonces).size, 5, "每个档位的 nonce 必须唯一，防止被判定为重复会话");
+});
+

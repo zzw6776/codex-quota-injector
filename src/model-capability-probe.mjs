@@ -243,6 +243,7 @@ export async function probeModelCompatibility({
     : "unsupported";
   reportProgress(4, "reasoning", "正在检测推理能力与可用强度");
   const reasoning = await probeReasoning(request, target.modelId, protocol, {
+    delayMs: retryDelayMs === 0 ? 0 : 2000,
     onEffort: (effort) => reportProgress(
       4,
       "reasoning",
