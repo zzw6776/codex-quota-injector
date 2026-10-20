@@ -377,7 +377,6 @@ class HostHealthTracker {
           serverStatus: "notStarted", threadId, requiredTools: this.requiredTools,
           missingTools: [], toolsVerified: false, checks: {}, diagnostic: null, updatedAt: this.now() },
         startupStatus: null, timer: null, revision: this.revision, userMessageObserved: false,
-        readThreadRetryPending: false,
       });
     }
     return this.contexts.get(threadId);
@@ -447,7 +446,6 @@ class HostHealthTracker {
     }
     if (["starting", "failed", "cancelled"].includes(serverStatus)) {
       context.revision = ++this.revision;
-      context.readThreadRetryPending = false;
       this.clearGraceTimer(context);
       context.state.checks = {};
       context.state.diagnostic = null;
@@ -468,7 +466,6 @@ class HostHealthTracker {
     if (!this.requiredTools.includes(tool) || ["failed", "cancelled", "starting"].includes(context.startupStatus)) return null;
     const proof = { threadId, tool, requestId, healthRevision: context.revision, targetThreadId,
       startedAt: this.now() };
-    if (tool === "read_thread") context.readThreadRetryPending = false;
     context.state.checks = { ...context.state.checks,
       [tool]: { status: "checking", requestId, startedAt: proof.startedAt, checkedAt: null, detail: null } };
     this.clearGraceTimer(context);
@@ -511,31 +508,34 @@ class HostHealthTracker {
 
   ownsTask(threadId) { return this.contexts.get(threadId)?.observed === true; }
 
-  setReadThreadRetryPending(threadId, pending) {
+  setToolRetryPending(threadId, tool, pending) {
     const context = this.context(threadId);
-    context.readThreadRetryPending = pending;
+    const check = context.state.checks?.[tool];
+    if (!check) return;
+    context.state.checks = { ...context.state.checks,
+      [tool]: { ...check, retryPending: pending } };
     this.updateCheckSummary(context);
   }
 
   updateCheckSummary(context) {
     const checks = this.requiredTools.map(tool => context.state.checks?.[tool]);
     const passed = checks.filter(check => check?.status === "passed").length;
-    const failed = checks.filter(check => check?.status === "failed").length;
-    const checking = checks.some(check => !check || check.status === "checking");
+    const failed = checks.filter(check => check?.status === "failed" && !check.retryPending).length;
+    const checking = checks.some(check => !check || check.status === "checking" || check.retryPending);
     const ready = passed === checks.length;
-    const awaitingReadThread = (!context.userMessageObserved || context.readThreadRetryPending) && !checking && !failed &&
+    const awaitingFirstUserMessage = !context.userMessageObserved && !checking && !failed &&
       this.requiredTools.every(tool => {
         const check = context.state.checks?.[tool];
         return check?.status === "passed" ||
           (tool === "read_thread" && check?.status === "unconfirmed" &&
             isThreadNotMaterialized(check.detail));
       });
-    void this.update({ status: ready ? "ready" : failed ? "degraded" : checking || awaitingReadThread ? "starting" : "unconfirmed",
+    void this.update({ status: ready ? "ready" : failed ? "degraded" : checking || awaitingFirstUserMessage ? "starting" : "unconfirmed",
       code: ready ? null : failed ? "tool-call-failed" : checking ? "tool-checking"
-        : awaitingReadThread ? (context.userMessageObserved ? "awaiting-thread-readable" : "awaiting-first-user-message") : "tool-check-unconfirmed",
+        : awaitingFirstUserMessage ? "awaiting-first-user-message" : "tool-check-unconfirmed",
       message: ready ? `${passed} 项任务工具检查通过` : failed ? `${passed} 项通过，${failed} 项异常`
         : checking ? `检查中：已通过 ${passed}/${checks.length} 项`
-          : awaitingReadThread ? (context.userMessageObserved ? "等待任务内容可读取，正在自动重试" : "等待任务首条消息后自动检查读取任务内容")
+          : awaitingFirstUserMessage ? "等待任务首条消息后自动检查读取任务内容"
             : `${passed} 项通过，${checks.length - passed} 项未确认`,
       toolsVerified: ready, verification: "calls", missingTools: [], detail: null,
     }, context);

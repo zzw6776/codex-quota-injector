@@ -321,6 +321,7 @@ export async function runAppServerRelay() {
       else if (request.action === "diagnose") requestCodexAppToolsDiagnostic(relayState, request.threadId);
       else requestCodexAppToolsStatus(relayState, request.threadId, {
         retry: request.action === "check", priority: true,
+        resetRetryBudget: request.action === "check",
       });
     },
     onError: (error) => {

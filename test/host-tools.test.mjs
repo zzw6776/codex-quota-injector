@@ -47,26 +47,23 @@ test("[LCH-04] 跨任务最多八个请求，已选任务优先且结果互不�
   assert.equal(state.hostHealth.snapshot("b").checks.list_threads.status, "checking");
 });
 
-test("[LCH-04] 超时仅未确认，同代迟到成功恢复，重试只补未通过项", async t => {
+test("[LCH-04] 超时自动重试未通过项，迟到响应不能覆盖新请求", async t => {
   const { state, sent, ready, reply } = await fixture(t);
   ready("task");
   sent.slice(0, 3).forEach(x => reply(x));
   const last = sent[3];
   state.pendingRequests.get(last.id).timer();
-  assert.equal(state.hostHealth.snapshot("task").status, "unconfirmed");
+  assert.equal(state.hostHealth.snapshot("task").status, "starting");
+  assert.equal(sent.length, 5);
+  assert.equal(sent[4].params.tool, last.params.tool);
   reply(last);
+  assert.equal(state.hostHealth.snapshot("task").status, "starting");
+  reply(sent[4]);
   assert.equal(state.hostHealth.snapshot("task").status, "ready");
-  requestCodexAppToolsStatus(state, "task", { retry: true });
-  assert.equal(sent.length, 8);
-  sent.slice(4, 7).forEach(x => reply(x));
-  reply(sent[7], null, { message: "Unauthorized Bearer private-secret" });
-  requestCodexAppToolsStatus(state, "task", { retry: true });
-  assert.equal(sent.length, 9);
-  assert.equal(sent[8].params.tool, "get_usage_limits");
-  assert.doesNotMatch(JSON.stringify(state.hostHealth.snapshot()), /private-secret/);
 });
 
 const notMaterialized = "thread task is not materialized yet; thread/turns/list is unavailable before first user message";
+const hostUnavailable = "Could not determine whether Codex thread task exists. Unavailable or failed hosts: local";
 
 function notify(state, method, params) {
   state.threadContexts ??= new Map(); state.turnModels ??= new Map(); state.emitUsageEvent ??= () => {};
@@ -108,24 +105,28 @@ test("[LCH-04] 回合开始不能证明可读，用户消息完成后只补测 r
   assert.equal(state.hostHealth.snapshot("task").toolsVerified, true);
 });
 
-test("[LCH-04] 用户消息先于旧探针结果，补测的其他错误立即保留", async t => {
+test("[LCH-04] 用户消息先于旧探针结果，补测错误耗尽预算后保留", async t => {
   const { state, sent, ready, reply, timers } = await fixture(t);
   ready("task"); userMessage(state);
   assert.equal(sent.length, 4, "旧探针仍在途时不重复派发");
   finishInitialRead(sent, reply);
   assert.equal(sent.length, 5);
-  reply(sent[4], null, { message: "Permission denied" });
-  userMessage(state);
+  for (let i = 4; i < 8; i++) {
+    reply(sent[i], null, { message: "Unauthorized Bearer private-secret" });
+    userMessage(state);
+    if (i < 7) fireRetry(timers);
+  }
   assert.equal(state.hostHealth.snapshot("task").status, "degraded");
-  assert.equal(sent.length, 5);
+  assert.equal(sent.length, 8);
   assert.equal(timers.size, 0);
+  assert.doesNotMatch(JSON.stringify(state.hostHealth.snapshot()), /private-secret/);
 });
 
 test("[LCH-04] 用户消息完成后仍未落盘，退避后自动恢复且不重测成功项", async t => {
   const { state, sent, ready, reply, timers } = await fixture(t);
   ready("task"); finishInitialRead(sent, reply); userMessage(state);
   reply(sent[4], null, { message: notMaterialized });
-  assert.equal(state.hostHealth.snapshot("task").code, "awaiting-thread-readable");
+  assert.equal(state.hostHealth.snapshot("task").code, "tool-checking");
   userMessage(state);
   assert.equal(timers.size, 1);
   fireRetry(timers);
@@ -135,6 +136,22 @@ test("[LCH-04] 用户消息完成后仍未落盘，退避后自动恢复且不�
   assert.equal(state.hostHealth.snapshot("task").status, "ready");
   assert.equal(timers.size, 0);
   assert.ok(sent.slice(4).every(x => x.params.tool === "read_thread"));
+});
+
+test("[LCH-04] 读取任务时本地主机瞬时不可用，退避后自动恢复", async t => {
+  const { state, sent, ready, reply, timers } = await fixture(t);
+  ready("task"); userMessage(state);
+  const read = sent.find(request => request.params.tool === "read_thread");
+  sent.filter(request => request !== read).forEach(request => reply(request));
+  reply(read, null, { message: hostUnavailable });
+  assert.equal(sent[4].params.tool, "read_thread");
+  assert.equal(state.hostHealth.snapshot("task").checks.read_thread.status, "checking");
+  reply(sent[4], null, { message: hostUnavailable });
+  assert.equal(state.hostHealth.snapshot("task").code, "tool-checking");
+  fireRetry(timers);
+  reply(sent[5]);
+  assert.equal(state.hostHealth.snapshot("task").status, "ready");
+  assert.equal(timers.size, 0);
 });
 
 test("[LCH-04] 未落盘持续存在时有界停止，重复用户消息不能重置重试预算", async t => {
@@ -148,20 +165,88 @@ test("[LCH-04] 未落盘持续存在时有界停止，重复用户消息不能�
   assert.equal(sent.length, 8);
   assert.equal(timers.size, 0);
   assert.equal(state.hostHealth.snapshot("task").status, "unconfirmed");
-  requestCodexAppToolsStatus(state, "task", { retry: true });
-  reply(sent[8]);
+  requestCodexAppToolsStatus(state, "task", { retry: true, resetRetryBudget: true });
+  reply(sent[8], null, { message: notMaterialized });
+  assert.equal(sent[9].params.tool, "read_thread", "用户主动检查会获得新的有界重试预算");
+  reply(sent[9]);
   assert.equal(state.hostHealth.snapshot("task").toolsVerified, true, "仍允许用户主动检查");
 });
 
-test("[LCH-04] 其他读取错误不因用户消息自动重试", async t => {
-  const { state, sent, ready, reply } = await fixture(t);
+test("[LCH-04] 任一工具错误进入同一有界重试，耗尽后保留失败", async t => {
+  const { state, sent, ready, reply, timers } = await fixture(t);
   ready("task");
-  const read = sent.find(request => request.params.tool === "read_thread");
-  sent.filter(request => request !== read).forEach(request => reply(request));
-  reply(read, null, { message: "Permission denied" });
-  userMessage(state);
-  assert.equal(sent.length, 4);
+  const failed = sent.find(request => request.params.tool === "list_projects");
+  sent.filter(request => request !== failed).forEach(request => reply(request));
+  reply(failed, null, { message: "Permission denied" });
+  for (let i = 4; i < 8; i++) {
+    reply(sent[i], null, { message: "Permission denied" });
+    if (i < 7) fireRetry(timers);
+  }
+  assert.equal(sent.length, 8);
+  assert.ok(sent.slice(4).every(x => x.params.tool === "list_projects"));
   assert.equal(state.hostHealth.snapshot("task").status, "degraded");
+  assert.equal(timers.size, 0);
+});
+
+test("[LCH-04] 正常工具调用与探针重叠后继续剩余重试且不并发派发", async t => {
+  const { state, sent, ready, reply, timers } = await fixture(t);
+  ready("task");
+  const initial = sent.find(request => request.params.tool === "list_projects");
+  sent.slice(0, 4).filter(request => request !== initial).forEach(request => reply(request));
+
+  const direct = { id: 91, method: "mcpServer/tool/call", params: {
+    threadId: "task", server: "codex_app", tool: "list_projects", arguments: {} } };
+  assert.equal(rewriteClientLine(JSON.stringify(direct), state), JSON.stringify(direct));
+  const directFailure = JSON.stringify({ id: 91, error: { message: "temporary" } });
+  assert.equal(rewriteServerLine(directFailure, state), directFailure);
+  assert.equal(sent.length, 4, "已有探针在途时不能并发补发");
+
+  reply(initial, null, { message: "temporary" });
+  assert.equal(sent.length, 5);
+  reply(sent[4], null, { message: "temporary" });
+  notify(state, "item/started", { threadId: "task", item: {
+    id: "model-tool", type: "mcpToolCall", server: "codex_app", tool: "list_projects",
+    arguments: "{}",
+  } });
+  fireRetry(timers);
+  assert.equal(sent.length, 5, "正常工具调用检查中时不能并发补发");
+  assert.equal(state.hostToolScheduler.toolRetries.get("task:list_projects").attempts, 1,
+    "未实际派发的退避不能消耗预算");
+
+  notify(state, "item/completed", { threadId: "task", item: {
+    id: "model-tool", type: "mcpToolCall", server: "codex_app", tool: "list_projects",
+    status: "failed", error: { message: "temporary" },
+  } });
+  assert.equal(state.hostHealth.snapshot("task").status, "starting");
+  fireRetry(timers);
+  assert.equal(sent.length, 6);
+  reply(sent[5]);
+  assert.equal(state.hostHealth.snapshot("task").status, "ready");
+  assert.equal(timers.size, 0);
+});
+
+test("[LCH-04] 正常调用成功会撤销满并发队列中的旧探针", async t => {
+  const { state, sent, ready, reply } = await fixture(t);
+  for (const threadId of ["a", "b", "c"]) ready(threadId);
+  const initial = sent.find(request =>
+    request.params.threadId === "a" && request.params.tool === "list_projects");
+  reply(initial, null, { message: "temporary" });
+  assert.equal(state.hostToolScheduler.queue.has("a:list_projects"), true);
+  requestCodexAppToolsStatus(state, "a", { priority: true });
+
+  const direct = { id: 91, method: "mcpServer/tool/call", params: {
+    threadId: "a", server: "codex_app", tool: "list_projects", arguments: {} } };
+  assert.equal(rewriteClientLine(JSON.stringify(direct), state), JSON.stringify(direct));
+  const success = JSON.stringify({ id: 91, result: successfulHostToolResult("list_projects", "a") });
+  assert.equal(rewriteServerLine(success, state), success);
+  assert.equal(state.hostToolScheduler.queue.has("a:list_projects"), false);
+
+  const before = sent.length;
+  const release = sent.find(request => state.hostToolScheduler.active.has(request.id));
+  reply(release);
+  assert.equal(sent.length, before + 1);
+  assert.equal(sent.at(-1).params.threadId, "c", "释放槽位后只能继续尚未检查的任务");
+  assert.equal(state.hostHealth.snapshot("a").checks.list_projects.status, "passed");
 });
 
 test("[LCH-04] 用户消息早于工具就绪时保留触发事实，不提前派发", async t => {
@@ -208,19 +293,22 @@ for (const action of ["restart", "reload", "close", "manual", "timeout"]) {
         assert.equal(state.hostHealth.snapshot("task").status, "ready");
       }
     } else {
-      requestCodexAppToolsStatus(state, "task", { retry: true });
+      requestCodexAppToolsStatus(state, "task", { retry: true, resetRetryBudget: true });
       assert.equal(timers.has(oldTimer), false);
       if (action === "timeout") {
         const pending = state.pendingRequests.get(sent[5].id);
         timers.delete(pending.timer); pending.timer();
+        const count = sent.length;
         oldTimer();
-        assert.equal(state.hostHealth.snapshot("task").status, "unconfirmed");
+        assert.equal(sent.length, count, "已取消的旧退避不能覆盖新退避");
+        assert.equal(state.hostHealth.snapshot("task").status, "starting");
+        assert.equal(timers.size, 1);
       } else {
         reply(sent[5]); oldTimer();
         assert.equal(state.hostHealth.snapshot("task").status, "ready");
+        assert.equal(sent.length, 6);
+        assert.equal(timers.size, 0);
       }
-      assert.equal(sent.length, 6);
-      assert.equal(timers.size, 0);
     }
   });
 }
@@ -349,14 +437,20 @@ test("[LCH-04] 全局就绪不调用无作用域探针，关闭释放计时器",
   assert.equal(timers.size, 0);
 });
 
-test("[LCH-04] 同步发送失败不会重入重复派发，四项均留下失败证据", async t => {
-  const { state, ready } = await fixture(t);
+test("[LCH-04] 同步发送失败按工具独立有界重试，耗尽后留下失败证据", async t => {
+  const { state, ready, timers } = await fixture(t);
   const calls = [];
   state.sendUpstream = message => { calls.push(message); throw new Error("transport disconnected"); };
   ready("task");
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 8, "首次失败后每项立即重试一次");
+  for (let round = 0; round < 3; round++) {
+    for (const timer of [...timers]) { timers.delete(timer); timer(); }
+  }
+  assert.equal(calls.length, 20, "四项工具各执行一次初检和四次重试");
   assert.equal(new Set(calls.map(x => x.params.tool)).size, 4);
   assert.ok(Object.values(state.hostHealth.snapshot("task").checks).every(x => x.status === "failed"));
+  assert.equal(state.hostHealth.snapshot("task").status, "degraded");
+  assert.equal(timers.size, 0);
   assert.equal(state.hostToolScheduler.active.size, 0);
 });
 

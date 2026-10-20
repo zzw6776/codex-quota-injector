@@ -1,6 +1,7 @@
 import { isCodexAppServer, isMcpStatusListMethod } from "../host-health.mjs";
 import { THREAD_METHODS, MODEL_LIST_METHOD } from "./contract.mjs";
-import { handleHostToolReloadResponse, noteHostToolUserMessage, requestCodexAppToolsStatus } from "./host-tools.mjs";
+import { handleHostToolReloadResponse, noteHostToolUserMessage, requestCodexAppToolsStatus,
+  resumeHostToolRetry } from "./host-tools.mjs";
 import { rewriteModelListResponse } from "./model-catalog.mjs";
 import { learnThreadContexts, restoreThreadContext, updateThreadContext, rememberTurnModel } from "./thread-context.mjs";
 import { captureUsageNotification } from "./usage.mjs";
@@ -14,6 +15,11 @@ function rewriteServerLine(line, state) {
     return line;
   }
   state.hostHealth?.observeServerMessage(message);
+  const item = message?.params?.item;
+  if (message?.method === "item/completed" && item?.type === "mcpToolCall" &&
+      isCodexAppServer(item.server)) {
+    resumeHostToolRetry(state, message.params.threadId, item.tool ?? item.name);
+  }
   if (message?.method === "mcpServer/startupStatus/updated" &&
     isCodexAppServer(message.params?.name)) {
     requestCodexAppToolsStatus(state, message.params.threadId ?? null);
@@ -43,6 +49,7 @@ function rewriteServerLine(line, state) {
   }
   if (pending.hostToolCall) {
     state.hostHealth?.observeToolResult(message.result, message.error, pending);
+    resumeHostToolRetry(state, pending.threadId, pending.tool);
     return line;
   }
   if (message.error) {

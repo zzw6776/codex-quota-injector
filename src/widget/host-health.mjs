@@ -1,5 +1,7 @@
 // Browser-serializable factory: all external values arrive through this explicit boundary.
 function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
+  const isChecking = check => check?.status === "checking" || check?.retryPending === true;
+
   function presentation(health) {
     const checks = Object.values(health?.checks ?? {});
     const legacyUnknown = ["status-query-failed", "startup-status-timeout", "health-check-failed",
@@ -27,7 +29,7 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
     const open = expanded(health);
     // Routine connection/check progress belongs in the flyout, not the account panel.
     if (!["degraded", "unconfirmed"].includes(view.status)) return "";
-    const checking = view.checks.some(check => check.status === "checking");
+    const checking = view.checks.some(isChecking);
     const recheck = health.canCheck && health.threadId
       ? `<button class="btn host-health-recheck" type="button" title="实际调用当前任务的 4 项必需工具，确认是否可用" ${checking ? "disabled" : ""}>${checking ? "检查中…" : "重新检查"}</button>` : "";
     const message = view.status === "unconfirmed" && health.code === "startup-status-timeout"
@@ -46,7 +48,7 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
   function renderHostHealthFlyout(health) {
     if (!expanded(health)) return "";
     const view = presentation(health);
-    const checking = view.checks.some(check => check.status === "checking");
+    const checking = view.checks.some(isChecking);
     const message = view.status === "unconfirmed" && health?.code === "startup-status-timeout"
       ? "等待工具服务就绪超时，暂时无法确认状态。" : health?.message;
     return `<aside class="host-health-flyout ${view.status}" popover="manual" role="dialog" aria-label="任务工具检查详情">
@@ -79,7 +81,8 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
     const rows = (health.requiredTools ?? []).map(tool => {
       const check = health.checks?.[tool];
       const checkedAt = check?.checkedAt ? ` title="检查时间：${escapeHtml(formatUpdatedAt(check.checkedAt))}"` : "";
-      const status = Object.hasOwn(labels, check?.status) ? check.status : "unknown";
+      const status = isChecking(check) ? "checking"
+        : Object.hasOwn(labels, check?.status) ? check.status : "unknown";
       return `<li><div class="host-health-check-row"${checkedAt}><span>${escapeHtml(hostToolLabel(tool))}</span><span class="host-health-check-status ${status}">${labels[status] ?? "尚未检查"}</span></div>
         ${check?.detail ? `<div class="host-health-detail">${escapeHtml(check.detail)}</div>` : ""}</li>`;
     }).join("");

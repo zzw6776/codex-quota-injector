@@ -52,6 +52,18 @@ test("正常连接与检查进度仅进浮窗，超时和调用失败仍提醒",
   assert.match(widget.renderHostHealthBanner({ ...health, status: "degraded", code: "tool-call-failed" }), /role="alert"/);
 });
 
+test("退避中的上次失败按检查中显示，不提前报异常", () => {
+  const health = { required: true, threadId: "task", status: "starting", canCheck: true,
+    code: "tool-checking", message: "检查中：已通过 3/4 项", requiredTools: ["read_thread"],
+    checks: { read_thread: { status: "failed", retryPending: true, detail: "temporary failure" } } };
+  const state = { data: { hostHealth: health }, hostHealthDetailsThread: "task" };
+  const flyout = createHostHealth({ state, escapeHtml: String, formatUpdatedAt: String })
+    .renderHostHealthFlyout(health);
+  assert.match(flyout, /host-health-check-status checking">检查中/);
+  assert.match(flyout, /检查中…/);
+  assert.doesNotMatch(flyout, /host-health-check-status failed">异常/);
+});
+
 test("按钮分别发送检查、目录诊断和重载动作并绑定任务，详情操作不调用工具", () => {
   const listeners = new Map(), actions = [];
   const state = { data: { hostHealth: { threadId: "task", sessionId: "session" } } };
