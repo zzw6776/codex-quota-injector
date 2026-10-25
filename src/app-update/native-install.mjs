@@ -70,7 +70,11 @@ export async function stopForUpdate(control, { signal } = {}) {
   return lock;
 }
 
-export async function installNativeUpdate(control, prepared, { signal } = {}) {
+export async function installNativeUpdate(control, prepared, {
+  signal,
+  execImpl = exec,
+  environment = process.env,
+} = {}) {
   signal?.throwIfAborted();
   if (control.asset.platform === "darwin") {
     await rm(control.installedApp, { recursive: true, force: true });
@@ -82,7 +86,12 @@ export async function installNativeUpdate(control, prepared, { signal } = {}) {
   } else {
     // NSIS calls --prepare-update; the runner must release its lock before it
     // starts so the installer can acquire the same update-preparation lock.
-    await exec(prepared.installer, ["/S", `/D=${control.installedApp}`], { windowsHide: true, timeout: 120_000, signal });
+    await execImpl(prepared.installer, ["/S", `/D=${control.installedApp}`], {
+      windowsHide: true,
+      timeout: 120_000,
+      signal,
+      env: cleanUpdateEnvironment(environment),
+    });
   }
 }
 

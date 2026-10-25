@@ -60,6 +60,7 @@ export async function startUpdateWindowServer({ state, confirm, close, terminate
       } else if (request.method === "GET" && path === "/state") {
         response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ ...state(), windowReady }));
       } else if (request.method === "POST" && path === "/ready") {
+        if (!windowReady) focus = true;
         windowReady = true; response.end("ok");
       } else if (request.method === "GET" && path === "/focus") {
         response.end(focus ? "show" : ""); focus = false;

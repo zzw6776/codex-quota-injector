@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { releaseUpdate, fetchRelease } from "../src/app-update/releases.mjs";
 import { AppUpdateManager } from "../src/app-update/manager.mjs";
 import { downloadUpdate } from "../src/app-update/download.mjs";
@@ -15,6 +17,8 @@ import { startHttpServer, useTempDir, waitFor } from "./helpers.mjs";
 import { createUpdateViewer } from "../src/app-update/viewer.mjs";
 import { resolveDevUpdateWindow } from "../src/app-update/window-executable.mjs";
 import { activeUpdate, waitForUpdateWindow, canReuseUpdateWindow } from "../src/app-update/launch.mjs";
+
+const exec = promisify(execFile);
 
 function release(version = "0.1.295", platform = "macos-arm64.dmg") {
   const name = `Codex-Quota-Injector-${version}-${platform}`;
@@ -275,6 +279,48 @@ test("更新后的正式入口清除开发启动和 Relay 角色，防止落入�
   { PATH: "path", HOME: "home" });
 });
 
+test("[platform:windows-native] Windows 安装器不继承更新器身份，准备助手不会误开嵌套更新窗口", async () => {
+  const calls = [];
+  const signal = new AbortController().signal;
+  await installNativeUpdate({
+    installedApp: "C:\\Programs\\Codex Quota Injector",
+    asset: { platform: "win32" },
+  }, { installer: "update-setup.exe" }, {
+    signal,
+    environment: {
+      PATH: "path",
+      CODEX_QUOTA_ROLE: "app-updater",
+      CODEX_QUOTA_UPDATE_CONTROL: "control.json",
+      CODEX_APP_TOOLS_PIPE_PATH: "pipe",
+    },
+    execImpl: async (...args) => { calls.push(args); },
+  });
+
+  assert.equal(calls.length, 1);
+  const [executable, args, options] = calls[0];
+  assert.equal(executable, "update-setup.exe");
+  assert.deepEqual(args, ["/S", "/D=C:\\Programs\\Codex Quota Injector"]);
+  assert.deepEqual(options.env, { PATH: "path" });
+  assert.equal(options.signal, signal);
+  assert.equal(options.windowsHide, true);
+  assert.equal(options.timeout, 120_000);
+});
+
+test("安装准备参数优先于继承的更新器身份", async () => {
+  await assert.rejects(exec(process.execPath, [resolve(import.meta.dirname, "../src/launcher.mjs"), "--prepare-update"], {
+    env: {
+      ...process.env,
+      CODEX_QUOTA_ROLE: "app-updater",
+      CODEX_QUOTA_UPDATE_CONTROL: "inherited-control-must-not-be-read.json",
+    },
+  }), error => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /安装接管只能由 Windows 正式包执行/);
+    assert.doesNotMatch(error.stderr, /inherited-control-must-not-be-read/);
+    return true;
+  });
+});
+
 test("启动确认核对实际加载的可执行文件 inode，不能由同名旧文件冒充成功", () => {
   const output = "p100\nftxt\nD0x10\ni20\nn/Applications/Worker\nftxt\nD0x11\ni21\nn/library\n";
   assert.equal(loadedFileMatches(output, { dev: 16n, ino: 20n }), true);
@@ -320,6 +366,27 @@ test("独立更新实例自动分配不同端口；登记服务不等于窗口�
     await writeFile(path, JSON.stringify({ id: "different", pid: process.pid, url: windows[index].url }));
     assert.equal(await activeUpdate(path), null);
   }
+});
+
+test("首次页面就绪和后续打开各请求一次聚焦，重复就绪不抢焦点", async t => {
+  let shows = 0;
+  const window = await startUpdateWindowServer({
+    state: () => ({ id: "focus", status: "confirm" }),
+    confirm() {}, close() {}, show() { shows++; },
+  });
+  t.after(() => window.close());
+
+  assert.equal(await fetch(`${window.url}focus`).then(response => response.text()), "");
+  await fetch(`${window.url}ready`, { method: "POST" });
+  assert.equal(await fetch(`${window.url}focus`).then(response => response.text()), "show");
+  assert.equal(await fetch(`${window.url}focus`).then(response => response.text()), "");
+  await fetch(`${window.url}ready`, { method: "POST" });
+  assert.equal(await fetch(`${window.url}focus`).then(response => response.text()), "");
+
+  await fetch(`${window.url}show`, { method: "POST" });
+  assert.equal(shows, 1);
+  assert.equal(await fetch(`${window.url}focus`).then(response => response.text()), "show");
+  assert.equal(await fetch(`${window.url}focus`).then(response => response.text()), "");
 });
 
 test("慢启动超过旧六秒限制仍等待页面就绪，不接受其他任务或尚未渲染的服务", async () => {
