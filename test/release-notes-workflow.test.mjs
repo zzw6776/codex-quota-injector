@@ -86,11 +86,17 @@ for (const existing of [false, true]) {
   test(`CI ${existing ? "重跑已有" : "新建"} Release 原样使用版本正文`, { skip: process.platform === "win32" }, async t => {
     const { directory, calls, error } = await publishFixture(t, { existing });
     assert.equal(error, null);
-    assert.deepEqual(calls.map(args => args[1]), existing ? ["view", "upload", "edit"] : ["view", "create"]);
-    const write = calls.at(-1);
+    assert.deepEqual(calls.map(args => args[1]), existing
+      ? ["view", "upload", "edit"] : ["view", "create", "upload", "edit"]);
+    const write = calls.find(args => args.includes("--notes-file"));
     assert.equal(write[2], "v0.1.323");
     assert.equal(write[write.indexOf("--notes-file") + 1], "docs/releases/0.1.323.md");
     assert.ok(!write.includes("--generate-notes"));
+    if (!existing) {
+      assert.ok(calls[1].includes("--draft"));
+      assert.ok(calls.at(-1).includes("--draft=false"));
+      assert.ok(calls.at(-1).includes("--latest"));
+    }
     assert.equal(await readFile(join(directory, "published-notes.md"), "utf8"),
       await readFile(join(directory, "docs", "releases", "0.1.323.md"), "utf8"));
   });
