@@ -437,6 +437,17 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Create update manifest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/create-update-manifest.mjs \
+            --assets release-assets \
+            --output release-assets/update.json \
+            --repository "${GITHUB_REPOSITORY}"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -456,14 +467,21 @@ jobs:
           if gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${release_tag}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
             gh release edit "${release_tag}" \
+              --draft=false \
+              --latest \
               --notes-file "${notes_file}" \
               --title "${release_title}" \
               --repo "${GITHUB_REPOSITORY}"
           else
-            gh release create "${release_tag}" release-assets/* \
+            gh release create "${release_tag}" \
+              --draft \
               --notes-file "${notes_file}" \
-              --latest \
               --target "${GITHUB_SHA}" \
               --title "${release_title}" \
+              --repo "${GITHUB_REPOSITORY}"
+            gh release upload "${release_tag}" release-assets/* --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${release_tag}" \
+              --draft=false \
+              --latest \
               --repo "${GITHUB_REPOSITORY}"
           fi

@@ -98,7 +98,8 @@ test("发布列表跟随受限 GitHub 分页并选取最新稳定版本", async 
   const next = "https://api.github.com/repos/zzw6776/codex-quota-injector/releases?per_page=100&page=2";
   const result = await fetchRelease({ fetchImpl: async (url, options) => {
     requests.push({ url, headers: options.headers });
-    if (requests.length === 1) return new Response(JSON.stringify([
+    if (requests.length === 1) return new Response(null, { status: 404 });
+    if (requests.length === 2) return new Response(JSON.stringify([
       { ...release("0.1.331"), prerelease: true }, release("0.1.330"),
     ]), { headers: { etag: "list-etag", link: `<${next}>; rel="next"` } });
     return new Response(JSON.stringify([release("0.1.329")]));
@@ -106,8 +107,8 @@ test("发布列表跟随受限 GitHub 分页并选取最新稳定版本", async 
   assert.equal(result.release.tag_name, "v0.1.330");
   assert.deepEqual(result.releases.map(item => item.tag_name), ["v0.1.331", "v0.1.330", "v0.1.329"]);
   assert.equal(result.etag, "list-etag");
-  assert.equal(requests[1].url, next);
-  assert.equal(requests[1].headers["If-None-Match"], undefined);
+  assert.equal(requests[2].url, next);
+  assert.equal(requests[2].headers["If-None-Match"], undefined);
 });
 
 test("检查合并、ETag 304 保留结果；网络异常不清除候选，重复点击只开一个更新窗口", async t => {

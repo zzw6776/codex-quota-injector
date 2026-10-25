@@ -1,5 +1,6 @@
 import { compareVersions } from "../single-instance.mjs";
 
+export const UPDATE_MANIFEST_URL = "https://github.com/zzw6776/codex-quota-injector/releases/latest/download/update.json";
 export const RELEASES_URL = "https://api.github.com/repos/zzw6776/codex-quota-injector/releases?per_page=100";
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const VERSION = /^v?(\d+\.\d+\.\d+)$/;
@@ -26,13 +27,28 @@ export function releaseUpdate(release, { version, mode, platform = process.platf
 }
 
 export async function fetchRelease({ fetchImpl = fetch, etag = null } = {}) {
+  const manifestResponse = await fetchImpl(UPDATE_MANIFEST_URL, requestOptions(etag));
+  if (manifestResponse.status === 304) return { unchanged: true, etag };
+  if (manifestResponse.status !== 404) {
+    if (!manifestResponse.ok) throw new Error(`GitHub 更新检查失败（HTTP ${manifestResponse.status}）`);
+    const manifest = await manifestResponse.json();
+    if (manifest?.schemaVersion !== 1 || !VERSION.test(String(manifest.version ?? "")) ||
+      !Array.isArray(manifest.releases)) throw new Error("GitHub 更新清单格式无效");
+    const release = manifest.releases.find(item => VERSION.test(String(item?.tag_name ?? "")) &&
+      !item.draft && !item.prerelease);
+    if (!release || VERSION.exec(String(release.tag_name))?.[1] !== manifest.version) {
+      throw new Error("GitHub 更新清单版本无效");
+    }
+    return { release, releases: manifest.releases, etag: manifestResponse.headers.get("etag") };
+  }
+  return fetchLegacyReleases({ fetchImpl, etag });
+}
+
+async function fetchLegacyReleases({ fetchImpl, etag }) {
   const releases = [];
   let url = RELEASES_URL, first = true, nextEtag = null;
   while (url) {
-    const response = await fetchImpl(url, { headers: {
-      Accept: "application/vnd.github+json", "User-Agent": "codex-quota-injector",
-      ...(first && etag ? { "If-None-Match": etag } : {}),
-    }, signal: AbortSignal.timeout(15_000) });
+    const response = await fetchImpl(url, requestOptions(first ? etag : null));
     if (first && response.status === 304) return { unchanged: true, etag };
     if (!response.ok) throw new Error(`GitHub 更新检查失败（HTTP ${response.status}）`);
     const page = await response.json();
@@ -44,6 +60,13 @@ export async function fetchRelease({ fetchImpl = fetch, etag = null } = {}) {
   }
   const release = releases.find(item => VERSION.test(String(item?.tag_name ?? "")) && !item.draft && !item.prerelease);
   return { release, releases, etag: nextEtag };
+}
+
+function requestOptions(etag) {
+  return { headers: {
+    Accept: "application/vnd.github+json", "User-Agent": "codex-quota-injector",
+    ...(etag ? { "If-None-Match": etag } : {}),
+  }, signal: AbortSignal.timeout(15_000) };
 }
 
 function combinedReleaseNotes(release, releases, currentVersion, targetVersion) {
