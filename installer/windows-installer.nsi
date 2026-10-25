@@ -49,7 +49,13 @@ Section "Install"
     Quit
   ${EndIf}
   SetOutPath "$INSTDIR"
+  ClearErrors
   File "/oname=Codex Quota Injector.exe" "${INPUT_EXE}"
+  ${If} ${Errors}
+    MessageBox MB_ICONSTOP "主程序被占用或写入失败，安装已取消；当前正式版本未变更。" /SD IDOK
+    SetErrorLevel 3
+    Quit
+  ${EndIf}
   File "/oname=AppIcon.ico" "${APP_ICON}"
   File "/oname=NODE_LICENSE.txt" "${NODE_LICENSE}"
   Delete "$INSTDIR\relay\codex-quota-relay-windows-*"

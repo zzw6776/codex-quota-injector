@@ -86,12 +86,19 @@ export async function installNativeUpdate(control, prepared, {
   } else {
     // NSIS calls --prepare-update; the runner must release its lock before it
     // starts so the installer can acquire the same update-preparation lock.
-    await execImpl(prepared.installer, ["/S", `/D=${control.installedApp}`], {
-      windowsHide: true,
-      timeout: 120_000,
-      signal,
-      env: cleanUpdateEnvironment(environment),
-    });
+    try {
+      await execImpl(prepared.installer, ["/S", `/D=${control.installedApp}`], {
+        windowsHide: true,
+        timeout: 120_000,
+        signal,
+        env: cleanUpdateEnvironment(environment),
+      });
+    } catch (error) {
+      if (Number(error?.code) === 3) {
+        throw new Error("主程序被占用或写入失败，正式版本未变更", { cause: error });
+      }
+      throw error;
+    }
   }
 }
 
@@ -114,8 +121,10 @@ export async function launchUpdatedApp(control, { signal } = {}) {
 export async function updatedAppReady(control, { signal } = {}) {
   signal?.throwIfAborted();
   const owner = await readSingleInstanceStatus().catch(() => null);
-  if (owner?.pid === control.owner.pid || owner?.mode !== "formal" ||
-      owner?.version !== control.asset.version || owner?.phase !== "ready") return false;
+  if (owner?.pid === control.owner.pid || owner?.mode !== "formal" || owner?.phase !== "ready") return false;
+  if (owner.version !== control.asset.version) {
+    throw new Error(`主程序替换失败：期望 ${control.asset.version}，实际 ${owner.version}`);
+  }
   if (control.asset.platform === "darwin") {
     const file = await stat(join(control.installedApp, "Contents", "Resources", "Codex Quota Injector Worker"), { bigint: true });
     const { stdout } = await exec("/usr/sbin/lsof", ["-a", "-p", String(owner.pid), "-d", "txt", "-FfDin"], { signal });

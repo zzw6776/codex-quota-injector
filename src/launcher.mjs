@@ -13,7 +13,7 @@ const updatePreparationRequested = process.argv.length === 3 &&
   process.argv[2] === "--prepare-update";
 
 if (updatePreparationRequested) {
-  void runUpdatePreparation();
+  void runUpdatePreparation().then((exitCode) => process.exit(exitCode));
 } else if (process.env.CODEX_QUOTA_ROLE === "app-updater") {
   void import("./app-update/runner.mjs").then(({ runAppUpdater }) => runAppUpdater())
     .catch(error => { console.error(error?.stack ?? error); process.exitCode = 1; });
@@ -40,9 +40,10 @@ async function runUpdatePreparation() {
     }
     const { prepareWindowsUpdate } = await import("./windows-update.mjs");
     await prepareWindowsUpdate({ version: String(packageJson.version ?? "0.0.0") });
+    return 0;
   } catch (error) {
     console.error(`[windows-update] ${error?.stack ?? error}`);
-    process.exitCode = 1;
+    return 1;
   }
 }
 
