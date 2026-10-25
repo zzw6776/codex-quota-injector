@@ -3,7 +3,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { captureCodexSessionCheckpoint, rolloutThreadId } from "../lifecycle-turn-gate.mjs";
-import { inspectRolloutHistory } from "../lifecycle-history.mjs";
 import { inspectThreadHistoryStore, locateHistoryDatabases } from "../lifecycle-history-store.mjs";
 
 // Keep a record of every active turn seen while downloading/waiting, so an idle
@@ -32,11 +31,8 @@ export async function inspectUpdateHistory(control, tracked = [], dependencies =
   const next = [...groups.values()];
   if (active.length) return { ready: false, reason: "等待当前任务结束", tracked: next };
   for (const group of next) {
-    const history = await (dependencies.inspectHistory ?? inspectRolloutHistory)(group.path);
-    if (history.repairRequired) throw new Error("任务历史结构不完整，更新已停止；未修改历史或关闭 Codex");
-    if (history.activeTurn) return { ready: false, reason: "等待任务终态落盘", tracked: next };
     const projection = await (dependencies.inspectStore ?? inspectThreadHistoryStore)({ sqliteHome,
-      threadId: group.threadId, rolloutPath: group.path, lastOrdinal: history.lastOrdinal, turnIds: group.turnIds });
+      threadId: group.threadId, rolloutPath: group.path, turnIds: group.turnIds });
     if (!projection.healthy) return { ready: false, reason: "等待任务历史投影落盘", tracked: next };
   }
   return { ready: true, tracked: next };

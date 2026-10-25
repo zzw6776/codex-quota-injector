@@ -58,7 +58,7 @@ export async function inspectThreadHistoryStore({
       normalizePath(thread.rollout_path) === normalizePath(rolloutPath);
     const projectionCaughtUp = Boolean(projection && rollout) &&
       Number(projection.next_rollout_byte_offset) >= rollout.size &&
-      Number(projection.next_rollout_ordinal) >= Number(lastOrdinal) + 1;
+      (lastOrdinal == null || Number(projection.next_rollout_ordinal) >= Number(lastOrdinal) + 1);
     const turnsDurable = turns.every((turn) =>
       ["completed", "interrupted"].includes(String(turn.status)) &&
       turn.rollout_end_ordinal != null && turn.first_user_item_present &&

@@ -267,10 +267,9 @@ test("下载/校验失败不关闭应用；安装或正式进程核验失败不�
   }
 });
 
-test("活动回合、历史投影落后或结构损坏均阻止更新；新任务被纳入原检查集合", async () => {
+test("活动回合或历史投影落后阻止更新；既有历史序号异常不阻止已落盘任务更新", async () => {
   let active = true, durable = false;
   const deps = { capture: async () => ({ turns: active ? [{ path: "/rollout.jsonl", turnId: "turn" }] : [] }),
-    inspectHistory: async () => ({ lastOrdinal: 10, repairRequired: false }),
     inspectStore: async options => { assert.deepEqual(options.turnIds, ["turn"]); return { healthy: durable }; },
   };
   let result = await inspectUpdateHistory({}, [], deps);
@@ -280,8 +279,6 @@ test("活动回合、历史投影落后或结构损坏均阻止更新；新任�
   assert.equal(result.ready, false); assert.match(result.reason, /投影/);
   durable = true;
   assert.equal((await inspectUpdateHistory({}, result.tracked, deps)).ready, true);
-  await assert.rejects(inspectUpdateHistory({}, result.tracked, { ...deps,
-    inspectHistory: async () => ({ repairRequired: true }) }), /历史结构不完整/);
 });
 
 test("独立状态窗口在终态前拒绝关闭，终态不会自动关闭；外部网页不能触发更新", async t => {
