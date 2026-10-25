@@ -74,6 +74,42 @@ test("发布说明经候选和更新 Worker 传到首次确认页；缺失说明
   }
 });
 
+test("跨版本更新按版本从新到旧合并当前版本之后的全部正式发布说明", () => {
+  const options = { version: "0.1.327", mode: "formal", platform: "darwin", arch: "arm64" };
+  const latest = { ...release("0.1.330"), body: "# 0.1.330\n\n- 最新修复" };
+  const releases = [
+    { ...release("0.1.329"), body: "" },
+    { ...release("0.1.327"), body: "# 0.1.327\n\n- 已安装版本" },
+    latest,
+    { ...release("0.1.328"), body: "# 0.1.328\n\n- 中间修复" },
+    { ...release("0.1.331"), body: "# 0.1.331\n\n- 超出目标版本" },
+    { ...release("0.1.329"), prerelease: true, body: "不应使用预发布说明" },
+  ];
+  const asset = releaseUpdate(latest, options, releases);
+  assert.equal(asset.releaseNotes, [
+    "# 0.1.330\n\n- 最新修复",
+    "# 0.1.329\n\n该版本暂无更新日志",
+    "# 0.1.328\n\n- 中间修复",
+  ].join("\n\n"));
+});
+
+test("发布列表跟随受限 GitHub 分页并选取最新稳定版本", async () => {
+  const requests = [];
+  const next = "https://api.github.com/repos/zzw6776/codex-quota-injector/releases?per_page=100&page=2";
+  const result = await fetchRelease({ fetchImpl: async (url, options) => {
+    requests.push({ url, headers: options.headers });
+    if (requests.length === 1) return new Response(JSON.stringify([
+      { ...release("0.1.331"), prerelease: true }, release("0.1.330"),
+    ]), { headers: { etag: "list-etag", link: `<${next}>; rel="next"` } });
+    return new Response(JSON.stringify([release("0.1.329")]));
+  } });
+  assert.equal(result.release.tag_name, "v0.1.330");
+  assert.deepEqual(result.releases.map(item => item.tag_name), ["v0.1.331", "v0.1.330", "v0.1.329"]);
+  assert.equal(result.etag, "list-etag");
+  assert.equal(requests[1].url, next);
+  assert.equal(requests[1].headers["If-None-Match"], undefined);
+});
+
 test("检查合并、ETag 304 保留结果；网络异常不清除候选，重复点击只开一个更新窗口", async t => {
   let calls = 0, launches = 0, resolveWindow;
   const manager = new AppUpdateManager({ version: "0.1.308", mode: "dev", platform: "darwin", arch: "arm64",

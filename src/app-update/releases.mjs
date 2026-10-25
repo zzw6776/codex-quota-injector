@@ -59,6 +59,7 @@ function combinedReleaseNotes(release, releases, currentVersion, targetVersion) 
     selected.push({ version, body: typeof item.body === "string" ? item.body.trim() : "" });
   }
   selected.sort((left, right) => compareVersions(right.version, left.version));
+  if (selected.length === 1 && !selected[0].body) return "";
   return selected.map(item => item.body || `# ${item.version}\n\n该版本暂无更新日志`).join("\n\n");
 }
 
