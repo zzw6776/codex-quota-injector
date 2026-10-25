@@ -32,7 +32,7 @@ export class AppUpdateManager {
           return true;
         }
         this.etag = result.etag;
-        this.asset = releaseUpdate(result.release, this);
+        this.asset = releaseUpdate(result.release, this, result.releases);
         this.publish({ status: "ready", available: this.asset != null, version: this.asset?.version ?? null,
           checkError: null, error: null });
         return true;
