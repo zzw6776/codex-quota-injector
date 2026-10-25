@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -65,9 +66,36 @@ export async function stopForUpdate(control, { signal } = {}) {
   const lock = await acquireSingleInstance({ mode: "formal", version: control.asset.version,
     explicitStart: true, purpose: "install-update", getStatus: () => ({ phase: "updating" }) });
   if (!lock) throw new Error("现有实例拒绝更新接管");
-  try { signal?.throwIfAborted(); await stopCodex({ timeoutMs: 10_000 }); }
+  try {
+    signal?.throwIfAborted();
+    await stopCodex({ timeoutMs: 10_000 });
+    if (control.asset.platform === "win32") {
+      await forceStopPreviousOwner(control.owner.pid, { signal });
+    }
+  }
   catch (error) { await closeSingleInstance(lock); throw error; }
   return lock;
+}
+
+async function forceStopPreviousOwner(pid, { signal } = {}) {
+  const processId = Number(pid);
+  if (!Number.isInteger(processId) || processId <= 0 || processId === process.pid) {
+    throw new Error("旧注入器 PID 无效，拒绝强制终止");
+  }
+  if (!processExists(processId)) return;
+  try { process.kill(processId, "SIGKILL"); }
+  catch (error) { if (error?.code !== "ESRCH") throw error; }
+  const deadline = Date.now() + 5_000;
+  while (processExists(processId)) {
+    signal?.throwIfAborted();
+    if (Date.now() >= deadline) throw new Error("旧注入器未能强制退出，安装已取消");
+    await delay(50, undefined, { signal });
+  }
+}
+
+function processExists(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error?.code === "ESRCH") return false; throw error; }
 }
 
 export async function installNativeUpdate(control, prepared, {
