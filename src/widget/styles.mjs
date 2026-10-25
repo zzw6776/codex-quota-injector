@@ -4,6 +4,10 @@ const WIDGET_STYLES = {
       flex: 1 1 auto;
       min-width: 0;
     }
+    /* The rail usage menu is separate from the legacy footer entry. */
+    [data-app-navigation-rail="true"] button[aria-haspopup="menu"]:is([aria-label="用量"], [aria-label="Usage" i]) {
+      display: none !important;
+    }
     button[aria-label*="语音聊天"],
     button[aria-label*="語音聊天"],
     button[aria-label*="voice chat" i],

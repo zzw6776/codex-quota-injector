@@ -27,6 +27,53 @@ function quotaData(credits = { usdAmount: 2500, formattedUsd: "US$2500.00", cred
       { label: "5h", remainingPercent: 1, windowDurationMins: 300 }] });
 }
 
+test("[UI-01 UI-03] 屏蔽官方用量入口，重挂载后仍隐藏且不影响其他菜单", { timeout: 30000 }, async t => {
+  const b = await startBrowser(t);
+  await installRail(b);
+  await b.client.evaluate(`(() => {
+    const usage = document.createElement('button');
+    usage.id = 'official-usage';
+    usage.setAttribute('aria-haspopup', 'menu');
+    usage.setAttribute('aria-label', '用量');
+    usage.textContent = 'Official usage';
+    document.getElementById('rail-bottom').prepend(usage);
+    window.officialUsageOpens = 0;
+    usage.onpointerdown = () => officialUsageOpens++;
+    const outside = usage.cloneNode(true);
+    outside.id = 'outside-usage';
+    document.getElementById('native').append(outside);
+    const tool = document.getElementById('rail-tool');
+    tool.setAttribute('aria-haspopup', 'menu');
+    window.railToolClicks = 0;
+    tool.onclick = () => railToolClicks++;
+  })()`);
+  for (const label of ['用量', 'Usage', '用量']) {
+    await b.client.evaluate(`(() => {
+      const previous = document.getElementById('official-usage');
+      const next = previous.cloneNode(true);
+      next.setAttribute('aria-label', ${JSON.stringify(label)});
+      next.onpointerdown = () => officialUsageOpens++;
+      previous.replaceWith(next);
+    })()`);
+    await b.settled();
+    assert.deepEqual(await b.client.evaluate(`(() => {
+      const usage = document.getElementById('official-usage');
+      usage.focus();
+      return { display: getComputedStyle(usage).display,
+        rects: usage.getClientRects().length, focused: document.activeElement === usage };
+    })()`), { display: 'none', rects: 0, focused: false }, label);
+  }
+  await b.click('#rail-tool', { shadow: false });
+  assert.equal(await b.client.evaluate('railToolClicks'), 1);
+  await b.click('#profile', { shadow: false });
+  await b.click('#outside-usage', { shadow: false });
+  await b.click('.quota-chip');
+  assert.match(await b.value('.quota-wrap', 'className'), /is-open/);
+  assert.equal(await b.client.evaluate('officialUsageOpens'), 0);
+  await b.client.evaluate('window.__codexQuotaWidget.destroy()');
+  assert.notEqual(await b.client.evaluate("getComputedStyle(document.getElementById('official-usage')).display"), 'none');
+});
+
 test("[UI-03] 侧栏重挂载后主面板与诊断浮窗恢复顶层，不被裁切或遮挡", { timeout: 30000 }, async t => {
   const b = await startBrowser(t);
   await installRail(b);
