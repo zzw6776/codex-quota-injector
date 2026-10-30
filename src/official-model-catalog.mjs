@@ -122,7 +122,6 @@ async function fetchOAuthCatalog({
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), refreshTimeoutMs);
-  timeout.unref?.();
   let phase = "request";
   try {
     const url = new URL(OFFICIAL_MODELS_URL);

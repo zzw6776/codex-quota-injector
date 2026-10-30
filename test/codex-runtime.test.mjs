@@ -28,6 +28,7 @@ import {
 import { useTempDir } from "./helpers.mjs";
 
 const execFileAsync = promisify(execFile);
+const POSIX_RUNTIME_TEST = { skip: process.platform === "win32" };
 
 async function confirmSelectedRuntime(manager, runtime = null) {
   await manager.confirmLaunch({
@@ -105,7 +106,8 @@ test("只接受 OpenAI 官方发布、当前架构、完整摘要的最新 Alpha
   assert.equal(headers["If-None-Match"], "cached");
 });
 
-test("运行时验证同时检查版本与真实 app-server 初始化握手", async t => {
+test("[platform:macos-native] 运行时验证同时检查版本与真实 app-server 初始化握手",
+  POSIX_RUNTIME_TEST, async t => {
   const directory = await useTempDir(t, "codex-runtime-probe-");
   const executable = join(directory, "codex");
   const codeModeHost = join(directory, "codex-code-mode-host");
@@ -157,7 +159,8 @@ test("压缩包路径遍历在解包前被拒绝", () => {
   }
 });
 
-test("受管 Alpha 同时安装 CLI 与 code-mode host，并替换旧的不完整目录", async t => {
+test("[platform:macos-native] 受管 Alpha 同时安装 CLI 与 code-mode host，并替换旧的不完整目录",
+  POSIX_RUNTIME_TEST, async t => {
   const directory = await useTempDir(t, "codex-runtime-bundle-");
   const root = join(directory, "runtimes");
   const version = "0.166.0-alpha.6";
