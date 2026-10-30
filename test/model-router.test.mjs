@@ -25,7 +25,7 @@ test("Router 跨注入器版本复用原端点，端口被占用时才生成新�
 
   const original = await owner.configure(routerSettings(upstream.origin));
   const identity = reusableRouterIdentityFromRelayConfig({
-    version: 6,
+    version: 7,
     generation: `catalog:usage-events-v40:${original.instanceId}`,
     router: {
       baseUrl: original.baseUrl,

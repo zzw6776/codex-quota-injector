@@ -96,6 +96,31 @@ test("用户自有 model_catalog_json 保持外部状态，不会被注入器接
   assert.match(await readFile(join(codexHome, "config.toml"), "utf8"), /external models\.json/);
 });
 
+test("OAuth 账号切换只保留同账号临时目录，不借用共享原生缓存", async (t) => {
+  const codexHome = await useTempDir(t, "codex-home-test-");
+  const dataDir = await useTempDir(t);
+  await writeFile(join(codexHome, "models_cache.json"), JSON.stringify(baseCatalog()));
+  const manager = new CodexContextManager({ codexHome, dataDir });
+  await manager.initialize();
+  await manager.setModelCatalogScope({
+    allowNativeCatalog: false,
+    resetTransient: true,
+  });
+  assert.equal(manager.getEffectiveCatalog(), null, "OAuth 不能直接借用未验证账号的原生缓存");
+
+  await manager.useOfficialCatalog(baseCatalog(), { source: "official-online" });
+  await manager.setModelCatalogScope({ allowNativeCatalog: false });
+  assert.equal(manager.getEffectiveCatalog().models[0].slug, "official-model",
+    "同一账号刷新失败时仍可保留自己的临时目录");
+  assert.equal(manager.getViewModel().catalogSource, "official-online");
+
+  await manager.setModelCatalogScope({
+    allowNativeCatalog: false,
+    resetTransient: true,
+  });
+  assert.equal(manager.getEffectiveCatalog(), null, "切换账号后不能保留上一账号目录");
+});
+
 test("损坏或未来版本的上下文存储只读保护，不会被覆盖", async (t) => {
   const codexHome = await useTempDir(t, "codex-home-test-");
   const dataDir = await useTempDir(t);

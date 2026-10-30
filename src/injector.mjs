@@ -2,12 +2,11 @@ import { AccountManager } from "./account-manager.mjs";
 import { AccountWakeupManager } from "./account-wakeup.mjs";
 import { CdpClient, findCodexTarget } from "./cdp-client.mjs";
 import { CodexContextManager } from "./codex-context.mjs";
-import {
-  prepareCodexLaunch,
-  refreshCodexModelCatalog,
-} from "./codex-bridge.mjs";
+import { CodexRuntimeManager } from "./codex-runtime/manager.mjs";
+import { prepareCodexLaunch } from "./codex-bridge.mjs";
 import { ExtraModelManager } from "./extra-model-manager.mjs";
 import { requestHostToolReload } from "./host-health.mjs";
+import { ModelCatalogCoordinator } from "./model-catalog-coordinator.mjs";
 import { ModelRouterManager } from "./model-router.mjs";
 import {
   isCodexRunning,
@@ -22,8 +21,6 @@ import {
   APP_DISPLAY_VERSION,
   TARGET_POLL_MS,
   QUOTA_REFRESH_MS,
-  MODEL_CATALOG_REFRESH_MS,
-  MODEL_CATALOG_BUSY_RETRY_MS,
   DEEPSEEK_BALANCE_REFRESH_MS,
   STARTUP_GRACE_MS,
   TOKEN_USAGE_FALLBACK_MS,
@@ -44,18 +41,25 @@ export async function runInjector({
   contextManager = new CodexContextManager(),
   extraModelManager = new ExtraModelManager(),
   modelRouterManager = new ModelRouterManager(),
+  codexRuntimeManager = new CodexRuntimeManager(),
   tokenUsageManager = new TokenUsageManager(),
+  modelCatalogCoordinator = new ModelCatalogCoordinator({
+    accountManager,
+    contextManager,
+  }),
   managersInitialized = false,
+  codexRuntimeManagerInitialized = false,
   accountManagerInitialized = false,
-  prepareLaunch = () =>
+  prepareLaunch = (modelCatalogRequest = null) =>
     prepareCodexLaunch({
       accountManager,
       extraModelManager,
       contextManager,
       modelRouterManager,
+      codexRuntimeManager,
+      modelCatalogCoordinator,
+      modelCatalogRequest,
     }),
-  refreshModelCatalog = () =>
-    refreshCodexModelCatalog({ accountManager, contextManager }),
   recoverLaunch = null,
   registerLaunchRecovery = null,
   registerWidgetReload = null,
@@ -68,6 +72,7 @@ export async function runInjector({
     await contextManager.initialize();
     await extraModelManager.initialize();
   }
+  if (!codexRuntimeManagerInitialized) await codexRuntimeManager.initialize();
   const tokenInitialization = tokenUsageManager.initialize().catch((error) => {
     console.error(`[token-usage] 初始化失败: ${error.message}`);
   });
@@ -81,6 +86,7 @@ export async function runInjector({
   let removeNetworkListener = () => {};
   let removeTurnStateListener = () => {};
   let removeExtraModelListener = () => {};
+  let removeCodexRuntimeListener = () => {};
   let activeAction = null;
   const activeModelDetections = new Set();
   let restartingCodex = false;
@@ -91,8 +97,6 @@ export async function runInjector({
   let quotaRefreshPromise = null;
   let quotaRefreshRequested = false;
   let deepSeekBalanceTimer = null;
-  let modelCatalogRefreshTimer = null;
-  let modelCatalogRefreshPromise = null;
   let tokenUsageFallbackTimer = null;
 
   let lastInjectionError = null;
@@ -134,6 +138,7 @@ export async function runInjector({
       return wakeupManager;
     },
     get appUpdate() { return appUpdateManager.getViewModel(); },
+    get codexRuntime() { return codexRuntimeManager.getViewModel(); },
   });
 
   const appUpdateManager = updateManager ?? new AppUpdateManager({ version: packageJson.version,
@@ -142,6 +147,7 @@ export async function runInjector({
       void widgetSession.requestWidgetUpdate().catch(error => console.error(`[update] ${error.message}`));
     } });
   if (!once) appUpdateManager.start();
+  if (!once) codexRuntimeManager.start();
 
   const hostHealthSession = createHostHealthSession({
     getLaunchOptions,
@@ -175,13 +181,12 @@ export async function runInjector({
     registerWidgetReload?.(null);
     wakeupManager.close();
     appUpdateManager.close();
+    codexRuntimeManager.close();
     clearTimeout(quotaRefreshTimer);
     clearTimeout(deepSeekBalanceTimer);
-    clearTimeout(modelCatalogRefreshTimer);
     clearTimeout(tokenUsageFallbackTimer);
     hostHealthSession.closeHostHealthWatcher();
     quotaRefreshTimer = null;
-    modelCatalogRefreshTimer = null;
     tokenUsageFallbackTimer = null;
     removeTokenUsageListener();
     removeTokenUsageListener = () => {};
@@ -191,10 +196,13 @@ export async function runInjector({
     removeTurnStateListener = () => {};
     removeExtraModelListener();
     removeExtraModelListener = () => {};
+    removeCodexRuntimeListener();
+    removeCodexRuntimeListener = () => {};
     cdp?.close();
     accountManager.close();
     extraModelManager.close();
     tokenUsageManager.close();
+    modelCatalogCoordinator.close();
     modelRouterClosePromise ??= modelRouterManager.close().catch((error) => {
       console.error(`[model-router] 关闭失败：${error.message}`);
     });
@@ -351,6 +359,13 @@ export async function runInjector({
         console.error(`[extra-models] 面板状态刷新失败: ${error.message}`);
       });
     }) ?? (() => {});
+  removeCodexRuntimeListener =
+    codexRuntimeManager.onChange?.(() => {
+      widgetSession.markWidgetDataDirty();
+      void widgetSession.requestWidgetUpdate().catch((error) => {
+        console.error(`[codex-runtime] 面板状态刷新失败: ${error.message}`);
+      });
+    }) ?? (() => {});
 
   async function startAction(action) {
     widgetSession.markWidgetDataDirty();
@@ -363,14 +378,33 @@ export async function runInjector({
           await appUpdateManager.open({ threadId: hostHealthSession.selectedTask?.threadId,
             launchOptions: getLaunchOptions?.(), cdpPort: port, requestId: action.requestId });
           break;
+        case "codex-runtime-check":
+          await codexRuntimeManager.check({ force: true });
+          break;
+        case "codex-runtime-install":
+          await codexRuntimeManager.installLatest();
+          break;
+        case "codex-runtime-select":
+          await codexRuntimeManager.select({
+            mode: action.mode,
+            version: action.version,
+            path: action.path,
+          });
+          break;
+        case "codex-runtime-mcp-sharing":
+          await codexRuntimeManager.setMcpConnectionSharing(action.enabled === true);
+          break;
         case "host-health-recheck":
         case "host-health-diagnose":
         case "host-health-reload":
           hostHealthSession.hostHealthActionError = null;
+          const selectionToken = hostHealthSession.selectionToken;
           if (!hostHealthSession.hostHealth.canCheck ||
               action.sessionId !== hostHealthSession.hostHealth.sessionId ||
               action.threadId !== hostHealthSession.selectedTask?.threadId ||
-              hostHealthSession.selectedTask?.hostId !== "local") {
+              hostHealthSession.selectedTask?.hostId !== "local" ||
+              selectionToken?.threadId !== action.threadId ||
+              selectionToken?.sessionId !== action.sessionId) {
             throw new Error("当前任务已切换或检查服务尚未就绪，请重新打开详情");
           }
           await requestHostToolReload(getLaunchOptions?.()?.relay, {
@@ -378,6 +412,8 @@ export async function runInjector({
               : action.type === "host-health-diagnose" ? "diagnose" : "reload",
             threadId: action.threadId,
             sessionId: action.sessionId,
+            selectionSourceId: selectionToken.sourceId,
+            selectionRevision: selectionToken.revision,
           });
           hostHealthSession.lastHostHealthCheckAt = 0;
           await hostHealthSession.syncHostHealth({ force: true });
@@ -436,7 +472,7 @@ export async function runInjector({
           await accountManager.removeAccount(action.accountId);
           break;
         case "context-refresh":
-          await runModelCatalogRefresh({ manual: true });
+          await refreshModelCatalogManually();
           break;
         case "context-save":
           await contextManager.setOverride(
@@ -495,6 +531,9 @@ export async function runInjector({
       if (String(action?.type ?? "").startsWith("context-")) {
         contextManager.setError(error.message);
       }
+      if (String(action?.type ?? "").startsWith("codex-runtime-")) {
+        console.error(`[codex-runtime] ${error.message}`);
+      }
       if (
         (String(action?.type ?? "").startsWith("extra-platform-") ||
           action?.type === "extra-model-detect") &&
@@ -506,11 +545,24 @@ export async function runInjector({
     }
   }
 
+  async function restartCodexWithRuntimeFallback(options) {
+    const launched = await codexRuntimeManager.launchWithFallback(options, {
+      launch: (next) => restartCodex(port, next),
+      prepare: prepareLaunch,
+    });
+    await codexRuntimeManager.confirmLaunch({
+      runtime: launched.options.codexRuntime,
+      disposition: launched.options.runtimeDisposition,
+    });
+    return launched.options;
+  }
+
   async function restartForAccountChange() {
     restartingCodex = true;
     try {
-      const options = await prepareLaunch();
-      await restartCodex(port, options);
+      const options = await restartCodexWithRuntimeFallback(
+        await prepareLaunch(),
+      );
       extraModelManager.markRestarted();
       if (options.officialCatalogChanged) {
         if (options.officialCatalogSource === "bundled") {
@@ -531,7 +583,7 @@ export async function runInjector({
     try {
       const options = await prepareLaunch();
       if (options.preparationError) throw new Error(options.preparationError);
-      await restartCodex(port, options);
+      await restartCodexWithRuntimeFallback(options);
       extraModelManager.markRestarted();
       resetAfterCodexRestart();
       hostHealthSession.lastHostHealthCheckAt = 0;
@@ -550,7 +602,7 @@ export async function runInjector({
           `模型中继准备失败，配置尚未生效：${options.preparationError}`,
         );
       }
-      await restartCodex(port, options);
+      await restartCodexWithRuntimeFallback(options);
       extraModelManager.markRestarted();
       if (context) contextManager.markRestarted();
       scheduleDeepSeekBalanceRefresh();
@@ -568,100 +620,52 @@ export async function runInjector({
     hostHealthSession.lastHostHealthCheckAt = 0;
   }
 
-  function scheduleModelCatalogRefresh(delayMs = MODEL_CATALOG_REFRESH_MS) {
-    clearTimeout(modelCatalogRefreshTimer);
-    if (stopped || once) return;
-    modelCatalogRefreshTimer = setTimeout(() => {
-      modelCatalogRefreshTimer = null;
-      void runModelCatalogRefresh();
-    }, delayMs);
-  }
-
-  async function runModelCatalogRefresh({ manual = false } = {}) {
-    if (modelCatalogRefreshPromise) return modelCatalogRefreshPromise;
-    if (
-      !manual &&
-      (activeAction || activeModelDetections.size > 0 || restartingCodex)
-    ) {
-      scheduleModelCatalogRefresh(MODEL_CATALOG_BUSY_RETRY_MS);
-      return undefined;
-    }
-
-    const task = (async () => {
-      try {
-        if (!manual) {
-          if (!(await isCodexRunning())) return;
-          // Scheduled refreshes only update the cache. Rebuilding relay files or
-          // restarting here can interrupt an unrelated in-flight user task.
-          const refresh = await refreshModelCatalog();
-          if (!stopped && refresh.officialCatalogChanged) {
-            contextManager.markOfficialCatalogAvailable();
-          }
-          return;
-        }
-        restartingCodex = true;
-        const options = await prepareLaunch();
-        if (stopped) return;
-        if (options.preparationError) throw new Error(options.preparationError);
-        const relay = options?.relay;
-        const relayRequired = Boolean(relay && !relay.expectAbsent);
-        const relayCurrent =
-          !relayRequired ||
-          (await isRelayStateCurrent(relay.statePath, relay.generation, {
-            wslNative: relay.wslNative === true,
-          }));
-        const catalogReloadRequired = options.officialCatalogChanged;
-        if (relayRequired && (catalogReloadRequired || !relayCurrent)) {
-          if (!(await isCodexRunning())) return;
-          console.log(
-            catalogReloadRequired
-              ? "[models] 检测到官方模型目录更新，正在重启 Codex 以加载最新模型"
-              : "[models] 模型中继目录版本已变化，正在重启 Codex 重新加载",
-          );
-          await restartCodex(port, options);
-          extraModelManager.markRestarted();
-          if (catalogReloadRequired) {
-            if (options.officialCatalogSource === "bundled") {
-              contextManager.markBundledCatalogCurrent({ restarted: true });
-            } else {
-              contextManager.markOfficialCatalogRestarted();
-            }
-          } else if (options.officialCatalogSource === "bundled") {
-            contextManager.markBundledCatalogCurrent({ restarted: true });
-          } else {
-            contextManager.markOfficialCatalogRestarted();
-          }
-          scheduleDeepSeekBalanceRefresh();
-          resetAfterCodexRestart();
-        } else if (options.officialCatalogError) {
-          contextManager.setError(
-            `官方模型目录刷新失败：${options.officialCatalogError}`,
-          );
-        } else if (options.officialCatalogChecked) {
-          contextManager.markOfficialCatalogCurrent();
-        } else if (options.officialCatalogSource === "bundled") {
-          contextManager.markBundledCatalogCurrent();
+  async function refreshModelCatalogManually() {
+    restartingCodex = true;
+    try {
+      const options = await prepareLaunch({ reason: "manual", force: true });
+      if (stopped) return;
+      if (options.preparationError) throw new Error(options.preparationError);
+      const relay = options?.relay;
+      const relayRequired = Boolean(relay && !relay.expectAbsent);
+      const relayCurrent =
+        !relayRequired ||
+        (await isRelayStateCurrent(relay.statePath, relay.generation, {
+          wslNative: relay.wslNative === true,
+        }));
+      const catalogReloadRequired = options.officialCatalogChanged;
+      if (relayRequired && (catalogReloadRequired || !relayCurrent)) {
+        if (!(await isCodexRunning())) return;
+        console.log(
+          catalogReloadRequired
+            ? "[models] 检测到官方模型目录更新，正在重启 Codex 以加载最新模型"
+            : "[models] 模型中继目录版本已变化，正在重启 Codex 重新加载",
+        );
+        await restartCodexWithRuntimeFallback(options);
+        extraModelManager.markRestarted();
+        if (options.officialCatalogSource === "bundled") {
+          contextManager.markBundledCatalogCurrent({ restarted: true });
         } else {
-          await contextManager.refresh({ sync: false });
+          contextManager.markOfficialCatalogRestarted();
         }
-      } catch (error) {
-        if (manual)
-          contextManager.setError(`官方模型目录刷新失败：${error.message}`);
-        console.error(`[models] 官方模型目录刷新失败: ${error.message}`);
-      } finally {
-        if (manual) restartingCodex = false;
-        widgetSession.markWidgetDataDirty();
-        void widgetSession.requestWidgetUpdate().catch((error) => {
-          console.error(`[models] Widget 刷新失败: ${error.message}`);
-        });
+        scheduleDeepSeekBalanceRefresh();
+        resetAfterCodexRestart();
+      } else if (options.officialCatalogError) {
+        contextManager.setError(
+          `官方模型目录刷新失败：${options.officialCatalogError}`,
+        );
+      } else if (options.officialCatalogChecked) {
+        contextManager.markOfficialCatalogCurrent();
+      } else if (options.officialCatalogSource === "bundled") {
+        contextManager.markBundledCatalogCurrent();
+      } else {
+        await contextManager.refresh({ sync: false });
       }
-    })().finally(() => {
-      if (modelCatalogRefreshPromise === task)
-        modelCatalogRefreshPromise = null;
-      scheduleModelCatalogRefresh();
-    });
-    modelCatalogRefreshPromise = task;
-    return task;
+    } catch (error) {
+      throw new Error(`官方模型目录刷新失败：${error.message}`, { cause: error });
+    } finally {
+      restartingCodex = false;
+    }
   }
 
   function scheduleDeepSeekBalanceRefresh() {
@@ -695,16 +699,35 @@ export async function runInjector({
       : null;
   }
 
+  modelCatalogCoordinator.configure({
+    getExecutable: async () =>
+      (await codexRuntimeManager.getLaunchRuntime())?.executable ?? null,
+    canRunScheduledRefresh: async () =>
+      !stopped && !once && !activeAction && activeModelDetections.size === 0 &&
+      !restartingCodex && await isCodexRunning(),
+    onResult: async (result) => {
+      if (!stopped && result.officialCatalogChanged) {
+        contextManager.markOfficialCatalogAvailable();
+      }
+      widgetSession.markWidgetDataDirty();
+      await widgetSession.requestWidgetUpdate().catch((error) => {
+        console.error(`[models] Widget 刷新失败: ${error.message}`);
+      });
+    },
+  });
+
   if (once) {
     await runQuotaRefresh();
   } else {
     await wakeupManager.start();
     accountManager.startOfficialCredentialWatch(() => {
       void runQuotaRefresh({ repeatIfRunning: true });
-      scheduleModelCatalogRefresh(0);
+      void modelCatalogCoordinator.request({ reason: "credentials" }).catch((error) => {
+        if (!stopped) console.error(`[models] 凭据变化后的目录刷新失败: ${error.message}`);
+      });
     });
     void runQuotaRefresh();
-    scheduleModelCatalogRefresh();
+    modelCatalogCoordinator.start();
     const balanceTarget = deepSeekBalanceTarget();
     if (balanceTarget) {
       void balanceTarget
@@ -727,7 +750,7 @@ export async function runInjector({
       !activeAction &&
       activeModelDetections.size === 0 &&
       !restartingCodex &&
-      !modelCatalogRefreshPromise
+      !modelCatalogCoordinator.busy
     ) {
       widgetReloading = true;
       try {
@@ -750,7 +773,7 @@ export async function runInjector({
       !activeAction &&
       activeModelDetections.size === 0 &&
       !restartingCodex &&
-      !modelCatalogRefreshPromise
+      !modelCatalogCoordinator.busy
     ) {
       launchRecoveryRequested = false;
       restartingCodex = true;
@@ -787,14 +810,14 @@ export async function runInjector({
         injected &&
         !activeAction &&
         !restartingCodex &&
-        !modelCatalogRefreshPromise
+        !modelCatalogCoordinator.busy
       ) {
         const actions = await cdp.evaluate(
           widget.widgetDrainActionsExpression(),
         );
         if (Array.isArray(actions) && actions.length > 0) {
           activeAction = (async () => {
-            await modelCatalogRefreshPromise;
+            await modelCatalogCoordinator.whenIdle();
             for (const action of actions) {
               if (action.type !== "extra-model-detect") {
                 await startAction(action);

@@ -4,14 +4,15 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { relayInstancePath } from "./relay-instance-paths.mjs";
 import { DEEPSEEK_CANONICAL_MODEL_ID, DEEPSEEK_FLASH_MODEL_IDS, DEEPSEEK_ROUTABLE_MODEL_IDS } from "./deepseek-model-profile.mjs";
-import { createHostHealthTracker, watchHostToolReloadRequests } from "./host-health.mjs";
+import { createHostHealthTracker, readHostToolSelectionState, watchHostToolReloadRequests,
+  watchHostToolSelection } from "./host-health.mjs";
 import { startModelCompatibilityProxy } from "./chat-compat-proxy.mjs";
 import { ModelRouterManager } from "./model-router.mjs";
 import { OPENAI_PROVIDER, RELAY_CLEANUP_INTERVAL_MS, readJson } from "./app-server-relay/contract.mjs";
 import { openSidecarUpstream, pipeLines, pipeRaw, runPassthrough, clearRelayEnvironment, forwardSignals, forwardSidecarSignals, exitLikeChild, fail } from "./app-server-relay/transport.mjs";
 import { rewriteClientLine } from "./app-server-relay/client-messages.mjs";
 import { rewriteServerLine } from "./app-server-relay/server-messages.mjs";
-import { requestCodexAppToolsReload, requestCodexAppToolsStatus, requestCodexAppToolsDiagnostic, closeHostToolChecks } from "./app-server-relay/host-tools.mjs";
+import { createHostToolController } from "./app-server-relay/host-tools.mjs";
 import { readOfficialModelSlugs } from "./app-server-relay/model-catalog.mjs";
 import { pruneRelayState } from "./app-server-relay/thread-context.mjs";
 import { createUsageEventWriter } from "./app-server-relay/usage.mjs";
@@ -229,7 +230,8 @@ export async function runAppServerRelay() {
       })
     : null;
   let relayCleanupTimer = null;
-  let hostToolReloadWatcher = null;
+  let hostToolCommandWatcher = null;
+  let hostToolSelectionWatcher = null;
   let relayState = null;
   let cleanedUp = false;
   const cleanup = async (detail = null) => {
@@ -237,9 +239,11 @@ export async function runAppServerRelay() {
     cleanedUp = true;
     if (relayCleanupTimer) clearInterval(relayCleanupTimer);
     relayCleanupTimer = null;
-    hostToolReloadWatcher?.close();
-    hostToolReloadWatcher = null;
-    closeHostToolChecks(relayState);
+    hostToolCommandWatcher?.close();
+    hostToolCommandWatcher = null;
+    hostToolSelectionWatcher?.close();
+    hostToolSelectionWatcher = null;
+    relayState?.hostTools?.close();
     await Promise.all([
       removeRelayState(statePath, processIdentity),
       // Relay 状态一旦删除，读取端会立即把宿主能力判为断开。这里不再
@@ -303,29 +307,37 @@ export async function runAppServerRelay() {
     sendUpstream(message) {
       upstreamInput.write(`${JSON.stringify(message)}\n`);
     },
-    hostToolReloadInFlight: false,
   };
-  hostToolReloadWatcher = watchHostToolReloadRequests({
+  relayState.hostTools = createHostToolController(relayState);
+  const hostToolWatcherOptions = {
+    signalEmitter: wslNative ? process : null,
+    wakeSignal: wslNative ? "SIGUSR2" : null,
+    onError: (error) => {
+      console.error(`[host-health] 控制状态监听失败：${error.message}`);
+    },
+  };
+  const hostToolControlBinding = {
     healthPath,
     sessionId,
     generation: relayConfig?.generation ??
       process.env.CODEX_QUOTA_BRIDGE_GENERATION ?? null,
-  }, {
-    // Windows explicitly wakes the WSL Relay after publishing a control file;
-    // this avoids a permanent directory poll on /mnt/c.
-    signalEmitter: wslNative ? process : null,
-    wakeSignal: wslNative ? "SIGUSR2" : null,
-    onRequest: (request) => {
-      if (!relayState.hostHealth?.ownsTask(request.threadId)) return;
-      if (request.action === "reload") requestCodexAppToolsReload(relayState);
-      else if (request.action === "diagnose") requestCodexAppToolsDiagnostic(relayState, request.threadId);
-      else requestCodexAppToolsStatus(relayState, request.threadId, {
-        retry: request.action === "check", priority: true,
-        resetRetryBudget: request.action === "check",
-      });
+  };
+  hostToolSelectionWatcher = watchHostToolSelection(hostToolControlBinding, {
+    ...hostToolWatcherOptions,
+    onSelection: (selection) => {
+      if (selection.threadId && !relayState.hostHealth?.ownsTask(selection.threadId)) return;
+      relayState.hostTools.applySelection(selection);
     },
-    onError: (error) => {
-      console.error(`[host-health] 重载请求监听失败：${error.message}`);
+  });
+  hostToolCommandWatcher = watchHostToolReloadRequests(hostToolControlBinding, {
+    ...hostToolWatcherOptions,
+    onRequest: async (request) => {
+      const selection = await readHostToolSelectionState(hostToolControlBinding);
+      if (!selection) return;
+      if (selection.threadId && !relayState.hostHealth?.ownsTask(selection.threadId)) return;
+      relayState.hostTools.applySelection(selection);
+      if (!relayState.hostHealth?.ownsTask(request.threadId)) return;
+      relayState.hostTools.handleCommand(request);
     },
   });
   relayCleanupTimer = setInterval(() => pruneRelayState(relayState), RELAY_CLEANUP_INTERVAL_MS);

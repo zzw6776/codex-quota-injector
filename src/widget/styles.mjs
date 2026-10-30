@@ -319,6 +319,19 @@ const WIDGET_STYLES = {
     .provider-toggle input { width: auto; margin: 0; }
     .provider-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
     .provider-warning { color: #e5b86a; font-size: 10px; line-height: 15px; }
+    .provider-warning code { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .codex-runtime-summary .provider-status { flex-wrap: wrap; }
+    .codex-runtime-form { margin-bottom: 9px; }
+    .codex-runtime-custom[hidden] { display: none; }
+    .codex-runtime-feature { display: grid; gap: 7px; margin-bottom: 9px; padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
+    .codex-runtime-feature-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+    .codex-runtime-release { display: grid; gap: 7px; padding: 10px 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
+    .codex-runtime-release-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
+    .codex-runtime-release-head > div:first-child { display: grid; min-width: 0; gap: 3px; }
+    .codex-runtime-release-head > div:first-child div { overflow: hidden; text-overflow: ellipsis; color: var(--token-text-secondary, #aaaab5); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .codex-runtime-progress { display: grid; gap: 6px; }
+    .codex-runtime-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .codex-runtime-progress > div span:last-child { color: var(--token-text-secondary, #aaaab5); font-size: 10px; font-variant-numeric: tabular-nums; }
     .wakeup-times { display: grid; gap: 7px; }
     .wakeup-time-row { display: flex; align-items: center; gap: 8px; }
     .wakeup-time-row label { flex: 0 0 auto; font-size: 11px; }
@@ -437,6 +450,7 @@ const WIDGET_STYLES = {
     .quota-wrap.is-light .extra-model-progress-track { background: rgba(0,0,0,.09); }
     .quota-wrap.is-light .context-summary, .quota-wrap.is-light .model-card,
     .quota-wrap.is-light .provider-summary, .quota-wrap.is-light .provider-form,
+    .quota-wrap.is-light .codex-runtime-feature, .quota-wrap.is-light .codex-runtime-release,
     .quota-wrap.is-light .balance-card, .quota-wrap.is-light .extra-platform-card,
     .quota-wrap.is-light .extra-platform-form, .quota-wrap.is-light .migration-option,
     .quota-wrap.is-light .migration-account-row { border-color: rgba(0,0,0,.09); background: rgba(0,0,0,.018); }

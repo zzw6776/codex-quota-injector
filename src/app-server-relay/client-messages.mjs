@@ -17,7 +17,7 @@ function rewriteClientLine(line, state) {
   const params = message.params && typeof message.params === "object"
     ? { ...message.params }
     : {};
-  if (method === "config/mcpServer/reload") state.hostHealth?.observeReloadStarted();
+  if (method === "config/mcpServer/reload") state.hostTools?.observeExternalReload();
   if (method === MCP_TOOL_CALL_METHOD && params.server === "codex_app" && message.id != null && params.threadId) {
     const proof = state.hostHealth?.beginToolCheck(params.threadId, params.tool, message.id, {
       targetThreadId: params.arguments?.threadId ?? params.threadId,

@@ -51,9 +51,11 @@ async function runLauncher() {
   const { AccountManager } = await import("./account-manager.mjs");
   const { prepareCodexLaunch } = await import("./codex-bridge.mjs");
   const { CodexContextManager } = await import("./codex-context.mjs");
+  const { CodexRuntimeManager } = await import("./codex-runtime/manager.mjs");
   const { ExtraModelManager } = await import("./extra-model-manager.mjs");
   const { installFileLogger } = await import("./file-logger.mjs");
   const { runInjector } = await import("./injector.mjs");
+  const { ModelCatalogCoordinator } = await import("./model-catalog-coordinator.mjs");
   const { ModelRouterManager } = await import("./model-router.mjs");
   const {
     activateCodex,
@@ -102,6 +104,11 @@ async function runLauncher() {
   const contextManager = new CodexContextManager();
   const extraModelManager = new ExtraModelManager();
   const modelRouterManager = new ModelRouterManager();
+  const codexRuntimeManager = new CodexRuntimeManager();
+  const modelCatalogCoordinator = new ModelCatalogCoordinator({
+    accountManager,
+    contextManager,
+  });
 
   const restartFromTakeover = async (request) => {
     if (takeoverInProgress) return;
@@ -128,14 +135,28 @@ async function runLauncher() {
     }
   };
 
-  const prepareCurrentLaunch = async () => {
+  const prepareCurrentLaunch = async (modelCatalogRequest = null) => {
     launchOptions = await prepareCodexLaunch({
       accountManager,
       extraModelManager,
       contextManager,
       modelRouterManager,
+      codexRuntimeManager,
+      modelCatalogCoordinator,
+      modelCatalogRequest,
     });
     return launchOptions;
+  };
+  const launchWithRuntimeFallback = async (options) => {
+    const launched = await codexRuntimeManager.launchWithFallback(options, {
+      launch: (next) => ensureCodexDebugMode(port, next),
+      prepare: prepareCurrentLaunch,
+    });
+    await codexRuntimeManager.confirmLaunch({
+      runtime: launched.options.codexRuntime,
+      disposition: launched.options.runtimeDisposition,
+    });
+    return launched;
   };
 
   try {
@@ -173,8 +194,9 @@ async function runLauncher() {
     await accountManager.initialize();
     await contextManager.initialize();
     await extraModelManager.initialize();
+    await codexRuntimeManager.initialize();
     launchOptions = await prepareCurrentLaunch();
-    await ensureCodexDebugMode(port, launchOptions);
+    ({ options: launchOptions } = await launchWithRuntimeFallback(launchOptions));
     launchStatus.phase = "ready";
     pendingLaunchRecovery = false;
 
@@ -186,16 +208,20 @@ async function runLauncher() {
       contextManager,
       extraModelManager,
       modelRouterManager,
+      codexRuntimeManager,
+      modelCatalogCoordinator,
       managersInitialized: true,
+      codexRuntimeManagerInitialized: true,
       accountManagerInitialized: true,
       prepareLaunch: prepareCurrentLaunch,
       recoverLaunch: async () => {
         launchStatus.phase = "starting";
         try {
           const options = await prepareCurrentLaunch();
-          const restarted = await ensureCodexDebugMode(port, options);
+          const recovery = await launchWithRuntimeFallback(options);
+          launchOptions = recovery.options;
           launchStatus.phase = "ready";
-          return restarted;
+          return recovery.result;
         } catch (error) {
           launchStatus.phase = "failed";
           throw error;
@@ -223,14 +249,17 @@ async function runLauncher() {
     });
     process.exitCode = 1;
   } finally {
+    modelCatalogCoordinator.close();
     await modelRouterManager.close().catch((error) => {
       console.error(`[model-router] 关闭失败：${error.message}`);
     });
+    codexRuntimeManager.close();
     await closeSingleInstance(instanceLock);
   }
 
   async function ensureCodexDebugMode(cdpPort, options) {
     const isRunning = await isCodexRunning();
+    const forceRuntimeRestart = options?.codexRuntime?.forceRestart === true;
     const readiness = isRunning
       ? await getCodexLaunchReadiness(cdpPort, options)
       : {
@@ -256,9 +285,10 @@ async function runLauncher() {
       `[launcher] Codex 启动条件：进程=${isRunning ? "运行中" : "未运行"}，` +
       `调试端口 ${cdpPort}=${readiness.debugReady ? "正常" : "不可用"}，` +
       `模型中继配置=${relayConfigStatus}，模型中继进程=${relayStateStatus}，` +
-      `决策=${readiness.ready ? "复用并激活" : "重启"}`,
+      `运行时身份=${forceRuntimeRestart ? "已变化" : "未要求强制切换"}，` +
+      `决策=${readiness.ready && !forceRuntimeRestart ? "复用并激活" : "重启"}`,
     );
-    if (readiness.ready) {
+    if (readiness.ready && !forceRuntimeRestart) {
       await activateCodex();
       console.log(`[launcher] Codex 已处于调试及模型中继模式（端口 ${cdpPort}）`);
       return false;

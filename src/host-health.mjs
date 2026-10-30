@@ -8,12 +8,13 @@ import { isRelayStateCurrent, signalWslRelayProcess } from "./platform.mjs";
 import { classifyHostToolResult, isThreadNotMaterialized } from "./host-tool-probes.mjs";
 import { listRelayInstances, relayInstancePath, relayInstanceId } from "./relay-instance-paths.mjs";
 
-export const HOST_HEALTH_STATE_VERSION = 5;
+export const HOST_HEALTH_STATE_VERSION = 6;
 export const HOST_HEALTH_STARTUP_GRACE_MS = 30_000;
 export const HOST_HEALTH_ACTIVE_POLL_MS = 3_000;
 export const HOST_HEALTH_READY_POLL_MS = 30_000;
 export const HOST_HEALTH_WATCH_DEBOUNCE_MS = 100;
-export const HOST_TOOL_RELOAD_REQUEST_VERSION = 3;
+export const HOST_TOOL_RELOAD_REQUEST_VERSION = 4;
+export const HOST_TOOL_SELECTION_STATE_VERSION = 1;
 export const REQUIRED_CODEX_APP_TOOLS = Object.freeze([
   "list_threads",
   "read_thread",
@@ -27,11 +28,103 @@ const STATUS_LIST_METHOD = "mcpServerStatus/list";
 const HEALTH_DETAIL_LIMIT = 600;
 const HEALTH_RENAME_RETRY_DELAYS_MS = [25, 50, 100, 200];
 const HEALTH_RENAME_TRANSIENT_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
+const CONTROL_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+const AWAITING_TASK_MESSAGE = "任务工具按需加载，进入任务后自动核验";
+const AWAITING_SELECTION_MESSAGE = "进入任务后自动检查任务工具";
+
+function idleTaskState(requiredTools, threadId, updatedAt) {
+  return { status: "idle", code: "awaiting-task", message: AWAITING_TASK_MESSAGE,
+    detail: null, serverStatus: "notStarted", threadId, requiredTools,
+    missingTools: [], toolsVerified: false, updatedAt };
+}
+
+function awaitingSelectionState(serverStatus) {
+  return { status: "idle", code: "awaiting-selection", message: AWAITING_SELECTION_MESSAGE,
+    detail: null, serverStatus, toolsVerified: false, missingTools: [] };
+}
 
 export function hostHealthPollInterval(status) {
   return ["idle", "ready", "direct"].includes(String(status ?? ""))
     ? HOST_HEALTH_READY_POLL_MS
     : HOST_HEALTH_ACTIVE_POLL_MS;
+}
+
+async function publishControlFile(binding, { path, temporaryPath, payload, statePath, generation },
+  signalWslRelay) {
+  let published = false;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
+      encoding: "utf8", mode: 0o600,
+    });
+    await rename(temporaryPath, path);
+    published = true;
+    // Windows writes under /mnt/c do not reliably produce WSL inotify events.
+    if (binding.wslNative === true) await signalWslRelay(statePath, generation);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    if (published) await unlink(path).catch(() => undefined);
+    throw error;
+  }
+}
+
+function watchControlFiles({ directory, matches, consume, onError, watchImpl, setTimer,
+  clearTimer, debounceMs, signalEmitter, wakeSignal }) {
+  let watcher = null;
+  let timer = null;
+  let wakeListener = null;
+  let closed = false;
+  let running = false;
+  let runAgain = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (timer != null) clearTimer(timer);
+    if (wakeListener && wakeSignal) signalEmitter?.off?.(wakeSignal, wakeListener);
+    timer = wakeListener = null;
+    watcher?.close?.();
+    watcher = null;
+  };
+  const run = async () => {
+    if (closed) return;
+    if (running) { runAgain = true; return; }
+    running = true;
+    do {
+      runAgain = false;
+      try { await consume(() => closed); } catch (error) { onError(error); }
+    } while (runAgain && !closed);
+    running = false;
+  };
+  const schedule = () => {
+    if (closed) return;
+    if (timer != null) clearTimer(timer);
+    timer = setTimer(() => { timer = null; void run(); }, debounceMs);
+    timer?.unref?.();
+  };
+  try {
+    if (signalEmitter && wakeSignal) {
+      wakeListener = schedule;
+      signalEmitter.on(wakeSignal, wakeListener);
+    }
+    watcher = watchImpl(directory, { persistent: false }, (_eventType, fileName) => {
+      if (fileName && !matches(String(fileName))) return;
+      schedule();
+    });
+    watcher.on?.("error", (error) => {
+      onError(error);
+      watcher?.close?.();
+      watcher = null;
+      if (!wakeListener) close();
+    });
+  } catch (error) {
+    onError(error);
+    if (!wakeListener) close();
+  }
+  schedule();
+  return {
+    get active() { return !closed && (watcher != null || wakeListener != null); },
+    close,
+  };
 }
 
 export async function requestHostToolReload(binding, {
@@ -40,6 +133,8 @@ export async function requestHostToolReload(binding, {
   action = "reload",
   threadId = null,
   sessionId = null,
+  selectionSourceId = null,
+  selectionRevision = null,
 } = {}, {
   signalWslRelay = signalWslRelayProcess,
   relayStateChecker = isRelayStateCurrent,
@@ -62,20 +157,21 @@ export async function requestHostToolReload(binding, {
     statePath = selected.instance.statePath;
   }
   const normalizedRequestId = String(requestId ?? "").trim();
-  if (!/^[A-Za-z0-9_-]{8,128}$/.test(normalizedRequestId)) {
+  const normalizedSelectionSourceId = String(selectionSourceId ?? "").trim();
+  const normalizedSelectionRevision = Number(selectionRevision);
+  if (!CONTROL_ID_PATTERN.test(normalizedRequestId)) {
     throw new Error("Codex 任务工具重载请求 ID 无效");
   }
-  if (!["reload", "check", "diagnose", "select"].includes(action) ||
-      (action !== "reload" && (typeof threadId !== "string" || !threadId))) {
+  if (!["reload", "check", "diagnose"].includes(action) ||
+      typeof threadId !== "string" || !threadId ||
+      !CONTROL_ID_PATTERN.test(normalizedSelectionSourceId) ||
+      !Number.isSafeInteger(normalizedSelectionRevision) || normalizedSelectionRevision <= 0) {
     throw new Error("请选择需要检查的本机任务");
   }
-  const directory = dirname(healthPath);
   const path = `${healthPath}.reload-${normalizedRequestId}.json`;
   const temporaryPath = `${path}.${process.pid}.tmp`;
-  let published = false;
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  try {
-    await writeFile(temporaryPath, `${JSON.stringify({
+  await publishControlFile(binding, { path, temporaryPath, statePath, generation,
+    payload: {
       version: HOST_TOOL_RELOAD_REQUEST_VERSION,
       requestId: normalizedRequestId,
       generation,
@@ -83,20 +179,128 @@ export async function requestHostToolReload(binding, {
       action,
       threadId,
       sessionId,
-    }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await rename(temporaryPath, path);
-    published = true;
-    if (binding.wslNative === true) {
-      // Writes made by Windows do not reliably produce inotify events in WSL.
-      // Wake the verified Relay once instead of polling the shared directory.
-      await signalWslRelay(statePath, generation);
+      selectionSourceId: normalizedSelectionSourceId,
+      selectionRevision: normalizedSelectionRevision,
+    },
+  }, signalWslRelay);
+  return { requestId: normalizedRequestId, path };
+}
+
+export async function publishHostToolSelection(binding, {
+  sourceId,
+  revision,
+  threadId = null,
+  ownerThreadId = threadId,
+  sessionId = null,
+  now = Date.now(),
+} = {}, {
+  signalWslRelay = signalWslRelayProcess,
+  relayStateChecker = isRelayStateCurrent,
+  allowMissingOwner = false,
+} = {}) {
+  let healthPath = String(binding?.healthPath ?? "").trim();
+  let statePath = String(binding?.statePath ?? "").trim();
+  const generation = String(binding?.generation ?? "").trim();
+  const normalizedSourceId = String(sourceId ?? "").trim();
+  const normalizedRevision = Number(revision);
+  const normalizedThreadId = threadId == null ? null : String(threadId).trim();
+  const normalizedOwnerThreadId = ownerThreadId == null ? null : String(ownerThreadId).trim();
+  if (!binding?.hostToolsRequired || !healthPath || !generation) {
+    throw new Error("当前启动入口没有可选择的 Codex 任务工具中继");
+  }
+  if (!CONTROL_ID_PATTERN.test(normalizedSourceId) ||
+      !Number.isSafeInteger(normalizedRevision) || normalizedRevision <= 0 ||
+      (threadId != null && !normalizedThreadId)) {
+    throw new Error("Codex 任务工具选择状态无效");
+  }
+  if (binding.instanceScoped || sessionId) {
+    const selected = await resolveHostHealthInstance(binding, {
+      threadId: normalizedThreadId ?? normalizedOwnerThreadId,
+      relayStateChecker,
+    });
+    let instance = selected.instance;
+    if (normalizedThreadId == null && sessionId) {
+      instance = selected.live.find((entry) => entry.sessionId === sessionId) ?? null;
     }
+    if (!sessionId || instance?.sessionId !== sessionId) {
+      if (allowMissingOwner) return null;
+      throw new Error("任务所属后台已变化或尚未确认，请重新打开详情");
+    }
+    healthPath = instance.healthPath;
+    statePath = instance.statePath;
+  }
+  const path = `${healthPath}.selection.json`;
+  const temporaryPath = `${path}.${process.pid}.${normalizedSourceId}.${normalizedRevision}.tmp`;
+  await publishControlFile(binding, { path, temporaryPath, statePath, generation,
+    payload: {
+      version: HOST_TOOL_SELECTION_STATE_VERSION,
+      sourceId: normalizedSourceId,
+      revision: normalizedRevision,
+      generation,
+      sessionId,
+      threadId: normalizedThreadId,
+      updatedAt: Number(now) || Date.now(),
+    },
+  }, signalWslRelay);
+  return { path, sourceId: normalizedSourceId, revision: normalizedRevision };
+}
+
+export async function readHostToolSelectionState({ healthPath, generation, sessionId = null } = {}) {
+  const normalizedHealthPath = String(healthPath ?? "").trim();
+  const normalizedGeneration = String(generation ?? "").trim();
+  if (!normalizedHealthPath || !normalizedGeneration) return null;
+  let selection;
+  try {
+    selection = JSON.parse(await readFile(`${normalizedHealthPath}.selection.json`, "utf8"));
   } catch (error) {
-    await unlink(temporaryPath).catch(() => undefined);
-    if (published) await unlink(path).catch(() => undefined);
+    if (error?.code === "ENOENT") return null;
     throw error;
   }
-  return { requestId: normalizedRequestId, path };
+  const valid = selection?.version === HOST_TOOL_SELECTION_STATE_VERSION &&
+    selection.generation === normalizedGeneration &&
+    (sessionId == null || selection.sessionId === sessionId) &&
+    CONTROL_ID_PATTERN.test(String(selection.sourceId ?? "")) &&
+    Number.isSafeInteger(selection.revision) && selection.revision > 0 &&
+    (selection.threadId == null ||
+      (typeof selection.threadId === "string" && selection.threadId.length > 0));
+  return valid ? selection : null;
+}
+
+export function watchHostToolSelection({ healthPath, generation, sessionId = null } = {}, {
+  onSelection = () => {},
+  onError = () => {},
+  watchImpl = watchFs,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  debounceMs = HOST_HEALTH_WATCH_DEBOUNCE_MS,
+  signalEmitter = null,
+  wakeSignal = null,
+} = {}) {
+  const normalizedHealthPath = String(healthPath ?? "").trim();
+  const normalizedGeneration = String(generation ?? "").trim();
+  if (!normalizedHealthPath || !normalizedGeneration) {
+    return { active: false, close() {} };
+  }
+  const path = `${normalizedHealthPath}.selection.json`;
+  const fileName = basename(path);
+  let appliedKey = null;
+  return watchControlFiles({
+    directory: dirname(path),
+    matches: (name) => name === fileName,
+    async consume() {
+      const selection = await readHostToolSelectionState({
+        healthPath: normalizedHealthPath,
+        generation: normalizedGeneration,
+        sessionId,
+      });
+      if (!selection) return;
+      const key = `${selection.sourceId}:${selection.revision}`;
+      if (key === appliedKey) return;
+      await onSelection(selection);
+      appliedKey = key;
+    },
+    onError, watchImpl, setTimer, clearTimer, debounceMs, signalEmitter, wakeSignal,
+  });
 }
 
 export function watchHostToolReloadRequests({ healthPath, generation, sessionId = null } = {}, {
@@ -116,36 +320,21 @@ export function watchHostToolReloadRequests({ healthPath, generation, sessionId 
   }
   const directory = dirname(normalizedHealthPath);
   const prefix = `${basename(normalizedHealthPath)}.reload-`;
-  let watcher = null;
-  let timer = null;
-  let wakeListener = null;
-  let closed = false;
-  let scanning = false;
-  let scanAgain = false;
-
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    if (timer != null) clearTimer(timer);
-    timer = null;
-    if (wakeListener && wakeSignal) signalEmitter?.off?.(wakeSignal, wakeListener);
-    wakeListener = null;
-    watcher?.close?.();
-    watcher = null;
-  };
-  const scan = async () => {
-    if (closed) return;
-    if (scanning) {
-      scanAgain = true;
-      return;
-    }
-    scanning = true;
-    try {
-      const names = (await readdir(directory))
+  return watchControlFiles({
+    directory,
+    matches: (name) => name.startsWith(prefix),
+    async consume(isClosed) {
+      let names;
+      try {
+        names = (await readdir(directory))
         .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
         .sort();
+      } catch (error) {
+        if (error?.code === "ENOENT") return;
+        throw error;
+      }
       for (const name of names) {
-        if (closed) break;
+        if (isClosed()) break;
         const path = join(directory, name);
         let request = null;
         try {
@@ -158,58 +347,20 @@ export function watchHostToolReloadRequests({ healthPath, generation, sessionId 
         if (request?.version !== HOST_TOOL_RELOAD_REQUEST_VERSION ||
           (sessionId != null && request?.sessionId !== sessionId) ||
           request?.generation !== normalizedGeneration ||
-          !/^[A-Za-z0-9_-]{8,128}$/.test(String(request?.requestId ?? ""))) continue;
-        if (!["reload", "check", "diagnose", "select"].includes(request.action) ||
-            (request.action !== "reload" && !request.threadId)) continue;
+          !CONTROL_ID_PATTERN.test(String(request?.requestId ?? ""))) continue;
+        if (!["reload", "check", "diagnose"].includes(request.action) ||
+            !request.threadId ||
+            !CONTROL_ID_PATTERN.test(String(request.selectionSourceId ?? "")) ||
+            !Number.isSafeInteger(request.selectionRevision) || request.selectionRevision <= 0) continue;
         try {
           await onRequest(request);
         } catch (error) {
           onError(error);
         }
       }
-    } catch (error) {
-      if (error?.code !== "ENOENT") onError(error);
-    } finally {
-      scanning = false;
-      if (scanAgain && !closed) {
-        scanAgain = false;
-        void scan();
-      }
-    }
-  };
-  const schedule = () => {
-    if (closed) return;
-    if (timer != null) clearTimer(timer);
-    timer = setTimer(() => {
-      timer = null;
-      void scan();
-    }, debounceMs);
-    timer?.unref?.();
-  };
-  try {
-    if (signalEmitter && wakeSignal) {
-      wakeListener = schedule;
-      signalEmitter.on(wakeSignal, wakeListener);
-    }
-    watcher = watchImpl(directory, { persistent: false }, (_eventType, fileName) => {
-      if (fileName && !String(fileName).startsWith(prefix)) return;
-      schedule();
-    });
-    watcher.on?.("error", (error) => {
-      onError(error);
-      watcher?.close?.();
-      watcher = null;
-      if (!wakeListener) close();
-    });
-  } catch (error) {
-    onError(error);
-    if (!wakeListener) close();
-  }
-  schedule();
-  return {
-    get active() { return !closed && (watcher != null || wakeListener != null); },
-    close,
-  };
+    },
+    onError, watchImpl, setTimer, clearTimer, debounceMs, signalEmitter, wakeSignal,
+  });
 }
 
 export function watchHostHealthFiles(binding, {
@@ -288,10 +439,7 @@ export async function createHostHealthTracker({
   sessionId = randomUUID(),
   claim = true,
   requiredTools = REQUIRED_CODEX_APP_TOOLS,
-  graceMs = HOST_HEALTH_STARTUP_GRACE_MS,
   now = () => Date.now(),
-  setTimer = setTimeout,
-  clearTimer = clearTimeout,
   renameFile = rename,
   platform = process.platform,
 } = {}) {
@@ -302,10 +450,7 @@ export async function createHostHealthTracker({
     processIdentity,
     sessionId,
     requiredTools,
-    graceMs,
     now,
-    setTimer,
-    clearTimer,
     renameFile,
     platform,
   });
@@ -321,20 +466,14 @@ class HostHealthTracker {
     processIdentity,
     sessionId,
     requiredTools,
-    graceMs,
     now,
-    setTimer,
-    clearTimer,
     renameFile,
     platform,
   }) {
     this.path = String(path ?? "").trim();
     this.now = now;
-    this.setTimer = setTimer;
-    this.clearTimer = clearTimer;
     this.renameFile = renameFile;
     this.platform = platform;
-    this.graceMs = Math.max(0, Number(graceMs) || 0);
     this.requiredTools = normalizeToolNames(requiredTools);
     this.sessionId = sessionId;
     this.contexts = new Map();
@@ -342,6 +481,7 @@ class HostHealthTracker {
     this.tail = Promise.resolve();
     this.closed = false;
     this.toolCalls = new Map();
+    this.projectedThreadId = null;
     const startedAt = this.now();
     this.state = {
       version: HOST_HEALTH_STATE_VERSION,
@@ -355,28 +495,17 @@ class HostHealthTracker {
       ...(Number.isSafeInteger(Number(processIdentity.processStartTicks))
         ? { processStartTicks: Number(processIdentity.processStartTicks) }
         : {}),
-      status: "idle",
-      code: "awaiting-task",
-      message: "任务工具按需加载，进入任务后自动核验",
-      detail: null,
-      serverStatus: "notStarted",
-      threadId: null,
-      requiredTools: this.requiredTools,
-      missingTools: [],
-      toolsVerified: false,
+      ...idleTaskState(this.requiredTools, null, startedAt),
       startedAt,
-      updatedAt: startedAt,
     };
   }
 
   context(threadId = null) {
     if (!this.contexts.has(threadId)) {
       this.contexts.set(threadId, {
-        state: { status: "idle", code: "awaiting-task",
-          message: "任务工具按需加载，进入任务后自动核验", detail: null,
-          serverStatus: "notStarted", threadId, requiredTools: this.requiredTools,
-          missingTools: [], toolsVerified: false, checks: {}, diagnostic: null, updatedAt: this.now() },
-        startupStatus: null, timer: null, revision: this.revision, userMessageObserved: false,
+        state: { ...idleTaskState(this.requiredTools, threadId, this.now()),
+          checks: {}, diagnostic: null },
+        startupStatus: null, revision: this.revision, userMessageObserved: false,
       });
     }
     return this.contexts.get(threadId);
@@ -384,6 +513,68 @@ class HostHealthTracker {
 
   statusRevision(threadId = null) {
     return this.context(threadId).revision;
+  }
+
+  projectTask(threadId = null) {
+    this.projectedThreadId = threadId;
+    if (threadId == null) {
+      this.state = { ...this.state, ...idleTaskState(this.requiredTools, null, this.now()),
+        checks: {}, diagnostic: null };
+    } else {
+      this.state = { ...this.state, ...this.context(threadId).state };
+    }
+    return this.persist();
+  }
+
+  activateTask(threadId, { reloading = false } = {}) {
+    if (!threadId) return this.projectTask(null);
+    const context = this.context(threadId);
+    context.observed = true;
+    this.projectedThreadId = threadId;
+    if (context.state.status === "ready" && context.state.toolsVerified) {
+      return this.update({ status: "ready", code: null,
+        message: "Codex 任务工具已就绪", detail: null }, context);
+    }
+    if (["failed", "cancelled"].includes(context.startupStatus)) {
+      this.state = { ...this.state, ...context.state };
+      return this.persist();
+    }
+    const ready = context.startupStatus === "ready" || context.state.serverStatus === "ready";
+    return this.update({ status: "starting",
+      code: reloading ? "reloading-codex-app" : ready ? "awaiting-tool-checks" : "awaiting-task-tools",
+      message: reloading ? "正在重新加载 Codex 任务工具"
+        : ready ? "正在检查任务工具" : "等待当前任务工具启动",
+      detail: null, toolsVerified: false, missingTools: [] }, context);
+  }
+
+  deactivateTask(threadId) {
+    const context = threadId ? this.contexts.get(threadId) : null;
+    if (context?.state.status === "starting" && !context.state.toolsVerified) {
+      context.state = { ...context.state, status: "idle", code: "awaiting-selection",
+        message: AWAITING_SELECTION_MESSAGE, updatedAt: this.now() };
+    }
+    return this.projectTask(null);
+  }
+
+  prepareVerification(threadId, { force = false } = {}) {
+    const context = this.context(threadId);
+    context.state.checks = Object.fromEntries(Object.entries(context.state.checks ?? {})
+      .filter(([, check]) => !force && check?.status === "passed")
+      .map(([tool, check]) => [tool, { ...check, retryPending: false }]));
+    const ready = this.requiredTools.every(tool => context.state.checks[tool]?.status === "passed");
+    return this.update({ status: ready ? "ready" : "starting",
+      code: ready ? null : "awaiting-tool-checks",
+      message: ready ? `${this.requiredTools.length} 项任务工具检查通过` : "正在检查任务工具",
+      toolsVerified: ready, verification: ready ? "calls" : context.state.verification ?? null,
+      detail: null, missingTools: [] }, context);
+  }
+
+  markActivationTimeout(threadId, healthRevision) {
+    const context = this.contexts.get(threadId);
+    if (!context || context.revision !== healthRevision || context.state.status !== "starting") return;
+    void this.update({ status: "unconfirmed", code: "startup-status-timeout",
+      message: "等待工具服务就绪超时，尚未确认当前状态", detail: null,
+      toolsVerified: false }, context);
   }
 
   async start({ claim = true } = {}) {
@@ -433,30 +624,22 @@ class HostHealthTracker {
     context.startupStatus = serverStatus;
     if (serverStatus === "ready") {
       if (context.state.status === "ready" && context.state.toolsVerified) {
-        this.clearGraceTimer(context);
         void this.update({ status: "ready", code: null,
           message: "Codex 任务工具已就绪", detail: null, serverStatus }, context);
       } else {
-        void this.update({ status: "starting", code: "awaiting-tool-checks",
-          message: "正在检查任务工具", detail: null,
-          serverStatus, toolsVerified: false, missingTools: [] }, context);
-        this.armGraceTimer(context);
+        void this.update(awaitingSelectionState(serverStatus), context);
       }
       return;
     }
     if (["starting", "failed", "cancelled"].includes(serverStatus)) {
       context.revision = ++this.revision;
-      this.clearGraceTimer(context);
       context.state.checks = {};
       context.state.diagnostic = null;
       if (serverStatus !== "starting") {
         void this.update({ status: "degraded", ...classifyStartupFailure(params, serverStatus),
           serverStatus, toolsVerified: false }, context);
       } else {
-        void this.update({ status: "starting", code: "codex-app-starting",
-          message: "Codex 任务工具正在启动", detail: null,
-          serverStatus, toolsVerified: false, missingTools: [] }, context);
-        this.armGraceTimer(context);
+        void this.update(awaitingSelectionState(serverStatus), context);
       }
     }
   }
@@ -468,7 +651,6 @@ class HostHealthTracker {
       startedAt: this.now() };
     context.state.checks = { ...context.state.checks,
       [tool]: { status: "checking", requestId, startedAt: proof.startedAt, checkedAt: null, detail: null } };
-    this.clearGraceTimer(context);
     this.updateCheckSummary(context);
     return proof;
   }
@@ -498,11 +680,6 @@ class HostHealthTracker {
     const context = this.context(threadId);
     if (context.observed) return;
     context.observed = true;
-    if (context.state.status === "idle") {
-      context.state = { ...context.state, status: "starting", code: "awaiting-task-tools",
-        message: "等待当前任务工具启动", updatedAt: this.now() };
-      this.armGraceTimer(context);
-    }
     void this.persist();
   }
 
@@ -557,31 +734,35 @@ class HostHealthTracker {
   }
 
   resetContexts() {
-    for (const context of this.contexts.values()) this.clearGraceTimer(context);
     this.contexts.clear();
     this.toolCalls.clear();
     this.revision++;
   }
 
-  observeReloadStarted() {
+  observeReloadStarted(threadId = this.projectedThreadId) {
     // Reloading MCP invalidates tool proof, not already observed user input.
-    const observedThreads = [...this.contexts].filter(([, context]) => context.userMessageObserved)
-      .map(([threadId]) => threadId);
-    const ownedThreads = [...this.contexts].filter(([, context]) => context.observed).map(([id]) => id);
+    const flags = [...this.contexts].map(([id, context]) => [id, {
+      observed: context.observed, userMessageObserved: context.userMessageObserved,
+    }]);
     this.resetContexts();
-    for (const threadId of ownedThreads) this.noteTask(threadId);
-    for (const threadId of observedThreads) this.noteUserMessage(threadId);
+    for (const [id, preserved] of flags) Object.assign(this.context(id), preserved);
+    const context = threadId ? this.context(threadId) : this.context();
+    this.projectedThreadId = threadId ?? null;
+    if (threadId) context.observed = true;
+    context.startupStatus = "starting";
     void this.update({ status: "starting", code: "reloading-codex-app",
       message: "正在重新加载 Codex 任务工具", toolsVerified: false,
-      missingTools: [], detail: null, serverStatus: "starting" });
+      missingTools: [], detail: null, serverStatus: "starting" }, context);
   }
 
-  observeReloadFailed(error) {
+  observeReloadFailed(error, threadId = this.projectedThreadId) {
     // Reload start invalidates old proof once. Its response cannot invalidate
     // startup notifications or probe results received during the new connection.
+    const context = threadId ? this.context(threadId) : this.context();
+    if (context.startupStatus === "ready") return;
     void this.update({ status: "unconfirmed", code: "codex-app-reload-failed",
       message: "刷新工具配置未完成，暂未确认工具状态", toolsVerified: false,
-      detail: sanitizeHealthDetail(errorMessage(error)), serverStatus: "notStarted" });
+      detail: sanitizeHealthDetail(errorMessage(error)), serverStatus: "notStarted" }, context);
   }
 
   async disconnect(detail = null) {
@@ -591,6 +772,7 @@ class HostHealthTracker {
       serverStatus: "failed",
     };
     this.resetContexts();
+    this.projectedThreadId = null;
     await this.update({ ...failure, threadId: null, toolsVerified: false });
   }
 
@@ -598,7 +780,6 @@ class HostHealthTracker {
     if (this.closed) return this.tail;
     if (disconnected) await this.disconnect(detail);
     this.closed = true;
-    for (const context of this.contexts.values()) this.clearGraceTimer(context);
     await this.tail;
   }
 
@@ -609,28 +790,13 @@ class HostHealthTracker {
     ) });
   }
 
-  armGraceTimer(context) {
-    if (this.closed || !this.path || context.state.status !== "starting") return;
-    this.clearGraceTimer(context);
-    context.timer = this.setTimer(() => {
-      context.timer = null;
-      if (this.closed || context.state.status !== "starting") return;
-      void this.update({ status: "unconfirmed", code: "startup-status-timeout",
-        message: "等待工具服务就绪超时，尚未确认当前状态", detail: null,
-        toolsVerified: false }, context);
-    }, this.graceMs);
-    context.timer?.unref?.();
-  }
-
-  clearGraceTimer(context) {
-    if (context.timer != null) this.clearTimer(context.timer);
-    context.timer = null;
-  }
-
   update(patch, context = this.context()) {
     if (this.closed) return this.tail;
     context.state = { ...context.state, ...patch, updatedAt: this.now() };
-    this.state = { ...this.state, ...context.state };
+    if (context.state.threadId === this.projectedThreadId ||
+        (context.state.threadId == null && this.projectedThreadId == null)) {
+      this.state = { ...this.state, ...context.state };
+    }
     return this.persist();
   }
 

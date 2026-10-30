@@ -6,12 +6,18 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { createHostHealthTracker, resolveHostHealthInstance, readHostHealthViewModel,
   requestHostToolReload, watchHostToolReloadRequests, watchHostHealthFiles,
+  publishHostToolSelection, watchHostToolSelection,
   HOST_TOOL_RELOAD_REQUEST_VERSION } from "../src/host-health.mjs";
 import { relayInstancePath } from "../src/relay-instance-paths.mjs";
 import { RELAY_STATE_VERSION } from "../src/relay-contract.mjs";
 import { isRelayStateCurrent } from "../src/platform.mjs";
 import { proveHostTools } from "./host-tool-fixtures.mjs";
 import { useTempDir, waitFor } from "./helpers.mjs";
+
+const TEST_SELECTION_TOKEN = {
+  selectionSourceId: "test-selection",
+  selectionRevision: 1,
+};
 
 async function fixture(t) {
   const trackers = [];
@@ -54,13 +60,41 @@ test("双后台同 generation，空闲 durable 不遮蔽 local 任务，切换�
   await waitFor(async () => JSON.parse(await readFile(durable.healthPath, "utf8")).tasks?.["work-task"]?.observed);
   view = await readHostHealthViewModel(binding, { threadId: "work-task", relayStateChecker: checker });
   assert.equal(view.sessionId, durable.sessionId);
-  assert.equal(view.status, "starting");
+  assert.equal(view.status, "idle", "仅发现归属时保持被动，进入任务后再启动检查");
   assert.equal(view.toolsVerified, false);
   assert.deepEqual(view.checks, {});
   durable.tracker.observeReloadStarted();
   assert.equal(durable.tracker.ownsTask("work-task"), true, "MCP 重载保留任务归属");
   durable.tracker.observeServerMessage({ method: "thread/closed", params: { threadId: "work-task" } });
   assert.equal(durable.tracker.ownsTask("work-task"), false);
+});
+
+test("任务选择使用最新状态快照，快速切换不会回放旧任务且支持显式撤销", async t => {
+  const { binding, instance } = await fixture(t);
+  const owner = await instance("task-a");
+  owner.tracker.noteTask("task-b");
+  await waitFor(async () => JSON.parse(await readFile(owner.healthPath, "utf8"))
+    .tasks?.["task-b"]?.observed);
+  const selections = [];
+  const watcher = watchHostToolSelection({ healthPath: owner.healthPath,
+    generation: binding.generation, sessionId: owner.sessionId }, {
+    debounceMs: 10,
+    onSelection: selection => selections.push(selection),
+  });
+  t.after(() => watcher.close());
+  const options = { relayStateChecker: async () => true };
+  await publishHostToolSelection(binding, { sourceId: "selection-source", revision: 1,
+    threadId: "task-a", sessionId: owner.sessionId }, options);
+  await publishHostToolSelection(binding, { sourceId: "selection-source", revision: 2,
+    threadId: "task-b", sessionId: owner.sessionId }, options);
+  await waitFor(() => selections.at(-1)?.threadId === "task-b");
+  assert.equal(selections.some((selection, index) => selection.threadId === "task-a" &&
+    selections.slice(index + 1).some(next => next.threadId === "task-b") &&
+    selections.at(-1)?.threadId === "task-a"), false);
+  await publishHostToolSelection(binding, { sourceId: "selection-source", revision: 3,
+    threadId: null, ownerThreadId: "task-b", sessionId: owner.sessionId }, options);
+  await waitFor(() => selections.at(-1)?.threadId === null);
+  assert.equal(selections.at(-1).revision, 3);
 });
 
 test("未确认归属有限等待，冲突归属和旧代际、死亡、身份错配均不借用结果", async t => {
@@ -100,20 +134,25 @@ test("macOS/Windows 原生单后台与双后台请求定向，重连后的旧会
     });
     t.after(() => watcher.close());
   }
-  for (const action of ["select", "check", "diagnose", "reload"]) {
-    await requestHostToolReload(binding, { action, threadId: "task-a", sessionId: first.sessionId });
+  for (const action of ["check", "diagnose", "reload"]) {
+    await requestHostToolReload(binding, { action, threadId: "task-a",
+      sessionId: first.sessionId, ...TEST_SELECTION_TOKEN });
   }
-  await requestHostToolReload(binding, { action: "check", threadId: "task-b", sessionId: second.sessionId });
-  await waitFor(() => received[0].length === 4 && received[1].length === 1);
+  await requestHostToolReload(binding, { action: "check", threadId: "task-b",
+    sessionId: second.sessionId, ...TEST_SELECTION_TOKEN });
+  await waitFor(() => received[0].length === 3 && received[1].length === 1);
   assert.ok(received[0].every(request => request.threadId === "task-a" && request.sessionId === first.sessionId));
   assert.ok(received[1].every(request => request.threadId === "task-b" && request.sessionId === second.sessionId));
-  await assert.rejects(requestHostToolReload(binding, { threadId: "task-a", sessionId: second.sessionId }), /任务所属后台/);
+  await assert.rejects(requestHostToolReload(binding, { threadId: "task-a",
+    sessionId: second.sessionId, ...TEST_SELECTION_TOKEN }), /任务所属后台/);
   await instance("task-a");
-  await assert.rejects(requestHostToolReload(binding, { threadId: "task-a", sessionId: first.sessionId }), /任务所属后台/);
+  await assert.rejects(requestHostToolReload(binding, { threadId: "task-a",
+    sessionId: first.sessionId, ...TEST_SELECTION_TOKEN }), /任务所属后台/);
   await unlink(first.statePath);
   const replacement = await resolveHostHealthInstance(binding, { threadId: "task-a" });
   assert.notEqual(replacement.instance.sessionId, first.sessionId);
-  await assert.rejects(requestHostToolReload(binding, { threadId: "task-a", sessionId: first.sessionId }), /任务所属后台/);
+  await assert.rejects(requestHostToolReload(binding, { threadId: "task-a",
+    sessionId: first.sessionId, ...TEST_SELECTION_TOKEN }), /任务所属后台/);
   // A stale request accidentally copied into the new instance's mailbox is rejected too.
   const rejected = [];
   const owner = replacement.instance;
@@ -123,7 +162,7 @@ test("macOS/Windows 原生单后台与双后台请求定向，重连后的旧会
   const stalePath = `${owner.healthPath}.reload-stale-request.json`;
   await writeFile(stalePath, JSON.stringify({ version: HOST_TOOL_RELOAD_REQUEST_VERSION,
     requestId: "stale-request", generation: binding.generation, sessionId: first.sessionId,
-    action: "check", threadId: "task-a" }));
+    action: "check", threadId: "task-a", ...TEST_SELECTION_TOKEN }));
   await waitFor(() => readFile(stalePath).then(() => false, error => error.code === "ENOENT"));
   assert.deepEqual(rejected, []);
 });
@@ -155,7 +194,7 @@ test("WSL 双后台重检先写目标实例请求，再通知其状态身份；�
   for (const [owner, threadId] of [[first, "task-a"], [second, "task-b"]]) {
     const requestId = `target-wsl-${threadId}`;
     const request = await requestHostToolReload(wslBinding, { action: "check", threadId,
-      sessionId: owner.sessionId, requestId }, {
+      sessionId: owner.sessionId, requestId, ...TEST_SELECTION_TOKEN }, {
       relayStateChecker: async () => true,
       async signalWslRelay(statePath, generation) {
         notices.push(statePath);
@@ -171,7 +210,7 @@ test("WSL 双后台重检先写目标实例请求，再通知其状态身份；�
   assert.deepEqual(notices, [first.statePath, second.statePath]);
   const failedPath = `${first.healthPath}.reload-failed-wsl-request.json`;
   await assert.rejects(requestHostToolReload(wslBinding, { action: "check", threadId: "task-a",
-    sessionId: first.sessionId, requestId: "failed-wsl-request" }, {
+    sessionId: first.sessionId, requestId: "failed-wsl-request", ...TEST_SELECTION_TOKEN }, {
     relayStateChecker: async () => true,
     signalWslRelay: async () => { throw new Error("signal failed"); },
   }), /signal failed/);

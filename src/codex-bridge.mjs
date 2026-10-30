@@ -1,4 +1,5 @@
 import { isSea } from "node:sea";
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, win32 } from "node:path";
@@ -11,52 +12,43 @@ import {
 } from "./platform.mjs";
 import { resolveMacOSCodexShim } from "./macos-shim.mjs";
 import { RELAY_PROTOCOL_VERSION } from "./relay-contract.mjs";
-import { fetchOfficialModelCatalog } from "./official-model-catalog.mjs";
 
 const BRIDGE_GENERATION = `usage-events-v${RELAY_PROTOCOL_VERSION}`;
 const RELAY_CONFIG_VERSION = 3;
-const MACOS_SHIM_CONFIG_VERSION = 6;
+const MACOS_SHIM_CONFIG_VERSION = 7;
 const PRIMARY_APP_SERVER_ENV = "CODEX_QUOTA_PRIMARY_APP_SERVER";
 
-export async function refreshCodexModelCatalog({
-  contextManager,
-  accountManager = null,
-  executable = null,
-}) {
-  let account = null;
+export function runtimeGenerationKey(codexRuntime, upstreamExecutable) {
+  return createHash("sha256")
+    .update(codexRuntime?.runtimeId ?? String(upstreamExecutable ?? ""))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+export function runtimeDispositionForLaunch(requestedRuntime, launchRuntime) {
+  if (!launchRuntime) return null;
+  if (requestedRuntime?.runtimeId &&
+    requestedRuntime.runtimeId === launchRuntime.runtimeId) {
+    return requestedRuntime.fallback === true ? "runtime-fallback" : "selected";
+  }
+  return "degraded-official";
+}
+
+function runtimeLaunchFields(requestedRuntime, launchRuntime = requestedRuntime) {
+  return {
+    requestedCodexRuntime: requestedRuntime ?? null,
+    codexRuntime: launchRuntime ?? null,
+    runtimeDisposition: runtimeDispositionForLaunch(requestedRuntime, launchRuntime),
+  };
+}
+
+async function officialFallbackLaunchFields(codexRuntimeManager, requestedRuntime) {
+  if (!requestedRuntime) return runtimeLaunchFields(null, null);
   try {
-    const upstreamExecutable = executable ?? await resolveCodexCliExecutable();
-    account = await accountManager?.getCurrentModelCatalogAccount();
-    contextManager.selectModelCatalogAccount(account);
-    await contextManager.refresh({ sync: false });
-    const refresh = await fetchOfficialModelCatalog({ executable: upstreamExecutable, account,
-      dataDir: contextManager.dataDir, codexHome: accountManager?.codexHome ?? contextManager.codexHome });
-    const changed = refresh.catalog
-      ? (await contextManager.useOfficialCatalog(refresh.catalog, {
-          source: refresh.source === "bundled" ? "official-bundled"
-            : refresh.source === "cache" ? "official-cache" : "official-online",
-          persist: refresh.source === "online" || refresh.source === "cache",
-        })).changed
-      : false;
-    return {
-      officialCatalogChanged: changed,
-      officialCatalogChecked: refresh.source === "online",
-      officialCatalogSource: refresh.source,
-      officialCatalogError: null,
-      officialAuthMode: account?.authMode ?? null,
-    };
-  } catch (error) {
-    console.warn(`[models] 官方模型目录刷新失败，继续使用上次可用目录：${error.message}`);
-    // Preserve an API-key account's last usable bundled catalog when fetching
-    // fails, rather than replacing it with another account's OAuth cache.
-    await contextManager.refresh({ sync: false });
-    return {
-      officialCatalogChanged: false,
-      officialCatalogChecked: false,
-      officialCatalogSource: null,
-      officialCatalogError: error.message,
-      officialAuthMode: account?.authMode ?? null,
-    };
+    const launchRuntime = await codexRuntimeManager?.getOfficialFallbackRuntime(requestedRuntime);
+    return runtimeLaunchFields(requestedRuntime, launchRuntime);
+  } catch {
+    return runtimeLaunchFields(requestedRuntime, null);
   }
 }
 
@@ -65,6 +57,9 @@ export async function prepareCodexLaunch({
   contextManager,
   accountManager = null,
   modelRouterManager = null,
+  codexRuntimeManager = null,
+  modelCatalogCoordinator,
+  modelCatalogRequest = null,
 }) {
   if (process.platform !== "darwin" && process.platform !== "win32") {
     return {
@@ -73,6 +68,9 @@ export async function prepareCodexLaunch({
       injectionMode: null,
       officialCatalogChanged: false,
       staticModelCatalog: false,
+      codexRuntime: null,
+      requestedCodexRuntime: null,
+      runtimeDisposition: null,
     };
   }
   const defaultInjectionMode = await resolveDefaultInjectionMode();
@@ -89,12 +87,26 @@ export async function prepareCodexLaunch({
   let staticModelCatalog = false;
   let officialCatalog;
   let router = null;
+  let codexRuntime = null;
+  let requestedCodexRuntime = null;
+  let externalCatalogPreserved = false;
   try {
-    upstreamExecutable = await resolveCodexCliExecutable();
-    officialCatalog = await refreshCodexModelCatalog({
-      contextManager,
-      accountManager,
+    const explicitUpstream = String(
+      process.env.CODEX_QUOTA_UPSTREAM_CODEX_CLI ?? "",
+    ).trim();
+    if (!explicitUpstream) {
+      requestedCodexRuntime = await codexRuntimeManager?.getLaunchRuntime();
+      codexRuntime = requestedCodexRuntime;
+    }
+    upstreamExecutable = codexRuntime?.executable ?? await resolveCodexCliExecutable();
+    const managedRuntimeRequired = process.platform === "darwin" &&
+      (Boolean(explicitUpstream) || codexRuntime?.managed === true ||
+        codexRuntime?.mcpConnectionSharing === true);
+    if (!modelCatalogCoordinator) throw new Error("模型目录协调器未初始化");
+    officialCatalog = await modelCatalogCoordinator.request({
+      ...(modelCatalogRequest ?? {}),
       executable: upstreamExecutable,
+      clientVersion: codexRuntime?.version ?? null,
     });
     const contextState = contextManager.getViewModel();
     const extraModels = extraModelManager.getViewModel();
@@ -106,24 +118,31 @@ export async function prepareCodexLaunch({
       await modelRouterManager?.disable();
       const message = "检测到用户管理的模型目录，已保留其配置并停用本工具模型中继";
       extraModelManager.setError(message);
-      return {
-        env: {},
-        relay: {
-          statePath,
-          healthPath,
-          expectAbsent: true,
-          hostToolsRequired: false,
-          wslNative: defaultInjectionMode === "wsl",
-        },
-        injectionMode: defaultInjectionMode,
-        preparationError: message,
-        ...officialCatalog,
-        staticModelCatalog: false,
-      };
+      if (!managedRuntimeRequired) {
+        return {
+          env: {},
+          relay: {
+            statePath,
+            healthPath,
+            expectAbsent: true,
+            hostToolsRequired: false,
+            wslNative: defaultInjectionMode === "wsl",
+          },
+          injectionMode: defaultInjectionMode,
+          preparationError: message,
+          ...officialCatalog,
+          staticModelCatalog: false,
+          ...runtimeLaunchFields(requestedCodexRuntime, codexRuntime),
+        };
+      }
+      externalCatalogPreserved = true;
+      staticModelCatalog = false;
     }
     const catalog = contextManager.getEffectiveCatalog();
     runtime = await extraModelManager.writeRuntimeCatalog(catalog);
-    const routingExtraModels = withoutCatalogConflicts(extraModels, runtime.catalogConflicts);
+    const routingExtraModels = externalCatalogPreserved
+      ? { ...extraModels, platforms: [] }
+      : withoutCatalogConflicts(extraModels, runtime.catalogConflicts);
     const customRoutingRequired = requiresCustomRouting({
       extraModels: routingExtraModels,
     });
@@ -131,6 +150,7 @@ export async function prepareCodexLaunch({
       platform: process.platform,
       staticModelCatalog,
       customRoutingRequired,
+      managedRuntimeRequired,
     });
     if (bridgeMode === "direct") {
       await modelRouterManager?.disable();
@@ -146,6 +166,7 @@ export async function prepareCodexLaunch({
         injectionMode: defaultInjectionMode,
         ...officialCatalog,
         staticModelCatalog: false,
+        ...runtimeLaunchFields(requestedCodexRuntime, codexRuntime),
       };
     }
     if (bridgeMode === "macos-shim" || bridgeMode === "macos-router") {
@@ -170,6 +191,10 @@ export async function prepareCodexLaunch({
   } catch (error) {
     await modelRouterManager?.disable().catch(() => undefined);
     extraModelManager.setError(`模型中继准备失败，Codex 将按官方模式启动：${error.message}`);
+    const runtimeFields = await officialFallbackLaunchFields(
+      codexRuntimeManager,
+      requestedCodexRuntime,
+    );
     return {
       env: {},
       relay: {
@@ -181,14 +206,18 @@ export async function prepareCodexLaunch({
       },
       injectionMode: defaultInjectionMode,
       preparationError: error.message,
+      ...(officialCatalog ?? {}),
       officialCatalogChanged: false,
       staticModelCatalog: false,
+      ...runtimeFields,
     };
   }
   const catalogGeneration = staticModelCatalog
     ? runtime.generation
     : `official-online:${extraModelManager.settings.generation}`;
-  const relayGeneration = `${catalogGeneration}:${BRIDGE_GENERATION}`;
+  const runtimeGeneration = runtimeGenerationKey(codexRuntime, upstreamExecutable);
+  const relayGeneration = `${catalogGeneration}:${BRIDGE_GENERATION}:` +
+    `runtime-${runtimeGeneration}`;
   try {
     const config = process.platform === "darwin"
       ? {
@@ -201,6 +230,7 @@ export async function prepareCodexLaunch({
           relayStatePath: statePath,
           hostHealthPath: healthPath,
           hostToolsRequired: true,
+          mcpConnectionSharing: codexRuntime?.mcpConnectionSharing === true,
           runtimeTarget: "macos-native",
           tokenUsageEventsPath: tokenUsageEventPath,
           generation: `${relayGeneration}:${router?.instanceId ?? "direct"}`,
@@ -234,6 +264,10 @@ export async function prepareCodexLaunch({
   } catch (error) {
     await modelRouterManager?.disable().catch(() => undefined);
     extraModelManager.setError(`模型中继配置写入失败，Codex 将按官方模式启动：${error.message}`);
+    const runtimeFields = await officialFallbackLaunchFields(
+      codexRuntimeManager,
+      requestedCodexRuntime,
+    );
     return {
       env: {},
       relay: {
@@ -245,8 +279,10 @@ export async function prepareCodexLaunch({
       },
       injectionMode: defaultInjectionMode,
       preparationError: error.message,
+      ...(officialCatalog ?? {}),
       officialCatalogChanged: false,
       staticModelCatalog: false,
+      ...runtimeFields,
     };
   }
   const effectiveGeneration = process.platform === "darwin"
@@ -273,13 +309,19 @@ export async function prepareCodexLaunch({
     injectionMode: resolveInjectionMode(relayExecutable),
     ...officialCatalog,
     staticModelCatalog,
+    ...runtimeLaunchFields(requestedCodexRuntime, codexRuntime),
   };
 }
 
-export function selectBridgeMode({ platform, staticModelCatalog, customRoutingRequired }) {
+export function selectBridgeMode({
+  platform,
+  staticModelCatalog,
+  customRoutingRequired,
+  managedRuntimeRequired = false,
+}) {
   if (platform !== "darwin" && platform !== "win32") return "unsupported";
   if (platform === "win32") return "windows-relay";
-  if (!staticModelCatalog) return "direct";
+  if (!staticModelCatalog && !managedRuntimeRequired) return "direct";
   if (platform === "darwin") {
     return customRoutingRequired ? "macos-router" : "macos-shim";
   }

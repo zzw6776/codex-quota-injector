@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import {
   directHostHealth,
   hostHealthPollInterval,
+  publishHostToolSelection,
   readHostHealthViewModel,
   watchHostHealthFiles,
-  requestHostToolReload,
 } from "../host-health.mjs";
 
 function createHostHealthSession(dependencies) {
@@ -28,8 +29,43 @@ function createHostHealthSession(dependencies) {
   let lastHostHealthWatchError = null;
   let scopeKey = null;
   let selectedTask = null;
-  let selectedRuntime = null;
+  const selectionSourceId = dependencies.selectionSourceId ?? randomUUID();
+  let selectionRevision = 0;
+  let selectedOwner = null;
   let scopeStartedAt = 0;
+
+  function updateHostHealth(next) {
+    const nextJson = JSON.stringify(next);
+    if (nextJson === hostHealthJson) return;
+    hostHealth = next;
+    hostHealthJson = nextJson;
+    dependencies.markWidgetDataDirty();
+  }
+
+  async function reconcileSelection(binding, desired) {
+    const bindingKey = hostHealthBindingKey(binding);
+    if (selectedOwner && desired && selectedOwner.bindingKey === bindingKey &&
+        selectedOwner.sessionId === desired.sessionId &&
+        selectedOwner.threadId === desired.threadId) return;
+    const publish = dependencies.requestSelection ?? publishHostToolSelection;
+    const sameRuntime = selectedOwner && desired &&
+      selectedOwner.bindingKey === bindingKey && selectedOwner.sessionId === desired.sessionId;
+    if (selectedOwner && !sameRuntime) {
+      const revision = selectionRevision + 1;
+      await publish(selectedOwner.binding, { sourceId: selectionSourceId, revision,
+        threadId: null, ownerThreadId: selectedOwner.threadId,
+        sessionId: selectedOwner.sessionId }, { allowMissingOwner: true });
+      selectionRevision = revision;
+      selectedOwner = null;
+    }
+    if (!desired) return;
+    const revision = selectionRevision + 1;
+    await publish(binding, { sourceId: selectionSourceId, revision,
+      threadId: desired.threadId, sessionId: desired.sessionId });
+    selectionRevision = revision;
+    selectedOwner = { binding: { ...binding }, bindingKey, threadId: desired.threadId,
+      sessionId: desired.sessionId, sourceId: selectionSourceId, revision };
+  }
 
   function closeHostHealthWatcher() {
     hostHealthWatcher?.close();
@@ -107,17 +143,15 @@ function createHostHealthSession(dependencies) {
     if (nextScopeKey !== scopeKey) {
       scopeKey = nextScopeKey;
       selectedTask = activeTask;
-      selectedRuntime = null;
       scopeStartedAt = now;
       lastHostHealthCheckAt = 0;
       hostHealthActionError = null;
       force = true;
       if (binding?.hostToolsRequired) {
-        hostHealth = { required: true, status: activeTask?.hostId === "local" ? "starting" : "idle",
+        updateHostHealth({ required: true,
+          status: activeTask?.hostId === "local" ? "starting" : "idle",
           threadId: activeTask?.hostId === "local" ? activeTask.threadId : null,
-          canCheck: false, message: "正在读取当前任务的检查结果" };
-        hostHealthJson = JSON.stringify(hostHealth);
-        dependencies.markWidgetDataDirty();
+          canCheck: false, message: "正在读取当前任务的检查结果" });
       }
     }
     ensureHostHealthWatcher(binding, now);
@@ -141,24 +175,15 @@ function createHostHealthSession(dependencies) {
           threadId: activeTask?.threadId, waitingSince: scopeStartedAt });
       }
       if (scopeKey !== nextScopeKey || dependencies.stopped) return hostHealth;
-      if (activeTask && next.canCheck) {
-        const runtime = `${nextScopeKey}:${next.sessionId}`;
-        if (runtime !== selectedRuntime) {
-          await (dependencies.requestCheck ?? requestHostToolReload)(binding, {
-            action: "select", threadId: activeTask.threadId, sessionId: next.sessionId });
-          selectedRuntime = runtime;
-        }
-      }
+      const desired = activeTask?.hostId === "local" && next.canCheck
+        ? { threadId: activeTask.threadId, sessionId: next.sessionId }
+        : null;
+      await reconcileSelection(binding, desired);
       if (scopeKey !== nextScopeKey) return hostHealth;
       const displayed = hostHealthActionError
         ? { ...next, actionError: hostHealthActionError }
         : next;
-      const nextJson = JSON.stringify(displayed);
-      if (nextJson !== hostHealthJson) {
-        hostHealth = displayed;
-        hostHealthJson = nextJson;
-        dependencies.markWidgetDataDirty();
-      }
+      updateHostHealth(displayed);
       return hostHealth;
     })()
       .catch((error) => {
@@ -170,12 +195,7 @@ function createHostHealthSession(dependencies) {
           message: "无法读取 Codex 任务工具状态",
           detail: error.message,
         };
-        const nextJson = JSON.stringify(displayed);
-        if (nextJson !== hostHealthJson) {
-          hostHealth = displayed;
-          hostHealthJson = nextJson;
-          dependencies.markWidgetDataDirty();
-        }
+        updateHostHealth(displayed);
         return hostHealth;
       })
       .finally(() => {
@@ -187,6 +207,11 @@ function createHostHealthSession(dependencies) {
 
   return {
     get selectedTask() { return selectedTask; },
+    get selectionToken() {
+      return selectedOwner ? { sourceId: selectedOwner.sourceId,
+        revision: selectedOwner.revision, threadId: selectedOwner.threadId,
+        sessionId: selectedOwner.sessionId } : null;
+    },
     get hostHealth() {
       return hostHealth;
     },

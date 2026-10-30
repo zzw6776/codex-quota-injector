@@ -2,6 +2,7 @@ import { mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/pr
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 
+import { isUsableModelCatalog as isUsableCatalog } from "./model-catalog-validation.mjs";
 import { defaultAccountDataDir } from "./platform.mjs";
 
 const STORE_VERSION = 5;
@@ -28,6 +29,8 @@ export class CodexContextManager {
     this.catalog = null;
     this.catalogSource = null;
     this.transientCatalog = null;
+    this.transientCatalogSource = null;
+    this.nativeModelCatalogAllowed = true;
     this.overrides = {};
     this.previousModelCatalog = null;
     this.legacyCatalogMigration = null;
@@ -144,26 +147,32 @@ export class CodexContextManager {
     };
   }
 
-  selectModelCatalogAccount(account) {
-    if (account?.authMode !== "apiKey") this.transientCatalog = null;
+  async setModelCatalogScope({
+    allowNativeCatalog = true,
+    resetTransient = false,
+  } = {}) {
+    return this.#withLock(async () => {
+      this.nativeModelCatalogAllowed = allowNativeCatalog === true;
+      if (resetTransient) {
+        this.transientCatalog = null;
+        this.transientCatalogSource = null;
+      }
+      return this.#refreshOnce({ sync: false });
+    });
   }
 
-  async useOfficialCatalog(catalog, { source = "official-online", persist = true } = {}) {
-    if (!isUsableCatalog(catalog)) {
-      throw new Error("官方模型目录为空或包含重复模型");
-    }
-    const changed = catalogSignature(this.catalog) !== catalogSignature(catalog);
-    // Persist the cache produced by the official CLI. Unlike model_catalog_json,
-    // models_cache.json does not force Codex into static-catalog mode.
-    if (persist) {
-      await writeJsonAtomic(this.sourcePath, catalog);
-      this.transientCatalog = null;
-    } else {
+  async useOfficialCatalog(catalog, { source = "official-online" } = {}) {
+    return this.#withLock(async () => {
+      if (!isUsableCatalog(catalog)) {
+        throw new Error("官方模型目录为空或包含重复模型");
+      }
+      const changed = catalogSignature(this.catalog) !== catalogSignature(catalog);
       this.transientCatalog = structuredClone(catalog);
-    }
-    this.catalog = structuredClone(catalog);
-    this.catalogSource = source;
-    return { changed };
+      this.transientCatalogSource = source;
+      this.catalog = structuredClone(catalog);
+      this.catalogSource = source;
+      return { changed };
+    });
   }
 
   markOfficialCatalogCurrent() {
@@ -280,7 +289,9 @@ export class CodexContextManager {
     if (sync && !this.storeWriteBlockedReason && !this.migrationBlockedReason) {
       await this.#migrateLegacyManagedCatalog();
     }
-    const cachedCatalog = await readJson(this.sourcePath);
+    const cachedCatalog = this.nativeModelCatalogAllowed
+      ? await readJson(this.sourcePath)
+      : null;
     const activeCatalog = isUsableCatalog(this.transientCatalog)
       ? structuredClone(this.transientCatalog)
       : cachedCatalog;
@@ -289,7 +300,7 @@ export class CodexContextManager {
       : null;
     this.catalog = isUsableCatalog(activeCatalog) ? activeCatalog : preservedCatalog;
     this.catalogSource = isUsableCatalog(this.transientCatalog)
-      ? "official-bundled"
+      ? this.transientCatalogSource ?? "official-cache"
       : isUsableCatalog(cachedCatalog)
         ? "official-cache"
       : isUsableCatalog(preservedCatalog)
@@ -577,17 +588,6 @@ async function pathsReferToSameLocation(left, right) {
 
 function sameOptionalText(left, right) {
   return left.exists === right.exists && left.content === right.content;
-}
-
-function isUsableCatalog(value) {
-  if (!value || !Array.isArray(value.models) || value.models.length === 0) return false;
-  const slugs = new Set();
-  return value.models.every((model) => {
-    const slug = typeof model?.slug === "string" ? model.slug.trim() : "";
-    if (!slug || slugs.has(slug)) return false;
-    slugs.add(slug);
-    return true;
-  });
 }
 
 function catalogSignature(value) {

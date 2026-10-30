@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { requestHostToolReload } from "../src/host-health.mjs";
+import { publishHostToolSelection, requestHostToolReload } from "../src/host-health.mjs";
 import { listRelayInstances, relayInstancePath } from "../src/relay-instance-paths.mjs";
 import { readInstanceJson } from "./relay-instance-fixtures.mjs";
 import { successfulHostToolResult } from "./host-tool-fixtures.mjs";
@@ -25,7 +25,7 @@ for await (const line of lines) {
   if (message.method === "config/mcpServer/reload") {
     process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");
     process.stdout.write(JSON.stringify({ method: "mcpServer/startupStatus/updated", params: {
-      threadId: "reload-task", name: "codex_app", status: "ready" } }) + "\\n");
+      threadId: "thread-1", name: "codex_app", status: "ready" } }) + "\\n");
     continue;
   }
   if (message.method === "mcpServer/tool/call") {
@@ -402,8 +402,11 @@ test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部
       state.pid === child.pid && state.generation === expectedGeneration &&
       child.exitCode == null && child.signalCode == null;
   };
-  await requestHostToolReload(binding, { threadId: "thread-1", sessionId: owner.sessionId,
-    requestId: "reloadrequest01" }, { relayStateChecker });
+  await publishHostToolSelection(binding, { sourceId: "integration-selection", revision: 1,
+    threadId: "thread-1", sessionId: owner.sessionId }, { relayStateChecker });
+  await requestHostToolReload(binding, { action: "reload", threadId: "thread-1",
+    sessionId: owner.sessionId, requestId: "reloadrequest01",
+    selectionSourceId: "integration-selection", selectionRevision: 1 }, { relayStateChecker });
   // Keep the client connected until reload and catalog verification actually finish.
   await waitFor(async () => {
     const health = await readInstanceJson(healthPath);
@@ -425,11 +428,12 @@ test("[LCH-04 TOOL-04] 刷新配置后对就绪任务执行四项探针，内部
   assert.deepEqual(health.missingTools, []);
 });
 
-test("[LCH-04 TOOL-04] 多个任务 MCP 交错就绪时并发探针且不重载", async t => {
+test("[LCH-04 TOOL-04] 多个任务就绪时保持被动，仅验证当前选择的任务", async t => {
   const directory = await useTempDir(t, "codex-thread-only-host-tools-");
   const upstream = join(directory, "thread-only.mjs");
   const executable = join(directory, process.platform === "win32" ? "upstream.exe" : "upstream");
   const configPath = join(directory, "relay.json");
+  const statePath = join(directory, "state.json");
   const healthPath = join(directory, "health.json");
   const logPath = join(directory, "requests.jsonl");
   await createNodeAlias(executable);
@@ -448,7 +452,7 @@ for await(const line of createInterface({input:process.stdin})) {
  } else send({id:x.id,result:{}});
 }`);
   await writeFile(configPath, JSON.stringify({upstreamExecutable: executable,
-    relayStatePath: join(directory, "state.json"), hostHealthPath: healthPath,
+    relayStatePath: statePath, hostHealthPath: healthPath,
     hostToolsRequired: true, generation: "thread-only-tools"}));
   const {child, closed} = spawnRelay({configPath,
     env: {RELAY_TEST_REQUEST_LOG: logPath},
@@ -462,10 +466,27 @@ for await(const line of createInterface({input:process.stdin})) {
   child.stdout.on("data", chunk => { stdout += chunk; });
   child.stdin.write(`${JSON.stringify({id: 1, method: "initialize", params: {}})}\n`);
   child.stdin.write(`${JSON.stringify({id: 2, method: "mcpServerStatus/list", params: {}})}\n`);
+  const owner = await waitFor(async () => {
+    const health = await readInstanceJson(healthPath);
+    return health?.tasks?.["ready-thread"]?.serverStatus === "ready" &&
+      health.tasks?.["other-thread"]?.serverStatus === "ready" ? health : null;
+  }, {timeoutMs: 10_000});
+  let requests = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+  assert.equal(requests.filter(x => x.method === "mcpServer/tool/call").length, 0,
+    "历史任务 ready 通知不得主动拉起任务工具连接");
+  const binding = { hostToolsRequired: true, generation: "thread-only-tools",
+    statePath, healthPath, instanceScoped: true };
+  const relayStateChecker = async (path, expectedGeneration) => {
+    const state = JSON.parse(await readFile(path, "utf8"));
+    return path === relayInstancePath(statePath, owner.sessionId) &&
+      state.pid === child.pid && state.generation === expectedGeneration &&
+      child.exitCode == null && child.signalCode == null;
+  };
+  await publishHostToolSelection(binding, { sourceId: "integration-selection", revision: 1,
+    threadId: "ready-thread", sessionId: owner.sessionId }, { relayStateChecker });
   await waitFor(async () => {
     const health = await readInstanceJson(healthPath);
-    return health?.tasks?.["ready-thread"]?.status === "ready" &&
-      health.tasks?.["other-thread"]?.status === "ready";
+    return health?.tasks?.["ready-thread"]?.status === "ready" ? health : null;
   }, {timeoutMs: 10_000});
   child.stdin.end();
   await closed;
@@ -473,11 +494,14 @@ for await(const line of createInterface({input:process.stdin})) {
   assert.equal(health.status, "ready");
   assert.equal(health.threadId, "ready-thread");
   assert.equal(health.tasks["ready-thread"].toolsVerified, true);
-  assert.equal(health.tasks["other-thread"].toolsVerified, true);
+  assert.equal(health.tasks["other-thread"].status, "idle");
+  assert.equal(health.tasks["other-thread"].toolsVerified, false);
   assert.deepEqual(health.missingTools, []);
-  const requests = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+  requests = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
   assert.deepEqual(requests.filter(x => x.method === "mcpServerStatus/list" && x.params?.threadId), []);
-  assert.equal(requests.filter(x => x.method === "mcpServer/tool/call").length, 8);
+  const probes = requests.filter(x => x.method === "mcpServer/tool/call");
+  assert.equal(probes.length, 4);
+  assert.ok(probes.every(x => x.params.threadId === "ready-thread"));
   assert.ok(requests.every(x=>x.method !== "config/mcpServer/reload" && x.method !== "turn/start"));
   assert.doesNotMatch(stdout, /codex-quota-(host-tools|tool-check)-/);
   const responses = stdout.trim().split(/\r?\n/).map(JSON.parse);

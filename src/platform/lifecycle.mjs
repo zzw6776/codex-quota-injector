@@ -182,7 +182,9 @@ async function restartCodex(port, options = {}) {
     return;
   }
 
-  throw new Error(formatCodexReadinessError(port, readiness));
+  const error = new Error(formatCodexReadinessError(port, readiness));
+  error.codexReadiness = readiness;
+  throw error;
 }
 
 async function activateCodex(providedExecutable = null) {

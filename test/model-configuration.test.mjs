@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectBridgeMode } from "../src/codex-bridge.mjs";
+import {
+  prepareCodexLaunch,
+  runtimeDispositionForLaunch,
+  runtimeGenerationKey,
+  selectBridgeMode,
+} from "../src/codex-bridge.mjs";
 import { spawn } from "node:child_process";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -25,6 +30,12 @@ test("[platform:macos-native] macOS 仅在模型目录需要注入时接管", ()
     staticModelCatalog: true,
     customRoutingRequired: true,
   }), "macos-router");
+  assert.equal(selectBridgeMode({
+    platform: "darwin",
+    staticModelCatalog: false,
+    customRoutingRequired: false,
+    managedRuntimeRequired: true,
+  }), "macos-shim", "选择受管后端时即使没有模型扩展也必须经过 shim");
 });
 
 test("[platform:windows-native] Windows 持续通过 Relay 观察模型流量", () => {
@@ -47,6 +58,90 @@ test("未适配的平台不会选择桌面桥接模式", () => {
     customRoutingRequired: true,
   }), "unsupported");
 });
+
+test("同一路径的不同运行时身份会生成不同 Relay 代际", () => {
+  const executable = "/Applications/Codex.app/Contents/Resources/codex";
+  assert.notEqual(
+    runtimeGenerationKey({ runtimeId: "runtime-v1" }, executable),
+    runtimeGenerationKey({ runtimeId: "runtime-v2" }, executable),
+  );
+  assert.equal(
+    runtimeGenerationKey({ runtimeId: "runtime-v1" }, executable),
+    runtimeGenerationKey({ runtimeId: "runtime-v1" }, executable),
+  );
+});
+
+test("模型准备降级按实际启动身份分类，不把外部选择误记为已运行", () => {
+  const bundled = { runtimeId: "bundled", mode: "bundled" };
+  const custom = { runtimeId: "custom", mode: "custom" };
+  assert.equal(runtimeDispositionForLaunch(bundled, bundled), "selected");
+  assert.equal(
+    runtimeDispositionForLaunch({ ...bundled, fallback: true }, bundled),
+    "runtime-fallback",
+  );
+  assert.equal(
+    runtimeDispositionForLaunch(custom, bundled),
+    "degraded-official",
+  );
+});
+
+if (process.platform === "darwin") test(
+  "[platform:macos-native] 模型目录准备失败时改用实际内置后端并保留原选择",
+  async () => {
+    const requested = {
+      mode: "custom",
+      version: "0.166.0-alpha.6",
+      executable: "/fixture/custom-codex",
+      runtimeId: "custom-runtime",
+      managed: true,
+    };
+    const bundled = {
+      mode: "bundled",
+      version: "0.165.0-alpha.1.2",
+      executable: "/fixture/bundled-codex",
+      runtimeId: "bundled-runtime",
+      managed: false,
+      forceRestart: true,
+    };
+    let reportedError = null;
+    const result = await prepareCodexLaunch({
+      extraModelManager: {
+        getViewModel: () => ({ platforms: [] }),
+        writeRuntimeCatalog: async () => {
+          throw new Error("fixture catalog unavailable");
+        },
+        setError: value => {
+          reportedError = value;
+        },
+      },
+      contextManager: {
+        getViewModel: () => ({ status: "managed", overriddenCount: 1 }),
+        getEffectiveCatalog: () => null,
+      },
+      modelRouterManager: { disable: async () => {} },
+      codexRuntimeManager: {
+        getLaunchRuntime: async () => requested,
+        getOfficialFallbackRuntime: async value => {
+          assert.equal(value, requested);
+          return bundled;
+        },
+      },
+      modelCatalogCoordinator: {
+        request: async () => ({
+          officialCatalogChanged: false,
+          officialAuthMode: "chatgpt",
+        }),
+      },
+    });
+
+    assert.match(result.preparationError, /catalog unavailable/);
+    assert.match(reportedError, /Codex 将按官方模式启动/);
+    assert.equal(result.requestedCodexRuntime, requested);
+    assert.equal(result.codexRuntime, bundled);
+    assert.equal(result.runtimeDisposition, "degraded-official");
+    assert.deepEqual(result.env, {});
+  },
+);
 
 if (process.platform === "darwin") test(
   "[platform:macos-native] macOS shim 将 RPC 中继放到 sidecar 并让官方 app-server 保持桌面直系子进程",
@@ -110,7 +205,7 @@ upstream.pipe(process.stdout);
 `);
   await chmod(fakeRelay, 0o755);
   await writeFile(configPath, JSON.stringify({
-    version: 5,
+    version: 7,
     upstreamExecutable: fakeCodex,
     relayExecutable: fakeRelay,
     relayArguments: ["relay-entry"],
@@ -118,6 +213,7 @@ upstream.pipe(process.stdout);
     relayStatePath: statePath,
     hostHealthPath: join(directory, "host-health.json"),
     hostToolsRequired: true,
+    mcpConnectionSharing: true,
     generation: "test-generation",
     router: {
       providerId: "codex_quota_router",
@@ -175,6 +271,7 @@ upstream.pipe(process.stdout);
   assert.equal(official.env.upstreamStdoutFd, null);
   assert.equal(official.env.primaryAppServer, null);
   assert.equal(official.env.routerToken, "router-secret");
+  assert.ok(official.args.includes("features.mcp_connection_sharing=true"));
   assert.ok(official.args.includes(`model_catalog_json=${JSON.stringify(catalogPath)}`));
   assert.ok(official.args.includes('model_provider="openai"'));
   assert.ok(official.args.includes('openai_base_url="http://127.0.0.1:1234/token/v1/"'));
@@ -206,6 +303,7 @@ upstream.pipe(process.stdout);
   const noRouterConfig = {
     ...JSON.parse(await readFile(configPath, "utf8")),
     generation: "test-generation-no-router",
+    mcpConnectionSharing: false,
     router: null,
   };
   await writeFile(configPath, JSON.stringify(noRouterConfig));
@@ -228,6 +326,7 @@ upstream.pipe(process.stdout);
     "无 Router 的 shim 也必须启动观察 sidecar");
   assert.ok(noRouterOfficial.args.includes(`model_catalog_json=${JSON.stringify(catalogPath)}`));
   assert.equal(noRouterOfficial.args.some((argument) => argument.startsWith("model_provider=")), false);
+  assert.equal(noRouterOfficial.args.includes("features.mcp_connection_sharing=true"), false);
   assert.equal(noRouterOfficial.env.routerToken, null);
 
   // Official local/durable backends both inherit the primary flag.

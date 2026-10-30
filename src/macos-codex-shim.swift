@@ -28,6 +28,7 @@ private struct LaunchConfiguration: Decodable {
   let relayStatePath: String?
   let generation: String?
   let hostToolsRequired: Bool?
+  let mcpConnectionSharing: Bool?
   let router: RouterConfiguration?
 }
 
@@ -317,6 +318,9 @@ if let appServerIndex = arguments.firstIndex(of: "app-server") {
     )
   }
   var overrides: [String] = []
+  if configuration.mcpConnectionSharing == true {
+    overrides += ["-c", "features.mcp_connection_sharing=true"]
+  }
   if let catalogPath = configuration.modelCatalogPath, !catalogPath.isEmpty {
     overrides += ["-c", "model_catalog_json=\(jsonQuote(catalogPath))"]
   }

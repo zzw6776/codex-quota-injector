@@ -1,7 +1,5 @@
 import { isCodexAppServer, isMcpStatusListMethod } from "../host-health.mjs";
 import { THREAD_METHODS, MODEL_LIST_METHOD } from "./contract.mjs";
-import { handleHostToolReloadResponse, noteHostToolUserMessage, requestCodexAppToolsStatus,
-  resumeHostToolRetry } from "./host-tools.mjs";
 import { rewriteModelListResponse } from "./model-catalog.mjs";
 import { learnThreadContexts, restoreThreadContext, updateThreadContext, rememberTurnModel } from "./thread-context.mjs";
 import { captureUsageNotification } from "./usage.mjs";
@@ -18,15 +16,16 @@ function rewriteServerLine(line, state) {
   const item = message?.params?.item;
   if (message?.method === "item/completed" && item?.type === "mcpToolCall" &&
       isCodexAppServer(item.server)) {
-    resumeHostToolRetry(state, message.params.threadId, item.tool ?? item.name);
+    state.hostTools?.observeToolCompletion(message.params.threadId, item.tool ?? item.name);
   }
   if (message?.method === "mcpServer/startupStatus/updated" &&
     isCodexAppServer(message.params?.name)) {
-    requestCodexAppToolsStatus(state, message.params.threadId ?? null);
+    state.hostTools?.observeStartupStatus(message.params);
   }
   if (message?.method === "item/completed" && message.params?.item?.type === "userMessage") {
-    noteHostToolUserMessage(state, message.params.threadId);
+    state.hostTools?.observeUserMessage(message.params.threadId);
   }
+  if (message?.method === "thread/closed") state.hostTools?.observeThreadClosed(message.params?.threadId);
   learnThreadContexts(message?.params, state, {
     source: "thread-discovery",
     revision: 0,
@@ -40,7 +39,7 @@ function rewriteServerLine(line, state) {
   if (!pending) return line;
   state.pendingRequests.delete(message.id);
   if (pending.internalHostToolReload) {
-    handleHostToolReloadResponse(message, pending, state);
+    state.hostTools?.handleResponse(message, pending);
     return "";
   }
   if (isMcpStatusListMethod(pending.method)) {
@@ -49,7 +48,7 @@ function rewriteServerLine(line, state) {
   }
   if (pending.hostToolCall) {
     state.hostHealth?.observeToolResult(message.result, message.error, pending);
-    resumeHostToolRetry(state, pending.threadId, pending.tool);
+    state.hostTools?.observeToolCompletion(pending.threadId, pending.tool);
     return line;
   }
   if (message.error) {

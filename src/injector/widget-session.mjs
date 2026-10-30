@@ -42,6 +42,7 @@ function createWidgetSession(dependencies) {
     const core = {
       version: dependencies.appDisplayVersion,
       appUpdate: dependencies.appUpdate ?? null,
+      codexRuntime: dependencies.codexRuntime ?? null,
       injectionMode: dependencies.injectionMode,
       accounts: account.accounts.map((item) => ({
         ...item,

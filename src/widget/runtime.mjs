@@ -64,6 +64,7 @@ function installQuotaWidget(
       operation: null,
       context: { status: "unavailable", models: [], overriddenCount: 0 },
       extraModels: { platforms: [] },
+      codexRuntime: { supported: false, status: "idle" },
       tokenUsage: { status: "ready", turns: [] },
       hostHealth: { required: false, status: "direct" },
       turnState: { byteLength: null, model: null, observedAt: null },
@@ -273,6 +274,17 @@ function installQuotaWidget(
     showExtraModelOperation,
     bindManagedDeepSeekBalanceButtons,
     enqueue,
+  });
+
+  const { renderCodexRuntimePage, bindCodexRuntimeEvents } = features.codex_runtime({
+    state,
+    render,
+    renderPanelControls,
+    captureDetailPanelBaseSize,
+    resetDetailPanelSize,
+    enqueue,
+    formatUpdatedAt,
+    escapeHtml,
   });
 
   const styleText = styles.styleText;
@@ -487,6 +499,7 @@ function installQuotaWidget(
       state.hostHealthDetailsThread]);
     const common = JSON.stringify([state.page, state.data.operation]);
     const pageData = state.page === "context" ? state.data.context
+      : state.page === "codex-runtime" ? state.data.codexRuntime
       : state.page === "wakeup" ? accounts.map(({ id, email, current, authMode, authStatus, wakeup }) =>
         ({ id, email, current, authMode, authStatus, wakeup }))
       : accounts;
@@ -547,6 +560,7 @@ function installQuotaWidget(
     const busy = state.data.operation?.state === "loading";
     const contextPage = state.page === "context";
     const extraModelsPage = state.page === "extra-models";
+    const codexRuntimePage = state.page === "codex-runtime";
     const wakeupPage = state.page === "wakeup";
     const migrationPage = state.page === "migration";
     const popoverClass = contextPage
@@ -555,6 +569,8 @@ function installQuotaWidget(
         ? "quota-popover detail-popover wakeup-popover"
       : migrationPage
         ? "quota-popover detail-popover migration-popover"
+      : codexRuntimePage
+        ? "quota-popover detail-popover codex-runtime-popover"
       : extraModelsPage
           ? "quota-popover detail-popover extra-models-popover"
         : "quota-popover";
@@ -564,12 +580,15 @@ function installQuotaWidget(
         ? renderWakeupPage(busy)
       : migrationPage
         ? renderMigrationPage(accounts, busy, operation)
+      : codexRuntimePage
+        ? renderCodexRuntimePage()
       : extraModelsPage
           ? renderExtraModelsPage()
         : `
         <header class="panel-head accounts-head">
           <div class="panel-title-wrap">
             <div class="panel-title">账号额度<span class="panel-count">${accounts.length} 个账号</span></div>
+            <button class="icon-btn provider-icon-btn codex-runtime-open" type="button" aria-label="Codex 后端" title="Codex 后端"><span aria-hidden="true">CLI</span></button>
             <button class="icon-btn provider-icon-btn extra-models-open" type="button" aria-label="模型管理" title="模型管理"><span aria-hidden="true">M+</span></button>
             <button class="icon-btn provider-icon-btn context-open" type="button" aria-label="模型上下文" title="模型上下文"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.3 2.2h3.4l.5 2.6 3 1.7 2.5-.9 1.7 2.9-2 1.8v3.4l2 1.8-1.7 2.9-2.5-.9-3 1.7-.5 2.6h-3.4l-.5-2.6-3-1.7-2.5.9-1.7-2.9 2-1.8v-3.4l-2-1.8 1.7-2.9 2.5.9 3-1.7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
             <button class="icon-btn provider-icon-btn wakeup-open" type="button" aria-label="定时任务" title="定时任务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h6"/></svg></button>
@@ -589,7 +608,7 @@ function installQuotaWidget(
         </section>`;
     wrap.innerHTML = `
       <button class="quota-chip" type="button" aria-label="${chipLabel}">${chip}</button>
-      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${renderVersionFooter()}</div></section>
+      <section class="${popoverClass}" popover="manual" aria-label="${contextPage ? "Codex 模型上下文" : wakeupPage ? "账号定时唤醒" : migrationPage ? "账号迁移" : codexRuntimePage ? "Codex 后端" : extraModelsPage ? "模型管理" : "Codex 账号与额度"}"><div class="panel-scroll">${hostHealthBanner}${popoverContent}${renderVersionFooter()}</div></section>
       ${hostHealthFlyout}`;
     const nextPopover = wrap.querySelector(".quota-popover");
     if (nextPopover) {
@@ -616,6 +635,7 @@ function installQuotaWidget(
     bindMigrationEvents(wrap);
     bindWakeupFormEvents(wrap);
     bindPanelEvents(wrap);
+    bindCodexRuntimeEvents(wrap);
     bindModelNavigation(wrap);
     bindModelFormEvents(wrap);
     bindContextEvents(wrap);

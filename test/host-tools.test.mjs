@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHostHealthTracker } from "../src/host-health.mjs";
-import { requestCodexAppToolsStatus, requestCodexAppToolsReload, requestCodexAppToolsDiagnostic,
-  handleHostToolReloadResponse, closeHostToolChecks } from "../src/app-server-relay/host-tools.mjs";
+import { createHostToolController } from "../src/app-server-relay/host-tools.mjs";
 import { successfulHostToolResult } from "./host-tool-fixtures.mjs";
 import { rewriteClientLine } from "../src/app-server-relay/client-messages.mjs";
 import { rewriteServerLine } from "../src/app-server-relay/server-messages.mjs";
@@ -12,15 +11,22 @@ async function fixture(t) {
   const sent = [], timers = new Set();
   const state = { hostHealth, pendingRequests: new Map(), sendUpstream: message => sent.push(message),
     setHostToolTimer(fn, delay) { fn.delay = delay; timers.add(fn); return fn; }, clearHostToolTimer(fn) { timers.delete(fn); } };
-  t.after(async () => { closeHostToolChecks(state); await hostHealth.close({ disconnected: false }); });
+  const controller = createHostToolController(state);
+  state.hostTools = controller;
+  let selectionRevision = 0;
+  const select = threadId => controller.applySelection({ sourceId: "test-source",
+    revision: ++selectionRevision, threadId });
+  t.after(async () => { controller.close(); await hostHealth.close({ disconnected: false }); });
   return { state, sent, timers, ready(threadId) {
-    hostHealth.observeStartupStatus({ name: "codex_app", status: "ready", threadId });
-    requestCodexAppToolsStatus(state, threadId);
+    const params = { name: "codex_app", status: "ready", threadId };
+    hostHealth.observeStartupStatus(params);
+    controller.observeStartupStatus(params);
+    if (threadId != null && controller.activeThreadId !== threadId) select(threadId);
   }, reply(message, result = successfulHostToolResult(message.params?.tool, message.params?.arguments?.threadId), error) {
     const pending = state.pendingRequests.get(message.id);
     state.pendingRequests.delete(message.id);
-    handleHostToolReloadResponse({ id: message.id, result, error }, pending, state);
-  } };
+    controller.handleResponse({ id: message.id, result, error }, pending);
+  }, controller, select };
 }
 
 test("[LCH-04 TOOL-04] 四项并发、重复通知合并、通过后复用且不查询目录", async t => {
@@ -36,15 +42,86 @@ test("[LCH-04 TOOL-04] 四项并发、重复通知合并、通过后复用且不
   assert.equal(state.hostHealth.snapshot("task").toolsVerified, true);
 });
 
-test("[LCH-04] 跨任务最多八个请求，已选任务优先且结果互不覆盖", async t => {
-  const { state, sent, ready, reply } = await fixture(t);
-  for (const id of ["a", "b", "queued", "selected"]) ready(id);
-  assert.equal(sent.length, 8);
-  requestCodexAppToolsStatus(state, "selected", { priority: true });
+test("[LCH-04] 任务切换只保留当前任务队列，旧在途请求结束后不再重试", async t => {
+  const { state, sent, ready, reply, controller } = await fixture(t);
+  ready("a");
+  assert.equal(sent.length, 4);
+  ready("b");
+  assert.equal(sent.length, 4, "旧任务请求在途时新任务先排队");
+  assert.equal([...controller.queue.values()].every(job => job.threadId === "b"), true);
+  ready("selected");
+  assert.equal([...controller.queue.values()].every(job => job.threadId === "selected"), true,
+    "再次切换必须移除上一个任务尚未发送的队列");
   reply(sent[0]);
-  assert.equal(sent[8].params.threadId, "selected");
-  assert.equal(state.hostHealth.snapshot("a").checks.list_threads.status, "passed");
-  assert.equal(state.hostHealth.snapshot("b").checks.list_threads.status, "checking");
+  assert.equal(sent[4].params.threadId, "selected");
+  assert.equal(state.hostHealth.snapshot("a").checks.list_threads.status, "checking",
+    "旧 epoch 的迟到成功不能写回已经失活的任务");
+  assert.deepEqual(state.hostHealth.snapshot("b").checks, {});
+});
+
+test("[LCH-04] 显式撤销选择会清空待办，后续 ready 和旧响应都不能重新派发", async t => {
+  const { state, sent, ready, reply, controller, select } = await fixture(t);
+  ready("task");
+  assert.equal(sent.length, 4);
+  select(null);
+  assert.equal(controller.activeThreadId, null);
+  assert.equal(controller.queue.size, 0);
+  assert.equal(controller.retries.size, 0);
+  assert.equal(state.hostHealth.snapshot().code, "awaiting-task");
+
+  const readyAgain = { name: "codex_app", status: "ready", threadId: "task" };
+  state.hostHealth.observeStartupStatus(readyAgain);
+  controller.observeStartupStatus(readyAgain);
+  sent.slice().forEach(request => reply(request));
+  assert.equal(sent.length, 4);
+  assert.equal(state.hostHealth.snapshot("task").toolsVerified, false);
+});
+
+test("[LCH-04] 重新进入任务只复用通过项并重新验证失败项", async t => {
+  const { state, sent, ready, reply, timers, select } = await fixture(t);
+  ready("task");
+  const failed = sent.find(request => request.params.tool === "list_projects");
+  sent.filter(request => request !== failed).forEach(request => reply(request));
+  reply(failed, null, { message: "temporary" });
+  for (let index = 4; index < 8; index += 1) {
+    reply(sent[index], null, { message: "temporary" });
+    if (index < 7) fireRetry(timers);
+  }
+  assert.equal(state.hostHealth.snapshot("task").status, "degraded");
+  select("other");
+  const before = sent.length;
+  select("task");
+  assert.equal(sent.length, before + 1);
+  assert.equal(sent.at(-1).params.tool, "list_projects");
+  assert.equal(Object.values(state.hostHealth.snapshot("task").checks)
+    .filter(check => check.status === "passed").length, 3);
+});
+
+test("[LCH-04] 控制动作只接受当前任务的当前选择令牌", async t => {
+  const { sent, ready, controller } = await fixture(t);
+  ready("task");
+  const before = sent.length;
+  assert.equal(controller.handleCommand({ action: "diagnose", threadId: "task",
+    selectionSourceId: "test-source", selectionRevision: 0 }), false);
+  assert.equal(controller.handleCommand({ action: "diagnose", threadId: "other",
+    selectionSourceId: "test-source", selectionRevision: 1 }), false);
+  assert.equal(sent.length, before);
+  assert.equal(controller.handleCommand({ action: "diagnose", threadId: "task",
+    selectionSourceId: "test-source", selectionRevision: 1 }), true);
+  assert.equal(sent.length, before + 1);
+  assert.equal(sent.at(-1).method, "mcpServerStatus/list");
+});
+
+test("[LCH-04] 选择已明确启动失败的任务会保留失败，不伪装成探针检查中", async t => {
+  const { state, sent, controller, select } = await fixture(t);
+  const failed = { name: "codex_app", status: "failed", threadId: "task",
+    error: { message: "startup failed" } };
+  state.hostHealth.observeStartupStatus(failed);
+  controller.observeStartupStatus(failed);
+  select("task");
+  assert.equal(state.hostHealth.snapshot().status, "degraded");
+  assert.equal(state.hostHealth.snapshot().code, "codex-app-startup-failed");
+  assert.equal(sent.length, 0);
 });
 
 test("[LCH-04] 超时自动重试未通过项，迟到响应不能覆盖新请求", async t => {
@@ -155,7 +232,7 @@ test("[LCH-04] 读取任务时本地主机瞬时不可用，退避后自动恢�
 });
 
 test("[LCH-04] 未落盘持续存在时有界停止，重复用户消息不能重置重试预算", async t => {
-  const { state, sent, ready, reply, timers } = await fixture(t);
+  const { state, sent, ready, reply, timers, controller } = await fixture(t);
   ready("task"); finishInitialRead(sent, reply); userMessage(state);
   for (let i = 4; i < 8; i++) {
     reply(sent[i], null, { message: notMaterialized });
@@ -165,7 +242,7 @@ test("[LCH-04] 未落盘持续存在时有界停止，重复用户消息不能�
   assert.equal(sent.length, 8);
   assert.equal(timers.size, 0);
   assert.equal(state.hostHealth.snapshot("task").status, "unconfirmed");
-  requestCodexAppToolsStatus(state, "task", { retry: true, resetRetryBudget: true });
+  controller.check();
   reply(sent[8], null, { message: notMaterialized });
   assert.equal(sent[9].params.tool, "read_thread", "用户主动检查会获得新的有界重试预算");
   reply(sent[9]);
@@ -189,7 +266,7 @@ test("[LCH-04] 任一工具错误进入同一有界重试，耗尽后保留失�
 });
 
 test("[LCH-04] 正常工具调用与探针重叠后继续剩余重试且不并发派发", async t => {
-  const { state, sent, ready, reply, timers } = await fixture(t);
+  const { state, sent, ready, reply, timers, controller } = await fixture(t);
   ready("task");
   const initial = sent.find(request => request.params.tool === "list_projects");
   sent.slice(0, 4).filter(request => request !== initial).forEach(request => reply(request));
@@ -210,7 +287,7 @@ test("[LCH-04] 正常工具调用与探针重叠后继续剩余重试且不并�
   } });
   fireRetry(timers);
   assert.equal(sent.length, 5, "正常工具调用检查中时不能并发补发");
-  assert.equal(state.hostToolScheduler.toolRetries.get("task:list_projects").attempts, 1,
+  assert.equal(controller.retries.get("task:list_projects").attempts, 1,
     "未实际派发的退避不能消耗预算");
 
   notify(state, "item/completed", { threadId: "task", item: {
@@ -225,27 +302,26 @@ test("[LCH-04] 正常工具调用与探针重叠后继续剩余重试且不并�
   assert.equal(timers.size, 0);
 });
 
-test("[LCH-04] 正常调用成功会撤销满并发队列中的旧探针", async t => {
-  const { state, sent, ready, reply } = await fixture(t);
-  for (const threadId of ["a", "b", "c"]) ready(threadId);
+test("[LCH-04] 正常调用成功会撤销同一工具的旧重试", async t => {
+  const { state, sent, ready, reply, timers, controller } = await fixture(t);
+  ready("a");
   const initial = sent.find(request =>
     request.params.threadId === "a" && request.params.tool === "list_projects");
+  sent.filter(request => request !== initial).forEach(request => reply(request));
   reply(initial, null, { message: "temporary" });
-  assert.equal(state.hostToolScheduler.queue.has("a:list_projects"), true);
-  requestCodexAppToolsStatus(state, "a", { priority: true });
+  reply(sent[4], null, { message: "temporary" });
+  const oldRetry = [...timers][0];
+  assert.ok(oldRetry);
 
   const direct = { id: 91, method: "mcpServer/tool/call", params: {
     threadId: "a", server: "codex_app", tool: "list_projects", arguments: {} } };
   assert.equal(rewriteClientLine(JSON.stringify(direct), state), JSON.stringify(direct));
   const success = JSON.stringify({ id: 91, result: successfulHostToolResult("list_projects", "a") });
   assert.equal(rewriteServerLine(success, state), success);
-  assert.equal(state.hostToolScheduler.queue.has("a:list_projects"), false);
-
   const before = sent.length;
-  const release = sent.find(request => state.hostToolScheduler.active.has(request.id));
-  reply(release);
-  assert.equal(sent.length, before + 1);
-  assert.equal(sent.at(-1).params.threadId, "c", "释放槽位后只能继续尚未检查的任务");
+  oldRetry();
+  assert.equal(sent.length, before, "已撤销的退避回调不能再次派发");
+  assert.equal(controller.retries.has("a:list_projects"), false);
   assert.equal(state.hostHealth.snapshot("a").checks.list_projects.status, "passed");
 });
 
@@ -262,7 +338,7 @@ test("[LCH-04] 用户消息早于工具就绪时保留触发事实，不提前�
 
 for (const action of ["restart", "reload", "close", "manual", "timeout"]) {
   test(`[LCH-04] 退避期间 ${action} 不遗留或重复派发旧重试`, async t => {
-    const { state, sent, ready, reply, timers } = await fixture(t);
+    const { state, sent, ready, reply, timers, controller } = await fixture(t);
     ready("task"); finishInitialRead(sent, reply); userMessage(state);
     reply(sent[4], null, { message: notMaterialized });
     const oldTimer = [...timers][0];
@@ -275,8 +351,8 @@ for (const action of ["restart", "reload", "close", "manual", "timeout"]) {
       sent.slice(5).forEach(x => reply(x));
       assert.equal(state.hostHealth.snapshot("task").status, "ready");
     } else if (action === "reload" || action === "close") {
-      if (action === "reload") requestCodexAppToolsReload(state);
-      else closeHostToolChecks(state);
+      if (action === "reload") controller.reload();
+      else controller.close();
       const count = sent.length;
       oldTimer();
       assert.equal(sent.length, count);
@@ -293,7 +369,7 @@ for (const action of ["restart", "reload", "close", "manual", "timeout"]) {
         assert.equal(state.hostHealth.snapshot("task").status, "ready");
       }
     } else {
-      requestCodexAppToolsStatus(state, "task", { retry: true, resetRetryBudget: true });
+      controller.check();
       assert.equal(timers.has(oldTimer), false);
       if (action === "timeout") {
         const pending = state.pendingRequests.get(sent[5].id);
@@ -314,26 +390,31 @@ for (const action of ["restart", "reload", "close", "manual", "timeout"]) {
 }
 
 test("[LCH-04] 重试后旧响应和重连前响应不能覆盖更新的检查", async t => {
-  const { state, sent, ready, reply } = await fixture(t);
+  const { state, sent, ready, reply, controller } = await fixture(t);
   ready("task");
   const first = sent[0];
   state.pendingRequests.get(first.id).timer();
-  requestCodexAppToolsStatus(state, "task", { retry: true });
+  controller.check();
   reply(sent[4], null, { message: "tool missing" });
+  const current = sent[5];
   reply(first);
-  assert.equal(state.hostHealth.snapshot("task").checks.list_threads.status, "failed");
-  state.hostHealth.observeStartupStatus({ name: "codex_app", status: "starting", threadId: "task" });
+  assert.equal(state.hostHealth.snapshot("task").checks.list_threads.requestId, current.id,
+    "旧 epoch 的错误和成功都不能覆盖当前检查");
+  notify(state, "mcpServer/startupStatus/updated", {
+    name: "codex_app", status: "starting", threadId: "task",
+  });
   ready("task");
   sent.slice(1, 4).forEach(x => reply(x));
+  reply(current);
   assert.equal(state.hostHealth.snapshot("task").toolsVerified, false);
-  sent.slice(5).forEach(x => reply(x));
+  sent.slice(6).forEach(x => reply(x));
   assert.equal(state.hostHealth.snapshot("task").status, "ready");
 });
 
 test("[LCH-04] 配置刷新独立执行，刷新期间就绪任务在响应后四项并发", async t => {
-  const { state, sent, ready, reply } = await fixture(t);
+  const { state, sent, ready, reply, controller } = await fixture(t);
   ready("old"); sent.slice().forEach(x => reply(x));
-  requestCodexAppToolsReload(state);
+  controller.reload();
   const reload = sent[4];
   assert.equal(reload.method, "config/mcpServer/reload");
   assert.equal(Object.hasOwn(reload, "params"), false);
@@ -347,9 +428,9 @@ test("[LCH-04] 配置刷新独立执行，刷新期间就绪任务在响应后�
 });
 
 test("[LCH-04] 深入目录查询按需分页，目录失败不推翻实际通过证据", async t => {
-  const { state, sent, ready, reply } = await fixture(t);
+  const { state, sent, ready, reply, controller } = await fixture(t);
   ready("task"); sent.slice().forEach(x => reply(x));
-  requestCodexAppToolsDiagnostic(state, "task");
+  controller.diagnose();
   reply(sent[4], { data: [], nextCursor: "next" });
   assert.equal(sent[5].params.cursor, "next");
   reply(sent[5], null, { message: "timeout" });
@@ -359,9 +440,9 @@ test("[LCH-04] 深入目录查询按需分页，目录失败不推翻实际通�
 
 for (const notification of ["before-timeout", "after-timeout"]) {
   test(`[LCH-04] 刷新超时保留就绪通知并继续探针：${notification}`, async t => {
-    const { state, sent, ready, reply } = await fixture(t);
+    const { state, sent, ready, reply, controller } = await fixture(t);
     ready("old"); sent.slice().forEach(x => reply(x));
-    requestCodexAppToolsReload(state);
+    controller.reload();
     const reload = sent[4];
     if (notification === "before-timeout") ready("new");
     state.pendingRequests.get(reload.id).timer();
@@ -377,8 +458,8 @@ for (const notification of ["before-timeout", "after-timeout"]) {
 }
 
 test("[LCH-04] 刷新错误响应不能抹掉本次已经收到的任务就绪证据", async t => {
-  const { state, sent, ready, reply } = await fixture(t);
-  requestCodexAppToolsReload(state);
+  const { state, sent, ready, reply, controller } = await fixture(t);
+  controller.reload();
   ready("new");
   reply(sent[0], null, { message: "reload response failed" });
   assert.equal(sent.length, 5);
@@ -388,14 +469,14 @@ test("[LCH-04] 刷新错误响应不能抹掉本次已经收到的任务就绪�
 });
 
 for (const outcome of ["empty", "missing-tool", "timeout"]) {
-  test(`[LCH-04] 首次探针排队期间目录诊断不改变主状态：${outcome}`, async t => {
-    const { state, sent, ready, reply } = await fixture(t);
-    for (const id of ["a", "b", "queued"]) ready(id);
-    assert.equal(sent.length, 8);
+  test(`[LCH-04] 首次探针进行期间目录诊断不改变主状态：${outcome}`, async t => {
+    const { state, sent, ready, reply, controller } = await fixture(t);
+    ready("queued");
+    assert.equal(sent.length, 4);
     const before = state.hostHealth.snapshot("queued");
-    assert.deepEqual(before.checks, {});
-    requestCodexAppToolsDiagnostic(state, "queued");
-    const diagnostic = sent[8];
+    assert.equal(Object.values(before.checks).every(check => check.status === "checking"), true);
+    controller.diagnose();
+    const diagnostic = sent[4];
     if (outcome === "timeout") state.pendingRequests.get(diagnostic.id).timer();
     else reply(diagnostic, { data: outcome === "empty" ? [] : [{
       name: "codex_app", runtimeStatus: "connected", tools: {},
@@ -405,10 +486,9 @@ for (const outcome of ["empty", "missing-tool", "timeout"]) {
     assert.equal(after.status, before.status);
     assert.equal(after.code, before.code);
     assert.equal(after.diagnostic.status, outcome === "timeout" ? "unconfirmed" : "complete");
-    sent.slice(0, 8).forEach(x => reply(x));
+    sent.slice(0, 4).forEach(x => reply(x));
     const probes = sent.filter(x => x.params?.threadId === "queued" && x.method === "mcpServer/tool/call");
     assert.equal(probes.length, 4);
-    probes.forEach(x => reply(x));
     assert.equal(state.hostHealth.snapshot("queued").status, "ready");
     assert.equal(state.hostHealth.snapshot("queued").toolsVerified, true);
   });
@@ -428,17 +508,17 @@ test("[LCH-04] 正常工具调用经过同一校验更新对应项，不吞掉�
 });
 
 test("[LCH-04] 全局就绪不调用无作用域探针，关闭释放计时器", async t => {
-  const { state, sent, ready, timers } = await fixture(t);
+  const { state, sent, ready, timers, controller } = await fixture(t);
   ready(null);
   assert.equal(sent.length, 0);
   ready("task");
   assert.equal(timers.size, 4);
-  closeHostToolChecks(state);
+  controller.close();
   assert.equal(timers.size, 0);
 });
 
 test("[LCH-04] 同步发送失败按工具独立有界重试，耗尽后留下失败证据", async t => {
-  const { state, ready, timers } = await fixture(t);
+  const { state, ready, timers, controller } = await fixture(t);
   const calls = [];
   state.sendUpstream = message => { calls.push(message); throw new Error("transport disconnected"); };
   ready("task");
@@ -451,7 +531,7 @@ test("[LCH-04] 同步发送失败按工具独立有界重试，耗尽后留下�
   assert.ok(Object.values(state.hostHealth.snapshot("task").checks).every(x => x.status === "failed"));
   assert.equal(state.hostHealth.snapshot("task").status, "degraded");
   assert.equal(timers.size, 0);
-  assert.equal(state.hostToolScheduler.active.size, 0);
+  assert.equal(controller.active.size, 0);
 });
 
 test("[LCH-04] 模型正常工具事件只更新对应检查，重连前事件不能恢复旧证据", async t => {

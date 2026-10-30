@@ -45,7 +45,7 @@ test("侧栏临时任务 ID 从当前任务编辑区恢复真实 ID，缺失或�
   assert.equal(run([row(realId, "cloud")], [realId]), null);
 });
 
-test("切换任务绕过读取缓存，重选只请求复用，远程任务不借用本机结果", async t => {
+test("切换任务绕过读取缓存，选择写入最新快照，远程任务显式撤销本机选择", async t => {
   let active = { hostId: "local", threadId: "a" };
   const reads = [], requests = [];
   const session = createHostHealthSession({ getLaunchOptions: () => ({ relay: { hostToolsRequired: true } }),
@@ -53,7 +53,7 @@ test("切换任务绕过读取缓存，重选只请求复用，远程任务不�
     async readViewModel(_binding, { threadId }) { reads.push(threadId); return {
       status: "ready", threadId, sessionId: "runtime", canCheck: true,
     }; },
-    async requestCheck(_binding, request) { requests.push(request); },
+    async requestSelection(_binding, request) { requests.push(request); },
   });
   t.after(() => session.closeHostHealthWatcher());
   await session.syncHostHealth();
@@ -61,13 +61,14 @@ test("切换任务绕过读取缓存，重选只请求复用，远程任务不�
   await session.syncHostHealth();
   assert.equal(session.hostHealth.threadId, "b");
   assert.deepEqual(reads, ["a", "b"]);
-  assert.ok(requests.every(x => x.action === "select"));
   assert.ok(requests.every(x => x.sessionId === "runtime"));
   active = { hostId: "remote", threadId: "c" };
   await session.syncHostHealth();
   assert.equal(session.hostHealth.canCheck, false);
   assert.equal(session.hostHealth.threadId, null);
-  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(x => x.threadId), ["a", "b", null]);
+  assert.deepEqual(requests.map(x => x.revision), [1, 2, 3]);
+  assert.equal(new Set(requests.map(x => x.sourceId)).size, 1);
 });
 
 test("异步读取期间切换任务，旧任务响应不能覆盖新任务状态", async t => {
@@ -75,7 +76,7 @@ test("异步读取期间切换任务，旧任务响应不能覆盖新任务状�
   let started;
   const start = new Promise(resolve => { started = resolve; });
   const session = createHostHealthSession({ getLaunchOptions: () => ({ relay: { hostToolsRequired: true } }),
-    readActiveTask: async () => active, markWidgetDataDirty() {}, requestWidgetUpdate() {}, requestCheck: async () => {},
+    readActiveTask: async () => active, markWidgetDataDirty() {}, requestWidgetUpdate() {}, requestSelection: async () => {},
     async readViewModel(_binding, { threadId }) {
       if (threadId === "a") { started(); await new Promise(resolve => { resolveOld = resolve; }); }
       return { threadId, status: "ready", canCheck: true, sessionId: "runtime" };
@@ -97,9 +98,12 @@ test("同一任务重连后选择新后台，发送失败不会提前缓存已�
     readActiveTask: async () => ({ hostId: "local", threadId: "task" }),
     markWidgetDataDirty() {}, requestWidgetUpdate() {},
     async readViewModel() { return { status: "ready", threadId: "task", sessionId, canCheck: true }; },
-    async requestCheck(_binding, request) {
+    async requestSelection(_binding, request) {
       requests.push(request);
-      if (rejectNext) { rejectNext = false; throw new Error("后台已变化"); }
+      if (rejectNext && request.threadId === "task" && request.sessionId === "replacement") {
+        rejectNext = false;
+        throw new Error("后台已变化");
+      }
     },
   });
   t.after(() => session.closeHostHealthWatcher());
@@ -110,7 +114,12 @@ test("同一任务重连后选择新后台，发送失败不会提前缓存已�
   await session.syncHostHealth({ force: true });
   assert.equal(session.hostHealth.status, "unconfirmed");
   await session.syncHostHealth({ force: true });
-  assert.deepEqual(requests.map(request => request.sessionId), ["old", "replacement", "replacement"]);
+  assert.deepEqual(requests.map(request => [request.sessionId, request.threadId]), [
+    ["old", "task"],
+    ["old", null],
+    ["replacement", "task"],
+    ["replacement", "task"],
+  ]);
   assert.equal(session.hostHealth.sessionId, "replacement");
   assert.equal(session.hostHealth.status, "ready");
 });
