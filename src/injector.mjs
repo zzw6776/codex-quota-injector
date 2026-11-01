@@ -13,7 +13,7 @@ import {
   isRelayStateCurrent,
   restartCodex,
 } from "./platform.mjs";
-import { TokenUsageManager } from "./token-usage.mjs";
+import { TokenUsageProcessClient } from "./token-usage/process-client.mjs";
 import { isSea } from "node:sea";
 import * as initialWidget from "./widget.mjs";
 import {
@@ -42,7 +42,7 @@ export async function runInjector({
   extraModelManager = new ExtraModelManager(),
   modelRouterManager = new ModelRouterManager(),
   codexRuntimeManager = new CodexRuntimeManager(),
-  tokenUsageManager = new TokenUsageManager(),
+  tokenUsageManager = new TokenUsageProcessClient(),
   modelCatalogCoordinator = new ModelCatalogCoordinator({
     accountManager,
     contextManager,

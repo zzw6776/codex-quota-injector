@@ -169,7 +169,7 @@ function createHostHealthSession(dependencies) {
       let next;
       if (binding?.hostToolsRequired && (!activeTask || activeTask.hostId !== "local")) {
         next = { required: true, status: "idle", threadId: null, canCheck: false,
-          message: activeTask ? "当前远程任务未在本机检查" : "选择本机任务后自动检查任务工具" };
+          message: activeTask ? "当前远程任务未在本机检查" : "选择本机任务后可手动检查任务工具" };
       } else {
         next = await (dependencies.readViewModel ?? readHostHealthViewModel)(binding, {
           threadId: activeTask?.threadId, waitingSince: scopeStartedAt });

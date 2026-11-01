@@ -132,3 +132,18 @@ test("汇率读取、抓取、缓存和人民币视图使用可控数据源", as
   assert.equal(view.totalCny, 0.4 * 6.8888);
   assert.equal(JSON.parse(await readFile(pricing.cachePath, "utf8")).date, "2026-09-11");
 });
+
+test("短生命周期统计进程只读取汇率缓存，不重复发起网络刷新", async (t) => {
+  const dataDir = await useTempDir(t);
+  let requests = 0;
+  const pricing = new TokenPricingManager({
+    dataDir,
+    refreshOnInitialize: false,
+    fetchImpl: async () => {
+      requests += 1;
+      throw new Error("不应请求");
+    },
+  });
+  await pricing.initialize();
+  assert.equal(requests, 0);
+});

@@ -29,8 +29,8 @@ const HEALTH_DETAIL_LIMIT = 600;
 const HEALTH_RENAME_RETRY_DELAYS_MS = [25, 50, 100, 200];
 const HEALTH_RENAME_TRANSIENT_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
 const CONTROL_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
-const AWAITING_TASK_MESSAGE = "任务工具按需加载，进入任务后自动核验";
-const AWAITING_SELECTION_MESSAGE = "进入任务后自动检查任务工具";
+const AWAITING_TASK_MESSAGE = "任务工具按需加载，进入任务后可手动检查";
+const AWAITING_SELECTION_MESSAGE = "当前任务工具尚未检查；需要时点击“检查”";
 
 function idleTaskState(requiredTools, threadId, updatedAt) {
   return { status: "idle", code: "awaiting-task", message: AWAITING_TASK_MESSAGE,
@@ -506,6 +506,7 @@ class HostHealthTracker {
         state: { ...idleTaskState(this.requiredTools, threadId, this.now()),
           checks: {}, diagnostic: null },
         startupStatus: null, revision: this.revision, userMessageObserved: false,
+        verificationActive: false,
       });
     }
     return this.contexts.get(threadId);
@@ -535,6 +536,7 @@ class HostHealthTracker {
       return this.update({ status: "ready", code: null,
         message: "Codex 任务工具已就绪", detail: null }, context);
     }
+    context.verificationActive = true;
     if (["failed", "cancelled"].includes(context.startupStatus)) {
       this.state = { ...this.state, ...context.state };
       return this.persist();
@@ -549,6 +551,7 @@ class HostHealthTracker {
 
   deactivateTask(threadId) {
     const context = threadId ? this.contexts.get(threadId) : null;
+    if (context) context.verificationActive = false;
     if (context?.state.status === "starting" && !context.state.toolsVerified) {
       context.state = { ...context.state, status: "idle", code: "awaiting-selection",
         message: AWAITING_SELECTION_MESSAGE, updatedAt: this.now() };
@@ -562,6 +565,7 @@ class HostHealthTracker {
       .filter(([, check]) => !force && check?.status === "passed")
       .map(([tool, check]) => [tool, { ...check, retryPending: false }]));
     const ready = this.requiredTools.every(tool => context.state.checks[tool]?.status === "passed");
+    context.verificationActive = !ready;
     return this.update({ status: ready ? "ready" : "starting",
       code: ready ? null : "awaiting-tool-checks",
       message: ready ? `${this.requiredTools.length} 项任务工具检查通过` : "正在检查任务工具",
@@ -632,6 +636,7 @@ class HostHealthTracker {
       return;
     }
     if (["starting", "failed", "cancelled"].includes(serverStatus)) {
+      context.verificationActive = false;
       context.revision = ++this.revision;
       context.state.checks = {};
       context.state.diagnostic = null;
@@ -698,20 +703,30 @@ class HostHealthTracker {
     const checks = this.requiredTools.map(tool => context.state.checks?.[tool]);
     const passed = checks.filter(check => check?.status === "passed").length;
     const failed = checks.filter(check => check?.status === "failed" && !check.retryPending).length;
-    const checking = checks.some(check => !check || check.status === "checking" || check.retryPending);
+    const verificationActive = context.verificationActive === true;
+    const checking = checks.some(check => check?.status === "checking" || check?.retryPending) ||
+      (verificationActive && checks.some(check => !check));
     const ready = passed === checks.length;
-    const awaitingFirstUserMessage = !context.userMessageObserved && !checking && !failed &&
+    if (ready) context.verificationActive = false;
+    const awaitingFirstUserMessage = verificationActive && !context.userMessageObserved &&
+      !checking && !failed &&
       this.requiredTools.every(tool => {
         const check = context.state.checks?.[tool];
         return check?.status === "passed" ||
           (tool === "read_thread" && check?.status === "unconfirmed" &&
             isThreadNotMaterialized(check.detail));
       });
-    void this.update({ status: ready ? "ready" : failed ? "degraded" : checking || awaitingFirstUserMessage ? "starting" : "unconfirmed",
-      code: ready ? null : failed ? "tool-call-failed" : checking ? "tool-checking"
-        : awaitingFirstUserMessage ? "awaiting-first-user-message" : "tool-check-unconfirmed",
+    const passive = !verificationActive && !ready && !failed && !checking;
+    void this.update({ status: ready ? "ready" : failed ? "degraded"
+      : passive ? "idle" : checking || awaitingFirstUserMessage ? "starting" : "unconfirmed",
+      code: ready ? null : failed ? "tool-call-failed" : passive ? "awaiting-manual-check"
+        : checking ? "tool-checking"
+          : awaitingFirstUserMessage ? "awaiting-first-user-message" : "tool-check-unconfirmed",
       message: ready ? `${passed} 项任务工具检查通过` : failed ? `${passed} 项通过，${failed} 项异常`
-        : checking ? `检查中：已通过 ${passed}/${checks.length} 项`
+        : passive ? (passed > 0
+          ? `已被动确认 ${passed}/${checks.length} 项；需要时点击“检查”`
+          : AWAITING_SELECTION_MESSAGE)
+          : checking ? `检查中：已通过 ${passed}/${checks.length} 项`
           : awaitingFirstUserMessage ? "等待任务首条消息后自动检查读取任务内容"
             : `${passed} 项通过，${checks.length - passed} 项未确认`,
       toolsVerified: ready, verification: "calls", missingTools: [], detail: null,
@@ -934,7 +949,7 @@ export async function readHostHealthViewModel(binding, {
     const waiting = !selected.ambiguous && now - waitingSince < HOST_HEALTH_STARTUP_GRACE_MS;
     return { required: true, status: threadId ? (waiting ? "starting" : "unconfirmed") : "idle",
       code: selected.ambiguous ? "task-owner-ambiguous" : "task-owner-missing",
-      message: !threadId ? "选择本机任务后自动检查任务工具" : selected.ambiguous
+      message: !threadId ? "选择本机任务后可手动检查任务工具" : selected.ambiguous
         ? "多个后台报告同一任务，尚未确认任务所属服务"
         : waiting ? "正在确认任务所属服务" : "尚未确认任务所属服务，等待新的任务状态通知",
       canCheck: false, canRestart: true, canOpenLogs: true, threadId, sessionId: null,

@@ -3,7 +3,7 @@ import { TOKEN_FIELDS, toCamelCase, positiveNumber, positiveInteger, nonEmptyStr
 import { emptyTurn, mergeUsageSegment, calculateTurnCost } from "./turns.mjs";
 import { normalizeNetworkLatency, calculateOutputSpeed } from "./generation.mjs";
 
-function buildDisplayTurns(turns) {
+function buildDisplayTurns(turns, summaryGroups) {
   const subagentGroups = new Map();
   for (const turn of turns) {
     if (!turn.isSubagent) continue;
@@ -12,10 +12,12 @@ function buildDisplayTurns(turns) {
     group.push(turn);
     subagentGroups.set(key, group);
   }
-  return [
-    ...turns,
-    ...[...subagentGroups.values()].map(summarizeSubagentTurns),
-  ];
+  const summaries = [...subagentGroups.values()].map((group) => {
+    const summary = summarizeSubagentTurns(group, { includeDetails: false });
+    summaryGroups.set(summary.turnId, group);
+    return summary;
+  });
+  return [...turns, ...summaries];
 }
 
 function publicGenerationDetails(details, ledger) {
@@ -30,7 +32,7 @@ function publicGenerationDetails(details, ledger) {
   });
 }
 
-function summarizeSubagentTurns(turns) {
+function summarizeSubagentTurns(turns, { includeDetails = true } = {}) {
   const ordered = [...turns].sort((left, right) =>
     positiveNumber(left.startedAt) - positiveNumber(right.startedAt) ||
     positiveNumber(left.updatedAt) - positiveNumber(right.updatedAt));
@@ -62,8 +64,10 @@ function summarizeSubagentTurns(turns) {
         : "completed"
     : null;
   for (const turn of ordered) {
-    summary.toolExecutionLedger.calls.push(...(turn.toolExecutionLedger?.calls ?? []));
-    summary.toolExecutionLedger.items.push(...(turn.toolExecutionLedger?.items ?? []));
+    if (includeDetails) {
+      summary.toolExecutionLedger.calls.push(...(turn.toolExecutionLedger?.calls ?? []));
+      summary.toolExecutionLedger.items.push(...(turn.toolExecutionLedger?.items ?? []));
+    }
     for (const field of TOKEN_FIELDS) {
       const publicField = toCamelCase(field);
       summary[publicField] += positiveNumber(turn[publicField]);
@@ -90,12 +94,14 @@ function summarizeSubagentTurns(turns) {
   summary.firstTokenLatencyMs = summary.firstTokenLatencySamples > 0
     ? summary.firstTokenLatencyTotalMs / summary.firstTokenLatencySamples
     : null;
-  summary.generationDetails = ordered.flatMap((turn) =>
-    Array.isArray(turn.generationDetails) ? turn.generationDetails : [])
-    .map((detail, index) => ({
-      ...detail,
-      sequence: index + 1,
-    }));
+  if (includeDetails) {
+    summary.generationDetails = ordered.flatMap((turn) =>
+      Array.isArray(turn.generationDetails) ? turn.generationDetails : [])
+      .map((detail, index) => ({
+        ...detail,
+        sequence: index + 1,
+      }));
+  }
   summary.outputGenerationDurationMs = ordered.reduce(
     (total, turn) => total + positiveNumber(turn.outputGenerationDurationMs),
     0,
@@ -135,7 +141,8 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
         pendingTurns: historyPendingTurns,
       });
     }
-    const mappedTurns = buildDisplayTurns([...turns.values()])
+    const summaryGroups = new Map();
+    const orderedTurns = buildDisplayTurns([...turns.values()], summaryGroups)
       // `activeThreadId` identifies the rollout file currently being tailed;
       // it is not a single-session view of the app. Multiple threads can be
       // running at the same time, so every live turn, including a turn still
@@ -143,52 +150,64 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
       // available to the widget regardless of which thread was started last.
       .filter((turn) => turn.totalTokens > 0 ||
         (["event", "subagent"].includes(turn.source) && turn.updatedAt > 0))
-      .sort((left, right) => left.updatedAt - right.updatedAt)
-      .map((turn) => {
-        const hasUsage = turn.totalTokens > 0;
-        const rawCost = hasUsage ? getCachedTurnCost(turn) : null;
-        const cost = pricingManager.toViewModel(rawCost);
-        const taskCost = cumulativeCosts.get(turn.taskKey) ?? {
-          totalCny: 0,
-          pendingTurns: 0,
-        };
-        if (hasUsage && cost.available) taskCost.totalCny += positiveNumber(cost.totalCny);
-        else if ((hasUsage && !cost.available) || turn.completed) taskCost.pendingTurns += 1;
-        cumulativeCosts.set(turn.taskKey, taskCost);
-        const {
-          taskKey: _taskKey,
-          source: _source,
-          modelSource: _modelSource,
-          segments: _segments,
-          rolloutPath: _rolloutPath,
-          rolloutUsageFallback: _rolloutUsageFallback,
-          rolloutParserVersion: _rolloutParserVersion,
-          rolloutTokenCountTotalTokens: _rolloutTokenCountTotalTokens,
-          responseCumulativeTotalTokens: _responseCumulativeTotalTokens,
-          usageResponseIds: _usageResponseIds,
-          generationMetricsVersion: _generationMetricsVersion,
-          generationMetricsEnabled: _generationMetricsEnabled,
-          firstTokenLatencyTotalMs: _firstTokenLatencyTotalMs,
-          firstTokenLatencySamples: _firstTokenLatencySamples,
-          outputGenerationDurationMs: _outputGenerationDurationMs,
-          outputGenerationTokens: _outputGenerationTokens,
-          pendingGenerationSamples: _pendingGenerationSamples,
-          pendingGenerationUsages: _pendingGenerationUsages,
-          pendingToolTimings: _pendingToolTimings,
-          costRevision: _costRevision,
-          ...publicTurn
-        } = turn;
-        return {
-          ...publicTurn,
-          generationDetails: publicGenerationDetails(publicTurn.generationDetails, publicTurn.toolExecutionLedger),
-          cost: {
-            ...cost,
-            cumulativeAvailable: taskCost.pendingTurns === 0,
-            cumulativeCny: taskCost.totalCny,
-            cumulativePendingTurns: taskCost.pendingTurns,
-          },
-        };
+      .sort((left, right) => left.updatedAt - right.updatedAt);
+    // Cost totals still traverse the complete working set, but heavyweight
+    // generation/tool projections are created only for rows the widget can
+    // actually expose.
+    const visibleTurns = new Set([
+      ...orderedTurns.filter((turn) => turn.completed).slice(-maxViewTurns),
+      ...orderedTurns.filter((turn) => !turn.completed).slice(-maxViewTurns),
+    ]);
+    const mappedTurns = [];
+    for (const turn of orderedTurns) {
+      const hasUsage = turn.totalTokens > 0;
+      const rawCost = hasUsage ? getCachedTurnCost(turn) : null;
+      const cost = pricingManager.toViewModel(rawCost);
+      const taskCost = cumulativeCosts.get(turn.taskKey) ?? {
+        totalCny: 0,
+        pendingTurns: 0,
+      };
+      if (hasUsage && cost.available) taskCost.totalCny += positiveNumber(cost.totalCny);
+      else if ((hasUsage && !cost.available) || turn.completed) taskCost.pendingTurns += 1;
+      cumulativeCosts.set(turn.taskKey, taskCost);
+      if (!visibleTurns.has(turn)) continue;
+      const visibleTurn = turn.isSubagentSummary
+        ? summarizeSubagentTurns(summaryGroups.get(turn.turnId) ?? [], { includeDetails: true })
+        : turn;
+      const {
+        taskKey: _taskKey,
+        source: _source,
+        modelSource: _modelSource,
+        segments: _segments,
+        rolloutPath: _rolloutPath,
+        rolloutUsageFallback: _rolloutUsageFallback,
+        rolloutParserVersion: _rolloutParserVersion,
+        rolloutTokenCountTotalTokens: _rolloutTokenCountTotalTokens,
+        responseCumulativeTotalTokens: _responseCumulativeTotalTokens,
+        usageResponseIds: _usageResponseIds,
+        generationMetricsVersion: _generationMetricsVersion,
+        generationMetricsEnabled: _generationMetricsEnabled,
+        firstTokenLatencyTotalMs: _firstTokenLatencyTotalMs,
+        firstTokenLatencySamples: _firstTokenLatencySamples,
+        outputGenerationDurationMs: _outputGenerationDurationMs,
+        outputGenerationTokens: _outputGenerationTokens,
+        pendingGenerationSamples: _pendingGenerationSamples,
+        pendingGenerationUsages: _pendingGenerationUsages,
+        pendingToolTimings: _pendingToolTimings,
+        costRevision: _costRevision,
+        ...publicTurn
+      } = visibleTurn;
+      mappedTurns.push({
+        ...publicTurn,
+        generationDetails: publicGenerationDetails(publicTurn.generationDetails, publicTurn.toolExecutionLedger),
+        cost: {
+          ...cost,
+          cumulativeAvailable: taskCost.pendingTurns === 0,
+          cumulativeCny: taskCost.totalCny,
+          cumulativePendingTurns: taskCost.pendingTurns,
+        },
       });
+    }
     const subagentRootByThread = new Map();
     for (const metadata of rolloutMetadataByThread.values()) {
       if (metadata.isSubagent && metadata.threadId && metadata.rootThreadId) {
@@ -232,19 +251,10 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
       turn.cost.cumulativeCny = positiveNumber(cumulativeCost.totalCny);
       turn.cost.cumulativePendingTurns = positiveInteger(cumulativeCost.pendingTurns);
     }
-    // Keep simultaneous in-progress turns, but cap both live and completed
-    // views so a missed completion event cannot grow the UI forever.
-    const liveTurns = mappedTurns
-      .filter((turn) => !turn.completed)
-      .slice(-maxViewTurns);
-    const recentTurns = mappedTurns
-      .filter((turn) => turn.completed)
-      .slice(-maxViewTurns);
     return {
       status: initializing ? "loading" : error ? "error" : "ready",
       error: error,
-      turns: [...recentTurns, ...liveTurns]
-        .sort((left, right) => left.updatedAt - right.updatedAt),
+      turns: mappedTurns,
     };
   }
 

@@ -19,7 +19,9 @@ import { join } from "node:path";
 // Version 26 retains only the measured length, model and observation time.
 // Version 27 records official usage directly in the response ledger rather
 // than leaving it pending until a rollout exists. Old history is not replayed.
-const CACHE_VERSION = 27;
+// Version 28 compacts older completed turns into cumulative history instead of
+// retaining their full generation and tool details in the working cache.
+const CACHE_VERSION = 28;
 
 const MIN_SUPPORTED_CACHE_VERSION = 11;
 
@@ -29,7 +31,10 @@ const DISCOVERY_INTERVAL_MS = 5_000;
 
 const MAX_VIEW_TURNS = 120;
 
-const MAX_STORED_TURNS = 2_000;
+// The widget exposes at most 120 completed and 120 live turns. Keep a wider
+// working set for late rollout reconciliation, then compact older completed
+// turns into cumulative cost history instead of retaining every detail.
+const MAX_STORED_TURNS = 512;
 
 const MAX_TRACKED_ROLLOUT_STATES = 256;
 

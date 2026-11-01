@@ -6,6 +6,54 @@ import { GENERATION_METRICS_VERSION } from "../src/relay-contract.mjs";
 import { TokenUsageManager } from "../src/token-usage.mjs";
 import { pricing, event, rolloutUsage, turnContext, tokenUsageRecord, createManager, protocolUsage, tokenCount, taskComplete } from "./token-usage/support.mjs";
 
+test("短生命周期恢复可按父进程指出的旧 rollout 路径增量续读", async (t) => {
+  const threadId = "78787878-7878-4787-8787-787878787878";
+  const turnId = "turn-process-resume";
+  const firstUsage = rolloutUsage({ input: 10, output: 5 });
+  const { manager, codexHome, dataDir } = await createManager(t, {
+    events: [
+      event("resume-active", "thread-active", threadId, null, { rolloutUsageFallback: true }),
+      event("resume-start", "turn-started", threadId, turnId, {
+        model: "gpt-6-luna", rolloutUsageFallback: true,
+      }),
+    ],
+    rollouts: [{
+      threadId,
+      records: [
+        turnContext(turnId, "gpt-6-luna"),
+        tokenCount(firstUsage, 15),
+      ],
+    }],
+  });
+  await manager.flush();
+  const rolloutPath = [...manager.fileStates.keys()][0];
+  manager.close();
+
+  const cachePath = join(dataDir, "token-usage-cache.json");
+  const cached = JSON.parse(await readFile(cachePath, "utf8"));
+  cached.activeThreadId = null;
+  cached.activeThreadHint = false;
+  cached.activeThreadHintAt = 0;
+  for (const state of cached.fileStates) state.lastUsedAt = 1;
+  await writeFile(cachePath, JSON.stringify(cached));
+  const secondUsage = rolloutUsage({ input: 20, output: 10 });
+  await appendFile(rolloutPath, `${JSON.stringify(tokenCount(secondUsage, 30))}\n`);
+
+  const restored = new TokenUsageManager({
+    codexHome,
+    dataDir,
+    discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+    pricingManager: pricing(dataDir),
+  });
+  t.after(() => restored.close());
+  await restored.initialize({ forceDiscovery: false });
+  assert.equal(restored.getViewModel().turns[0].totalTokens, 15);
+  await restored.refresh({ rolloutPaths: [rolloutPath] });
+  assert.equal(restored.getViewModel().turns[0].totalTokens, 45);
+  await restored.flush();
+  restored.close();
+});
+
 test("rollout 内部工具按响应归属，增量续读、旧缓存重建及 Worker 回退保持计价不变", async (t) => {
   const threadId = "98989898-9898-4989-8989-989898989898";
   const turnId = "turn-execution-items";

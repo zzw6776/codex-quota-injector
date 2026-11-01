@@ -3,6 +3,18 @@ import test from "node:test";
 import { createHostHealth } from "../src/widget/host-health.mjs";
 import { createPanel } from "../src/widget/panel.mjs";
 
+test("未检查任务显示首次检查入口，不暗示已经自动检查", () => {
+  const health = { required: true, threadId: "task", status: "idle", canCheck: true,
+    canRestart: true, requiredTools: ["read_thread"], checks: {} };
+  const state = { data: { hostHealth: health }, hostHealthDetailsThread: "task" };
+  const widget = createHostHealth({ state, escapeHtml: String, formatUpdatedAt: String });
+  assert.equal(widget.renderHostHealthBanner(health), "");
+  const flyout = widget.renderHostHealthFlyout(health);
+  assert.match(flyout, /任务工具尚未检查/);
+  assert.match(flyout, />检查<\/button>/);
+  assert.doesNotMatch(flyout, />重新检查<\/button>/);
+});
+
 test("超时为黄色未确认，操作直接平铺，详情不把未检查项冒充通过", () => {
   const health = { required: true, threadId: "task", status: "unconfirmed", canCheck: true,
     canRestart: true, canOpenLogs: true, requiredTools: ["read_thread"], checks: {

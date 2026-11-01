@@ -17,11 +17,13 @@ async function fixture(t) {
   const select = threadId => controller.applySelection({ sourceId: "test-source",
     revision: ++selectionRevision, threadId });
   t.after(async () => { controller.close(); await hostHealth.close({ disconnected: false }); });
-  return { state, sent, timers, ready(threadId) {
+  return { state, sent, timers, ready(threadId, { verify = true } = {}) {
+    if (threadId != null && controller.activeThreadId !== threadId) select(threadId);
     const params = { name: "codex_app", status: "ready", threadId };
     hostHealth.observeStartupStatus(params);
     controller.observeStartupStatus(params);
-    if (threadId != null && controller.activeThreadId !== threadId) select(threadId);
+    if (verify && threadId != null && !controller.verificationRequested &&
+        !hostHealth.snapshot(threadId).toolsVerified) controller.check();
   }, reply(message, result = successfulHostToolResult(message.params?.tool, message.params?.arguments?.threadId), error) {
     const pending = state.pendingRequests.get(message.id);
     state.pendingRequests.delete(message.id);
@@ -29,7 +31,47 @@ async function fixture(t) {
   }, controller, select };
 }
 
-test("[LCH-04 TOOL-04] 四项并发、重复通知合并、通过后复用且不查询目录", async t => {
+test("[LCH-04] 选择和切换任务只投影状态，不主动调用任务工具", async t => {
+  const { state, sent, ready } = await fixture(t);
+  ready("a", { verify: false });
+  ready("b", { verify: false });
+  ready("a", { verify: false });
+  assert.equal(sent.length, 0);
+  assert.equal(state.hostHealth.snapshot().status, "idle");
+  assert.equal(state.hostHealth.snapshot().code, "awaiting-selection");
+});
+
+test("[LCH-04] 就绪前点击检查会等待，服务就绪后才派发四项调用", async t => {
+  const { state, sent, ready, controller, select } = await fixture(t);
+  select("task");
+  controller.check();
+  assert.equal(sent.length, 0);
+  assert.equal(state.hostHealth.snapshot("task").code, "awaiting-task-tools");
+  ready("task", { verify: false });
+  assert.equal(sent.length, 4);
+  assert.deepEqual(new Set(sent.map((request) => request.params.tool)),
+    new Set(state.hostHealth.requiredTools));
+});
+
+test("[LCH-04] 正常模型工具调用只被动记证，不补发其余探针", async t => {
+  const { state, sent, ready } = await fixture(t);
+  state.threadContexts = new Map();
+  state.turnModels = new Map();
+  state.emitUsageEvent = () => {};
+  ready("task", { verify: false });
+  const request = { id: 91, method: "mcpServer/tool/call", params: {
+    threadId: "task", server: "codex_app", tool: "list_projects", arguments: {} } };
+  assert.equal(rewriteClientLine(JSON.stringify(request), state), JSON.stringify(request));
+  const response = JSON.stringify({ id: 91,
+    result: successfulHostToolResult("list_projects", "task") });
+  assert.equal(rewriteServerLine(response, state), response);
+  assert.equal(sent.length, 0);
+  assert.equal(state.hostHealth.snapshot("task").checks.list_projects.status, "passed");
+  assert.equal(state.hostHealth.snapshot("task").status, "idle");
+  assert.equal(state.hostHealth.snapshot("task").code, "awaiting-manual-check");
+});
+
+test("[LCH-04 TOOL-04] 显式检查四项并发、重复通知合并、通过后复用", async t => {
   const { state, sent, ready, reply } = await fixture(t);
   ready("task");
   ready("task");
@@ -77,8 +119,8 @@ test("[LCH-04] 显式撤销选择会清空待办，后续 ready 和旧响应都�
   assert.equal(state.hostHealth.snapshot("task").toolsVerified, false);
 });
 
-test("[LCH-04] 重新进入任务只复用通过项并重新验证失败项", async t => {
-  const { state, sent, ready, reply, timers, select } = await fixture(t);
+test("[LCH-04] 重新进入任务不主动调用，显式检查只重试失败项", async t => {
+  const { state, sent, ready, reply, timers, select, controller } = await fixture(t);
   ready("task");
   const failed = sent.find(request => request.params.tool === "list_projects");
   sent.filter(request => request !== failed).forEach(request => reply(request));
@@ -91,6 +133,8 @@ test("[LCH-04] 重新进入任务只复用通过项并重新验证失败项", as
   select("other");
   const before = sent.length;
   select("task");
+  assert.equal(sent.length, before);
+  controller.check();
   assert.equal(sent.length, before + 1);
   assert.equal(sent.at(-1).params.tool, "list_projects");
   assert.equal(Object.values(state.hostHealth.snapshot("task").checks)

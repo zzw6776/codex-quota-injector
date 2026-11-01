@@ -486,6 +486,17 @@ for await(const line of createInterface({input:process.stdin})) {
     threadId: "ready-thread", sessionId: owner.sessionId }, { relayStateChecker });
   await waitFor(async () => {
     const health = await readInstanceJson(healthPath);
+    return health?.threadId === "ready-thread" &&
+      health.tasks?.["ready-thread"]?.status === "idle" ? health : null;
+  }, {timeoutMs: 10_000});
+  requests = (await readFile(logPath, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+  assert.equal(requests.filter(x => x.method === "mcpServer/tool/call").length, 0,
+    "选择当前任务也不得主动调用工具");
+  await requestHostToolReload(binding, { action: "check", threadId: "ready-thread",
+    sessionId: owner.sessionId, requestId: "checkrequest01",
+    selectionSourceId: "integration-selection", selectionRevision: 1 }, { relayStateChecker });
+  await waitFor(async () => {
+    const health = await readInstanceJson(healthPath);
     return health?.tasks?.["ready-thread"]?.status === "ready" ? health : null;
   }, {timeoutMs: 10_000});
   child.stdin.end();

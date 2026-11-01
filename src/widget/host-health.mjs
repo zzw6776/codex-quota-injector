@@ -8,7 +8,7 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
       "health-state-missing", "required-tool-unverified", "codex-app-reload-failed"].includes(health?.code);
     const status = legacyUnknown ? "unconfirmed" : health?.status ?? "unconfirmed";
     const titles = {
-      idle: "选择本机任务后自动检查任务工具",
+      idle: health?.threadId ? "任务工具尚未检查" : "选择本机任务后可手动检查任务工具",
       starting: checks.length ? health.message : "正在连接任务工具",
       ready: health?.verification === "calls" ? health.message : "工具目录已核验",
       unconfirmed: health?.code === "health-runtime-outdated" ? "检查服务待更新" : "任务工具状态待确认",
@@ -30,8 +30,10 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
     // Routine connection/check progress belongs in the flyout, not the account panel.
     if (!["degraded", "unconfirmed"].includes(view.status)) return "";
     const checking = view.checks.some(isChecking);
+    const checkLabel = checking ? "检查中…"
+      : health.toolsVerified || view.checks.length > 0 ? "重新检查" : "检查";
     const recheck = health.canCheck && health.threadId
-      ? `<button class="btn host-health-recheck" type="button" title="实际调用当前任务的 4 项必需工具，确认是否可用" ${checking ? "disabled" : ""}>${checking ? "检查中…" : "重新检查"}</button>` : "";
+      ? `<button class="btn host-health-recheck" type="button" title="实际调用当前任务的 4 项必需工具，确认是否可用" ${checking ? "disabled" : ""}>${checkLabel}</button>` : "";
     const message = view.status === "unconfirmed" && health.code === "startup-status-timeout"
       ? "等待工具服务就绪超时，暂时无法确认状态。" : health.message;
     return `<aside class="host-health-banner ${view.status}" role="${view.status === "degraded" ? "alert" : "status"}" aria-live="polite">
@@ -49,6 +51,8 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
     if (!expanded(health)) return "";
     const view = presentation(health);
     const checking = view.checks.some(isChecking);
+    const checkLabel = checking ? "检查中…"
+      : health?.toolsVerified || view.checks.length > 0 ? "重新检查" : "检查";
     const message = view.status === "unconfirmed" && health?.code === "startup-status-timeout"
       ? "等待工具服务就绪超时，暂时无法确认状态。" : health?.message;
     return `<aside class="host-health-flyout ${view.status}" popover="manual" role="dialog" aria-label="任务工具检查详情">
@@ -63,7 +67,7 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
         ${health?.actionError ? `<div class="host-health-detail">操作未完成：${escapeHtml(health.actionError)}</div>` : ""}
         ${renderDetails(health)}
         <div class="host-health-actions host-health-action-grid">
-          ${health?.canCheck && health?.threadId ? `<button class="btn host-health-recheck" type="button" title="实际调用当前任务的 4 项必需工具，确认是否可用" ${checking ? "disabled" : ""}>${checking ? "检查中…" : "重新检查"}</button>` : ""}
+          ${health?.canCheck && health?.threadId ? `<button class="btn host-health-recheck" type="button" title="实际调用当前任务的 4 项必需工具，确认是否可用" ${checking ? "disabled" : ""}>${checkLabel}</button>` : ""}
           ${health?.canCheck ? `<button class="btn host-health-diagnose" type="button" title="查询完整注册目录，用于诊断工具缺失或加载异常；可能耗时较长" ${health?.diagnostic?.status === "checking" ? "disabled" : ""}>诊断工具目录</button>` : ""}
           ${health?.canCheck ? '<button class="btn host-health-reload" type="button" title="重新读取工具配置并刷新已加载任务的连接，可能影响其他任务">刷新工具配置</button>' : ""}
           ${health?.canRestart ? '<button class="btn host-health-restart" type="button" title="退出并重新启动整个 Codex 应用">重启 Codex</button>' : ""}

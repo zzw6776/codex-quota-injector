@@ -169,6 +169,7 @@ test("[LCH-04] 未收到 codex_app 启动终态只标记未确认，不伪造启
     clearHostToolTimer(handler) { timers.delete(handler); } };
   const controller = createHostToolController(relayState);
   controller.applySelection({ sourceId: "test-selection", revision: 1, threadId: "task" });
+  controller.check();
   const startup = { name: "codex_app", status: "starting", threadId: "task" };
   tracker.observeStartupStatus(startup);
   controller.observeStartupStatus(startup);
@@ -541,7 +542,7 @@ test("[LCH-04] 空全局目录不能推翻同一已就绪任务的完整工具�
   } finally { await tracker.close({disconnected: false}); }
 });
 
-test("[LCH-04] 历史任务只被动记录，选择当前任务后才执行启动超时检查", async t => {
+test("[LCH-04] 历史任务和任务选择只被动记录，显式检查才启动超时", async t => {
   const directory = await useTempDir(t, "host-health-lazy-task-");
   const tracker = await createHostHealthTracker({ path: join(directory, "health.json") });
   const timers = new Set();
@@ -562,6 +563,9 @@ test("[LCH-04] 历史任务只被动记录，选择当前任务后才执行启�
     assert.equal(tracker.snapshot("task").status, "idle", "未选择的历史任务不得启动检查");
     assert.equal(timers.size, 0, "未选择的历史任务不得留下超时计时器");
     controller.applySelection({ sourceId: "test-selection", revision: 1, threadId: "task" });
+    assert.equal(tracker.snapshot().status, "idle", "选择任务本身不能启动真实检查");
+    assert.equal(timers.size, 0);
+    controller.check();
     assert.equal(tracker.snapshot().status, "starting", "空全局目录不能重置真实启动检查");
     const timer = [...timers][0];
     assert.equal(typeof timer, "function");
@@ -609,7 +613,7 @@ test("[LCH-04 UI-02] 按需加载显示中性说明，不提示重启或冒充�
   assert.doesNotMatch(banner, /重新加载|重启|不可用|缺少/);
   const controls = widget.renderPanelControls(health);
   assert.match(controls, /status-idle/);
-  assert.match(controls, /选择本机任务后自动检查/);
+  assert.match(controls, /选择本机任务后可手动检查/);
   assert.doesNotMatch(controls, /已加载|任务功能异常|建议：/);
 });
 
@@ -670,9 +674,11 @@ test("[LCH-04] 切换任务会取消旧任务超时，未选任务不在后台�
   }
   assert.equal(timers.size, 0, "历史任务启动通知只记录状态，不启动超时");
   controller.applySelection({ sourceId: "test-selection", revision: 1, threadId: "waiting" });
+  controller.check();
   assert.equal(timers.size, 1);
   const staleTimer = [...timers][0];
   controller.applySelection({ sourceId: "test-selection", revision: 2, threadId: "ready" });
+  controller.check();
   assert.equal(timers.size, 1, "切换后只保留当前任务的超时");
   staleTimer();
   assert.equal(tracker.snapshot("waiting").status, "idle", "旧计时器迟到也不能制造超时");

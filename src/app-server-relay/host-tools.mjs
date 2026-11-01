@@ -22,6 +22,7 @@ class HostToolController {
     this.retries = new Map();
     this.activeThreadId = null;
     this.activationEpoch = 0;
+    this.verificationRequested = false;
     this.selection = null;
     this.readyKey = null;
     this.activationTimer = null;
@@ -42,7 +43,7 @@ class HostToolController {
         (selection?.threadId != null && !threadId)) return false;
     if (this.selection?.sourceId === sourceId && revision <= this.selection.revision) return false;
     this.selection = { sourceId, revision, threadId };
-    this.beginActivation(threadId, { force: false });
+    this.selectTask(threadId);
     return true;
   }
 
@@ -62,8 +63,12 @@ class HostToolController {
     return true;
   }
 
-  beginActivation(threadId, { force = false } = {}) {
+  selectTask(threadId) {
     const previousThreadId = this.activeThreadId;
+    if (previousThreadId === threadId) {
+      void this.health?.projectTask(threadId);
+      return;
+    }
     this.advanceEpoch();
     this.activeThreadId = threadId;
     if (previousThreadId && previousThreadId !== threadId) {
@@ -73,8 +78,17 @@ class HostToolController {
       if (!previousThreadId) void this.health?.projectTask(null);
       return;
     }
+    this.health.noteTask(threadId);
+    void this.health.projectTask(threadId);
+  }
+
+  beginVerification({ force = false } = {}) {
+    const threadId = this.activeThreadId;
+    if (!threadId || this.closed) return;
+    this.advanceEpoch({ verificationRequested: true });
     const context = this.health.context(threadId);
     if (["failed", "cancelled"].includes(context.startupStatus)) {
+      this.verificationRequested = false;
       this.health.activateTask(threadId);
       return;
     }
@@ -82,7 +96,10 @@ class HostToolController {
     if (force || !snapshot.toolsVerified) this.health.prepareVerification(threadId, { force });
     this.health.activateTask(threadId);
     const current = this.health.snapshot(threadId);
-    if (current.status === "ready" && current.toolsVerified) return;
+    if (current.status === "ready" && current.toolsVerified) {
+      this.verificationRequested = false;
+      return;
+    }
     this.startActivationTimer(threadId);
     if (current.serverStatus === "ready") this.handleReady(threadId);
   }
@@ -90,7 +107,7 @@ class HostToolController {
   check() {
     if (!this.activeThreadId || this.closed) return;
     const force = this.health.snapshot(this.activeThreadId).toolsVerified === true;
-    this.beginActivation(this.activeThreadId, { force });
+    this.beginVerification({ force });
   }
 
   observeStartupStatus(params) {
@@ -98,18 +115,19 @@ class HostToolController {
     if (!threadId || threadId !== this.activeThreadId || this.closed) return;
     const status = String(params?.status ?? "").trim();
     if (status === "ready") {
-      this.handleReady(threadId);
+      if (this.verificationRequested) this.handleReady(threadId);
       return;
     }
-    this.advanceEpoch();
-    if (status === "starting") {
+    const verificationRequested = this.verificationRequested;
+    this.advanceEpoch({ verificationRequested });
+    if (status === "starting" && verificationRequested) {
       this.health.activateTask(threadId);
       this.startActivationTimer(threadId);
     }
   }
 
   handleReady(threadId) {
-    if (threadId !== this.activeThreadId || this.closed) return;
+    if (threadId !== this.activeThreadId || this.closed || !this.verificationRequested) return;
     const healthRevision = this.health.statusRevision(threadId);
     const readyKey = `${this.activationEpoch}:${healthRevision}`;
     if (readyKey === this.readyKey) {
@@ -122,6 +140,7 @@ class HostToolController {
     this.health.activateTask(threadId);
     const health = this.health.snapshot(threadId);
     if (health.toolsVerified) {
+      this.verificationRequested = false;
       this.clearActivationTimer();
       return;
     }
@@ -143,13 +162,17 @@ class HostToolController {
     if (!threadId || !tool || !this.health) return;
     if (this.health.snapshot(threadId).checks?.[tool]?.status === "passed") {
       this.clearRetry(threadId, tool);
-    } else if (threadId === this.activeThreadId) {
+      if (this.health.snapshot(threadId).toolsVerified) {
+        this.verificationRequested = false;
+        this.clearActivationTimer();
+      }
+    } else if (threadId === this.activeThreadId && this.verificationRequested) {
       this.retryTool(threadId, tool);
     }
   }
 
   observeThreadClosed(threadId) {
-    if (threadId === this.activeThreadId) this.beginActivation(null);
+    if (threadId === this.activeThreadId) this.selectTask(null);
   }
 
   enqueue(threadId, tool, healthRevision) {
@@ -167,8 +190,9 @@ class HostToolController {
     }
   }
 
-  advanceEpoch() {
+  advanceEpoch({ verificationRequested = false } = {}) {
     this.activationEpoch += 1;
+    this.verificationRequested = verificationRequested;
     this.readyKey = null;
     this.clearActivationTimer();
     this.clearQueuedWork();
@@ -186,7 +210,7 @@ class HostToolController {
   }
 
   retryTool(threadId, tool) {
-    if (this.closed || threadId !== this.activeThreadId) return;
+    if (this.closed || !this.verificationRequested || threadId !== this.activeThreadId) return;
     const context = this.health.context(threadId);
     if (context.state.serverStatus !== "ready") return;
     const check = context.state.checks?.[tool];
@@ -267,7 +291,7 @@ class HostToolController {
   }
 
   reload() {
-    if (this.reloadInFlight || !this.beginReload()) return;
+    if (this.reloadInFlight || !this.beginReload({ verifyAfterReady: true })) return;
     this.reloadInFlight = true;
     const id = `codex-quota-host-tools-reload-${randomUUID()}`;
     this.reloadRequestId = id;
@@ -276,14 +300,14 @@ class HostToolController {
   }
 
   observeExternalReload() {
-    this.beginReload();
+    this.beginReload({ verifyAfterReady: false });
   }
 
-  beginReload() {
+  beginReload({ verifyAfterReady = false } = {}) {
     if (!this.activeThreadId || this.closed) return false;
-    this.advanceEpoch();
+    this.advanceEpoch({ verificationRequested: verifyAfterReady });
     this.health.observeReloadStarted(this.activeThreadId);
-    this.startActivationTimer(this.activeThreadId);
+    if (verifyAfterReady) this.startActivationTimer(this.activeThreadId);
     return true;
   }
 

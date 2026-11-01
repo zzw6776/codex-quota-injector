@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { defaultAccountDataDir } from "./platform.mjs";
 import { TokenPricingManager } from "./token-pricing.mjs";
 import { createToolExecutionLedger } from "./tool-executions.mjs";
-import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
+import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
 import { RolloutWorkerClient } from "./token-usage/rollout-worker.mjs";
 import { buildUsageViewModel } from "./token-usage/display.mjs";
 import { applySubagentMetadata } from "./token-usage/subagents.mjs";
@@ -42,13 +42,18 @@ export class TokenUsageManager {
     discoveryIntervalMs = DISCOVERY_INTERVAL_MS,
     maxViewTurns = MAX_VIEW_TURNS,
     pricingManager = new TokenPricingManager(),
+    watchEvents = true,
+    refreshPricing = true,
   } = {}) {
     this.codexHome = codexHome;
     this.eventPath = join(dataDir, "token-usage-events.jsonl");
     this.cachePath = join(dataDir, "token-usage-cache.json");
     this.discoveryIntervalMs = discoveryIntervalMs;
-    this.maxViewTurns = maxViewTurns;
+    this.maxViewTurns = Math.max(1, positiveInteger(maxViewTurns) || MAX_VIEW_TURNS);
+    this.maxStoredTurns = Math.max(MAX_STORED_TURNS, this.maxViewTurns * 2);
     this.pricingManager = pricingManager;
+    this.watchEvents = Boolean(watchEvents);
+    this.refreshPricing = Boolean(refreshPricing);
     this.eventState = { offset: 0, pending: "" };
     this.seenEventIds = new Set();
     this.fileStates = new Map();
@@ -73,6 +78,7 @@ export class TokenUsageManager {
     this.lastCachePersistAt = 0;
     this.turnCostCache = new Map();
     this.lastDiscoveryAt = 0;
+    this.discoveryRevision = 0;
     this.refreshPromise = null;
     this.initializationPromise = null;
     this.initializing = false;
@@ -102,7 +108,7 @@ export class TokenUsageManager {
     return () => this.changeListeners.delete(listener);
   }
 
-  initialize() {
+  initialize({ forceDiscovery = true, rolloutPaths = [] } = {}) {
     if (this.initializationPromise) return this.initializationPromise;
     this.initializing = true;
     const task = (async () => {
@@ -117,7 +123,14 @@ export class TokenUsageManager {
       }
       if (this.closed) return this.getViewModel();
       this.#startEventWatcher();
-      await this.#refreshOnce({ forceDiscovery: true });
+      // A short-lived service can restore its known rollout paths from cache.
+      // Only a newly observed session or the discovery fallback needs a full
+      // catalog walk.
+      await this.#refreshOnce({
+        forceDiscovery,
+        skipDiscovery: !forceDiscovery,
+        rolloutPaths,
+      });
       this.initialized = true;
       const viewModel = this.getViewModel();
       this.#notifyChange(viewModel);
@@ -138,7 +151,7 @@ export class TokenUsageManager {
     return task;
   }
 
-  async refresh({ forceDiscovery = false, notify = false } = {}) {
+  async refresh({ forceDiscovery = false, notify = false, rolloutPaths = [] } = {}) {
     if (this.closed) return this.getViewModel();
     if (this.initializing) {
       const viewModel = await this.initializationPromise;
@@ -150,7 +163,7 @@ export class TokenUsageManager {
       if (notify) this.#notifyChange(viewModel);
       return viewModel;
     }
-    const task = this.#refreshOnce({ forceDiscovery })
+    const task = this.#refreshOnce({ forceDiscovery, rolloutPaths })
       .catch((error) => {
         this.error = error.message;
         this.#invalidateViewModel();
@@ -191,6 +204,42 @@ export class TokenUsageManager {
     if (!state) return unknownTurnStateViewModel();
     const { threadId: _threadId, ...view } = state;
     return { ...view };
+  }
+
+  getTurnStatesViewModel() {
+    return Object.fromEntries([...this.turnStates].map(([threadId, state]) => {
+      const { threadId: _threadId, ...view } = state;
+      return [threadId, { ...view }];
+    }));
+  }
+
+  getDiscoveryRevision() {
+    return this.discoveryRevision;
+  }
+
+  async getSourceSnapshot() {
+    const probe = async (path, processedSize) => {
+      try {
+        const info = await stat(path);
+        return {
+          path,
+          exists: true,
+          size: processedSize,
+          // If bytes arrived after the reader's stat, retain the processed
+          // offset instead of blessing the newer file as already consumed.
+          mtimeMs: info.size === processedSize ? info.mtimeMs : null,
+        };
+      } catch (error) {
+        if (error.code === "ENOENT") return { path, exists: false, size: 0, mtimeMs: 0 };
+        throw error;
+      }
+    };
+    const rollouts = await Promise.all([...this.fileStates.values()]
+      .map((state) => probe(state.path, state.offset)));
+    return {
+      event: await probe(this.eventPath, this.eventState.offset),
+      rollouts,
+    };
   }
 
   close() {
@@ -236,7 +285,7 @@ export class TokenUsageManager {
   }
 
   #startEventWatcher() {
-    if (this.closed || this.eventWatcher) return;
+    if (!this.watchEvents || this.closed || this.eventWatcher) return;
     try {
       const watcher = watch(
         dirname(this.eventPath),
@@ -267,24 +316,31 @@ export class TokenUsageManager {
     }
   }
 
-  async #refreshOnce({ forceDiscovery }) {
+  async #refreshOnce({ forceDiscovery, skipDiscovery = false, rolloutPaths = [] }) {
     const revision = this.cacheRevision;
     this.#startEventWatcher();
     // Exchange-rate refresh is deliberately detached from usage parsing. A
     // cached rate is sufficient for the current view; the pricing listener
     // invalidates CNY values when a newer rate arrives.
-    void Promise.resolve(this.pricingManager.refreshExchangeRate()).catch((error) => {
-      console.error(`[token-usage] 汇率刷新失败: ${error.message}`);
-    });
+    if (this.refreshPricing) {
+      void Promise.resolve(this.pricingManager.refreshExchangeRate()).catch((error) => {
+        console.error(`[token-usage] 汇率刷新失败: ${error.message}`);
+      });
+    }
     await this.#readUsageEvents();
     const now = Date.now();
-    if (forceDiscovery || now - this.lastDiscoveryAt >= this.discoveryIntervalMs) {
+    if (forceDiscovery || (!skipDiscovery &&
+      now - this.lastDiscoveryAt >= this.discoveryIntervalMs)) {
       await this.#refreshRolloutCatalog();
       this.lastDiscoveryAt = now;
     }
     const rolloutThreadIds = new Set(this.rolloutFallbackThreads.keys());
     for (const threadId of this.recentRolloutThreads) rolloutThreadIds.add(threadId);
     if (this.activeThreadId) rolloutThreadIds.add(this.activeThreadId);
+    for (const path of rolloutPaths) {
+      const threadId = this.fileStates.get(path)?.threadId;
+      if (threadId) rolloutThreadIds.add(threadId);
+    }
     for (const threadId of rolloutThreadIds) {
       const states = await this.#ensureRolloutStates(threadId);
       for (const state of states) await this.#readAppendedRollout(state);
@@ -340,10 +396,17 @@ export class TokenUsageManager {
       const state = normalizeCachedFileState(value);
       if (!state) continue;
       this.fileStates.set(state.path, state);
+      const paths = this.rolloutPathsByThread.get(state.threadId) ?? [];
+      paths.push(state.path);
+      this.rolloutPathsByThread.set(state.threadId, paths);
+      if (Date.now() - state.lastUsedAt <= RECENT_ROLLOUT_ACTIVITY_MS) {
+        this.recentRolloutThreads.add(state.threadId);
+      }
       if (state.parserVersion !== ROLLOUT_PARSER_VERSION) {
         this.rolloutFallbackThreads.set(state.threadId, state.lastUsedAt || Date.now());
       }
     }
+    for (const paths of this.rolloutPathsByThread.values()) paths.sort();
     if (this.fileStates.size > MAX_TRACKED_ROLLOUT_STATES) {
       this.#pruneRolloutStates(null);
       this.#markCacheDirty();
@@ -373,6 +436,9 @@ export class TokenUsageManager {
     this.activeThreadHintAt = 0;
     this.rolloutFallbackThreads.clear();
     this.recentRolloutThreads.clear();
+    this.rolloutPathsByThread.clear();
+    this.rolloutMetadataByPath.clear();
+    this.rolloutMetadataByThread.clear();
     this.#markCacheDirty();
     this.#invalidateViewModel();
   }
@@ -426,22 +492,32 @@ export class TokenUsageManager {
   async flush() {
     clearTimeout(this.cachePersistTimer);
     this.cachePersistTimer = null;
-    while (this.initializationPromise || this.refreshPromise || this.rolloutReconcilePromise ||
-      this.cachePersistPromise || this.cacheDirty) {
-      const inFlight = [
-        this.initializationPromise,
-        this.refreshPromise,
-        this.rolloutReconcilePromise,
-      ].filter(Boolean);
-      if (inFlight.length > 0) {
-        await Promise.allSettled(inFlight);
-        continue;
-      }
+    await this.whenSettled({ runScheduledReconciliation: true });
+    while (this.cachePersistPromise || this.cacheDirty) {
       if (this.cachePersistPromise) {
         await this.cachePersistPromise;
       } else {
         await this.#persistCache();
       }
+    }
+    clearTimeout(this.cachePersistTimer);
+    this.cachePersistTimer = null;
+  }
+
+  async whenSettled({ runScheduledReconciliation = false } = {}) {
+    for (;;) {
+      if (runScheduledReconciliation && this.unknownRolloutCheckTimer) {
+        clearTimeout(this.unknownRolloutCheckTimer);
+        this.unknownRolloutCheckTimer = null;
+        this.#scheduleUnknownRolloutReconciliation({ bypassInterval: true });
+      }
+      const inFlight = [
+        this.initializationPromise,
+        this.refreshPromise,
+        this.rolloutReconcilePromise,
+      ].filter(Boolean);
+      if (inFlight.length === 0) return;
+      await Promise.allSettled(inFlight);
     }
   }
 
@@ -549,6 +625,7 @@ export class TokenUsageManager {
       rolloutMetadataByThread: this.rolloutMetadataByThread,
       recentRolloutThreads: this.recentRolloutThreads,
     });
+    this.discoveryRevision += 1;
     if (this.#applySubagentMetadataToTurns()) {
       this.#markCacheDirty();
       this.#invalidateViewModel();
@@ -839,11 +916,11 @@ export class TokenUsageManager {
   }
 
   #pruneCompletedTurns() {
-    if (this.turns.size <= MAX_STORED_TURNS) return;
+    if (this.turns.size <= this.maxStoredTurns) return;
     const removable = [...this.turns.values()]
       .filter((turn) => turn.completed)
       .sort((left, right) => left.updatedAt - right.updatedAt);
-    const target = this.turns.size - MAX_STORED_TURNS;
+    const target = this.turns.size - this.maxStoredTurns;
     let pruned = 0;
     for (const turn of removable) {
       if (pruned >= target) break;
@@ -899,14 +976,14 @@ export class TokenUsageManager {
     return pruned;
   }
 
-  #scheduleUnknownRolloutReconciliation() {
+  #scheduleUnknownRolloutReconciliation({ bypassInterval = false } = {}) {
     if (this.rolloutReconcilePromise) {
       this.rolloutReconcileRequested = true;
       return;
     }
     if (this.rolloutPathsByThread.size === 0) return;
     const elapsed = Date.now() - this.lastUnknownRolloutCheckAt;
-    if (elapsed < UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS) {
+    if (!bypassInterval && elapsed < UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS) {
       if (!this.unknownRolloutCheckTimer) {
         this.unknownRolloutCheckTimer = setTimeout(() => {
           this.unknownRolloutCheckTimer = null;

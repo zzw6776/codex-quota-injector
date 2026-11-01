@@ -218,14 +218,27 @@ function nonEmptyString(value) {
 }
 `;
 
+const ROLLOUT_WORKER_IDLE_MS = 30_000;
+
 class RolloutWorkerClient {
-  constructor() {
+  constructor({
+    idleTimeoutMs = ROLLOUT_WORKER_IDLE_MS,
+    workerFactory = () => new Worker(ROLLOUT_WORKER_SOURCE, { eval: true }),
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
+  } = {}) {
     this.rolloutWorker = null;
     this.rolloutWorkerRequestId = 0;
     this.rolloutWorkerRequests = new Map();
+    this.idleTimeoutMs = Math.max(0, Number(idleTimeoutMs) || 0);
+    this.workerFactory = workerFactory;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.idleTimer = null;
   }
 
   readRolloutInWorker(state, reconcile, onBatch, onReset) {
+    this.#cancelIdleTermination();
     const worker = this.#ensureRolloutWorker();
     const id = ++this.rolloutWorkerRequestId;
     return new Promise((resolve, reject) => {
@@ -242,6 +255,7 @@ class RolloutWorkerClient {
         });
       } catch (error) {
         this.rolloutWorkerRequests.delete(id);
+        this.#scheduleIdleTermination();
         reject(error);
       }
     });
@@ -249,7 +263,7 @@ class RolloutWorkerClient {
 
   #ensureRolloutWorker() {
     if (this.rolloutWorker) return this.rolloutWorker;
-    const worker = new Worker(ROLLOUT_WORKER_SOURCE, { eval: true });
+    const worker = this.workerFactory();
     worker.on("message", (message) => {
       const pending = this.rolloutWorkerRequests.get(message?.id);
       if (!pending) return;
@@ -259,6 +273,7 @@ class RolloutWorkerClient {
         } catch (error) {
           this.rolloutWorkerRequests.delete(message.id);
           pending.reject(error);
+          this.#scheduleIdleTermination();
         }
         return;
       }
@@ -268,21 +283,26 @@ class RolloutWorkerClient {
         } catch (error) {
           this.rolloutWorkerRequests.delete(message.id);
           pending.reject(error);
+          this.#scheduleIdleTermination();
         }
         return;
       }
       this.rolloutWorkerRequests.delete(message.id);
       if (message.ok) pending.resolve(message);
       else pending.reject(new Error(message.error || "rollout Worker 解析失败"));
+      this.#scheduleIdleTermination();
     });
     worker.on("error", (error) => {
+      if (this.rolloutWorker !== worker) return;
       this.rolloutWorker = null;
+      this.#cancelIdleTermination();
       for (const pending of this.rolloutWorkerRequests.values()) pending.reject(error);
       this.rolloutWorkerRequests.clear();
     });
     worker.on("exit", (code) => {
       if (this.rolloutWorker !== worker) return;
       this.rolloutWorker = null;
+      this.#cancelIdleTermination();
       if (code !== 0) {
         const error = new Error(`rollout Worker 异常退出（${code}）`);
         for (const pending of this.rolloutWorkerRequests.values()) pending.reject(error);
@@ -293,7 +313,26 @@ class RolloutWorkerClient {
     return worker;
   }
 
+  #scheduleIdleTermination() {
+    this.#cancelIdleTermination();
+    const worker = this.rolloutWorker;
+    if (!worker || this.rolloutWorkerRequests.size > 0) return;
+    this.idleTimer = this.setTimer(() => {
+      this.idleTimer = null;
+      if (this.rolloutWorker !== worker || this.rolloutWorkerRequests.size > 0) return;
+      this.rolloutWorker = null;
+      void worker.terminate();
+    }, this.idleTimeoutMs);
+    this.idleTimer?.unref?.();
+  }
+
+  #cancelIdleTermination() {
+    if (this.idleTimer != null) this.clearTimer(this.idleTimer);
+    this.idleTimer = null;
+  }
+
   closeRolloutWorker() {
+    this.#cancelIdleTermination();
     const worker = this.rolloutWorker;
     this.rolloutWorker = null;
     if (!worker) return;
@@ -304,4 +343,4 @@ class RolloutWorkerClient {
   }
 }
 
-export { RolloutWorkerClient };
+export { ROLLOUT_WORKER_IDLE_MS, RolloutWorkerClient };

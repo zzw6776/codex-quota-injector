@@ -96,9 +96,11 @@ export class TokenPricingManager {
   constructor({
     dataDir = defaultAccountDataDir(),
     fetchImpl = globalThis.fetch,
+    refreshOnInitialize = true,
   } = {}) {
     this.cachePath = join(dataDir, "usd-cny-exchange-rate.json");
     this.fetchImpl = fetchImpl;
+    this.refreshOnInitialize = Boolean(refreshOnInitialize);
     this.exchangeRate = { ...FALLBACK_EXCHANGE_RATE };
     this.lastRefreshAttemptAt = 0;
     this.refreshPromise = null;
@@ -117,9 +119,11 @@ export class TokenPricingManager {
     // A stale exchange rate is acceptable for the first paint. Refresh in the
     // background so Token usage and rollout parsing are not gated by network
     // latency or the six-second request timeout.
-    void this.refreshExchangeRate({ force: true }).catch((error) => {
-      console.error(`[exchange-rate] ${error.message}`);
-    });
+    if (this.refreshOnInitialize) {
+      void this.refreshExchangeRate({ force: true }).catch((error) => {
+        console.error(`[exchange-rate] ${error.message}`);
+      });
+    }
     return this.exchangeRate;
   }
 
@@ -225,6 +229,11 @@ export class TokenPricingManager {
       fallback: false,
     };
     this.exchangeRate = next;
+    await writeJsonAtomic(this.cachePath, next).catch((error) => {
+      console.error(`[exchange-rate] 无法保存汇率缓存: ${error.message}`);
+    });
+    // A separate token-usage process reloads this file after a rate change,
+    // so observers must not run before the durable cache is ready.
     for (const listener of this.changeListeners) {
       try {
         listener(next);
@@ -232,9 +241,6 @@ export class TokenPricingManager {
         console.error(`[exchange-rate] 汇率变更监听器失败: ${error.message}`);
       }
     }
-    await writeJsonAtomic(this.cachePath, next).catch((error) => {
-      console.error(`[exchange-rate] 无法保存汇率缓存: ${error.message}`);
-    });
     return next;
   }
 }
