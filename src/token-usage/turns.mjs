@@ -51,11 +51,20 @@ function emptyTurn(turnId, threadId, source, rolloutPath = "") {
     pendingGenerationSamples: [],
     pendingGenerationUsages: [],
     pendingToolTimings: [],
+    detailsCompacted: false,
     costRevision: 0,
     segments: [],
     startedAt: 0,
     updatedAt: 0,
   };
+}
+
+function turnBelongsToThread(turn, threadId) {
+  const normalizedThreadId = nonEmptyString(threadId);
+  if (!turn || !normalizedThreadId) return false;
+  return turn.threadId === normalizedThreadId ||
+    turn.rootThreadId === normalizedThreadId ||
+    turn.parentThreadId === normalizedThreadId;
 }
 
 function prepareRolloutUsageTurn(turn) {
@@ -278,4 +287,4 @@ function compactUsageSegments(segments) {
   segments.splice(0, segments.length, ...grouped.values());
 }
 
-export { turnHasUnknownModel, calculateTurnCost, mergeUsageSegment, compactUsageSegments, emptyTurn, normalizeRolloutUsage, prepareRolloutUsageTurn, markUsageResponse, enqueuePendingUsageRecord, consumePendingUsageRecord, addUsage, fillUnknownSegmentModels, setTurnModel, normalizeProtocolUsage };
+export { turnHasUnknownModel, calculateTurnCost, mergeUsageSegment, compactUsageSegments, emptyTurn, turnBelongsToThread, normalizeRolloutUsage, prepareRolloutUsageTurn, markUsageResponse, enqueuePendingUsageRecord, consumePendingUsageRecord, addUsage, fillUnknownSegmentModels, setTurnModel, normalizeProtocolUsage };

@@ -125,7 +125,7 @@ function taskComplete(timestamp = new Date().toISOString()) {
   return { timestamp, type: "event_msg", payload: { type: "task_complete" } };
 }
 
-async function createManager(t, { events = [], rollouts = [] } = {}) {
+async function createManager(t, { events = [], rollouts = [], managerOptions = {} } = {}) {
   const codexHome = await mkdtemp(join(tmpdir(), "codex-usage-home-"));
   const dataDir = await mkdtemp(join(tmpdir(), "codex-quota-test-"));
   if (events.length) await writeEvents(dataDir, events);
@@ -137,6 +137,7 @@ async function createManager(t, { events = [], rollouts = [] } = {}) {
     dataDir,
     discoveryIntervalMs: 0,
     pricingManager: pricing(dataDir),
+    ...managerOptions,
   });
   t.after(async () => {
     await manager.flush();

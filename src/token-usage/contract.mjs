@@ -21,7 +21,11 @@ import { join } from "node:path";
 // than leaving it pending until a rollout exists. Old history is not replayed.
 // Version 28 compacts older completed turns into cumulative history instead of
 // retaining their full generation and tool details in the working cache.
-const CACHE_VERSION = 28;
+// Version 29 keeps lightweight per-turn summaries after heavy details are
+// compacted, and records whether each rollout has built that summary index.
+// Version 30 persists the rollout paths and subagent ancestry needed to
+// rebuild archived summaries without scanning every historical session.
+const CACHE_VERSION = 30;
 
 const MIN_SUPPORTED_CACHE_VERSION = 11;
 
@@ -31,10 +35,18 @@ const DISCOVERY_INTERVAL_MS = 5_000;
 
 const MAX_VIEW_TURNS = 120;
 
-// The widget exposes at most 120 completed and 120 live turns. Keep a wider
-// working set for late rollout reconciliation, then compact older completed
-// turns into cumulative cost history instead of retaining every detail.
+// Heavy generation and tool details are useful only for recent rows. Older
+// rows retain a compact token/cost summary so an opened conversation can still
+// render its historical per-turn footer without keeping every detail in RAM.
 const MAX_STORED_TURNS = 512;
+
+const MAX_STORED_TURN_SUMMARIES = 4_096;
+
+const TURN_SUMMARY_PROJECTION_VERSION = 1;
+
+// Version 2 also retains archived completed rollouts whose usage is zero, so
+// an index produced by the earlier development build cannot claim completeness.
+const SUMMARY_ROLLOUT_INDEX_VERSION = 2;
 
 const MAX_TRACKED_ROLLOUT_STATES = 256;
 
@@ -133,4 +145,4 @@ function parseTimestamp(value) {
   return Number.isFinite(number) ? number : Date.now();
 }
 
-export { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString, TOKEN_FIELDS, toCamelCase, MAX_SEEN_USAGE_RESPONSE_IDS, MAX_PENDING_USAGE_RECORDS, nonNegativeNumberOrNull, MAX_PENDING_GENERATION_RECORDS, MODEL_SOURCE_PRIORITY, MAX_HISTORICAL_SEGMENTS, READ_CHUNK_BYTES, MAX_ROLLOUT_METADATA_BYTES, parseTimestamp, TERMINAL_TURN_STATUSES };
+export { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_STORED_TURN_SUMMARIES, TURN_SUMMARY_PROJECTION_VERSION, SUMMARY_ROLLOUT_INDEX_VERSION, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString, TOKEN_FIELDS, toCamelCase, MAX_SEEN_USAGE_RESPONSE_IDS, MAX_PENDING_USAGE_RECORDS, nonNegativeNumberOrNull, MAX_PENDING_GENERATION_RECORDS, MODEL_SOURCE_PRIORITY, MAX_HISTORICAL_SEGMENTS, READ_CHUNK_BYTES, MAX_ROLLOUT_METADATA_BYTES, parseTimestamp, TERMINAL_TURN_STATUSES };

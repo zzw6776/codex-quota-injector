@@ -86,6 +86,61 @@ test("Token 统计进程空闲退出，无变化不重启，追加事件后按�
   await waitFor(() => client.servicePid == null, { timeoutMs: 5_000 });
 });
 
+test("切换页面会话后短生命周期进程返回该会话的窗口外摘要", async (t) => {
+  const codexHome = await useTempDir(t, "codex-usage-focus-home-");
+  const dataDir = await useTempDir(t, "codex-usage-focus-data-");
+  const usage = protocolUsage({ input: 10, output: 5 });
+  const events = [];
+  for (const [index, threadId] of ["thread-old", "thread-new"].entries()) {
+    const turnId = `turn-${index}`;
+    events.push(
+      event(`start-${index}`, "turn-started", threadId, turnId, { model: "gpt-6-luna" }),
+      event(`usage-${index}`, "usage", threadId, turnId, {
+        responseId: `response-${index}`,
+        tokenUsage: { last: usage, total: usage },
+      }),
+      event(`complete-${index}`, "turn-completed", threadId, turnId, { status: "completed" }),
+    );
+  }
+  await writeFile(
+    join(dataDir, "token-usage-events.jsonl"),
+    `${events.map((value) => JSON.stringify(value)).join("\n")}\n`,
+  );
+  const client = new TokenUsageProcessClient({
+    codexHome,
+    dataDir,
+    maxViewTurns: 1,
+    idleTimeoutMs: 5_000,
+    eventWatchDebounceMs: 5,
+    watchSources: false,
+    pricingManager: inertPricingManager(),
+  });
+  t.after(async () => {
+    await client.close();
+    await client.flush();
+  });
+
+  const initializing = client.initialize();
+  assert.equal(client.setViewThread("thread-old"), true);
+  assert.ok(client.scheduledRefresh, "初始化期间切换会话必须排队补一次刷新");
+  const preinitialized = await initializing;
+  assert.deepEqual(preinitialized.turns.map((turn) => turn.turnId), ["turn-0", "turn-1"]);
+  assert.equal(client.setViewThread(null), true);
+  const initial = await waitFor(() => {
+    const view = client.getViewModel();
+    return view.turns.length === 1 && view.turns[0]?.turnId === "turn-1" ? view : null;
+  }, { timeoutMs: 5_000 });
+  assert.deepEqual(initial.turns.map((turn) => turn.turnId), ["turn-1"]);
+  assert.equal(client.setViewThread("thread-old"), true);
+  assert.equal(client.setViewThread("thread-old"), false);
+  const focused = await waitFor(() => {
+    const view = client.getViewModel();
+    return view.turns.some((turn) => turn.turnId === "turn-0") ? view : null;
+  }, { timeoutMs: 5_000 });
+  assert.deepEqual(focused.turns.map((turn) => turn.turnId), ["turn-0", "turn-1"]);
+  assert.equal(focused.turns[0].detailsAvailable, false);
+});
+
 test("全量发现失败不会推进成功时间，下一次兜底刷新立即重试", async (t) => {
   const codexHome = await useTempDir(t, "codex-usage-discovery-home-");
   const dataDir = await useTempDir(t, "codex-usage-discovery-data-");

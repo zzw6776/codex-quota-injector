@@ -132,11 +132,14 @@ async function runTokenUsageService() {
         const rolloutPaths = Array.isArray(request.rolloutPaths)
           ? request.rolloutPaths.map(String)
           : [];
+        const viewThreadId = request.viewThreadId == null
+          ? null
+          : String(request.viewThreadId).trim() || null;
         if (!initialized) {
-          await manager.initialize({ forceDiscovery, rolloutPaths });
+          await manager.initialize({ forceDiscovery, rolloutPaths, viewThreadId });
           initialized = true;
         } else if (request.action === "refresh") {
-          await manager.refresh({ forceDiscovery, rolloutPaths });
+          await manager.refresh({ forceDiscovery, rolloutPaths, viewThreadId });
         } else if (request.action !== "initialize") {
           throw new Error(`未知 Token 用量服务操作：${request.action}`);
         }

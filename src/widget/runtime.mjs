@@ -1,4 +1,4 @@
-import { WIDGET_RUNTIME_VERSION } from "./contract.mjs";
+import { MAX_CONVERSATION_USAGE_CACHE, WIDGET_RUNTIME_VERSION } from "./contract.mjs";
 import { paginateGenerationDetails, formatGenerationDetailTitle, formatGenerationPhaseText, generationToolRows, generationExecutionRemainder, formatGenerationPrimaryText, averageGenerationNetworkLatency } from "./generation-display.mjs";
 import { createGenerationToolRow } from "./generation-display.mjs";
 import { selectConversationNetworkLatency, formatNetworkLatencyText, formatConversationUsageSummary } from "./usage-display.mjs";
@@ -23,12 +23,12 @@ function installQuotaWidget(
   scrollbarEndPadding = calculateScrollbarEndPadding,
   features = WIDGET_FEATURES,
   styles = WIDGET_STYLES,
+  conversationUsageCacheLimit = MAX_CONVERSATION_USAGE_CACHE,
 ) {
   const GLOBAL_KEY = "__codexQuotaWidget";
   const ROOT_ID = "codex-quota-injector-root";
   const GLOBAL_STYLE_ID = "codex-quota-injector-global-style";
   const VERSION = runtimeVersion;
-  const MAX_CONVERSATION_USAGE_CACHE = 240;
   const CONVERSATION_TOOLTIP_DELAY_MS = 500;
   const ACCOUNT_TOOLTIP_DELAY_MS = 300;
   const CUSTOM_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -213,7 +213,7 @@ function installQuotaWidget(
   const { scheduleConversationTokenUsageRender, conversationSubagentLabel, mutationTouchesConversation } = features.conversation_usage({
     usageSummaryText,
     selectNetworkLatency,
-    MAX_CONVERSATION_USAGE_CACHE,
+    MAX_CONVERSATION_USAGE_CACHE: conversationUsageCacheLimit,
     state,
     showConversationTokenTooltip: (...args) => showConversationTokenTooltip(...args),
     scheduleConversationTokenTooltip,

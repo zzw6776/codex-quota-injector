@@ -1,4 +1,4 @@
-export { WIDGET_RUNTIME_VERSION } from "./widget/contract.mjs";
+export { MAX_CONVERSATION_USAGE_CACHE, WIDGET_RUNTIME_VERSION } from "./widget/contract.mjs";
 
 export { paginateGenerationDetails, formatGenerationDetailTitle, formatGenerationPhaseText, createGenerationToolRow, generationToolRows, generationExecutionRemainder, formatGenerationPrimaryText, averageGenerationNetworkLatency } from "./widget/generation-display.mjs";
 

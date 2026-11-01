@@ -1,3 +1,5 @@
-const WIDGET_RUNTIME_VERSION = 205;
+const WIDGET_RUNTIME_VERSION = 206;
+// The usage view can add one synthetic summary for each retained subagent turn.
+const MAX_CONVERSATION_USAGE_CACHE = 8_192;
 
-export { WIDGET_RUNTIME_VERSION };
+export { WIDGET_RUNTIME_VERSION, MAX_CONVERSATION_USAGE_CACHE };

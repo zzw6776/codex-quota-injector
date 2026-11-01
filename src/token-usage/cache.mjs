@@ -105,6 +105,7 @@ function normalizeCachedTurn(value, { generationMetricsCompatible = false } = {}
         }))
         .filter((pending) => pending.requestId && pending.toolTiming)
     : [];
+  turn.detailsCompacted = Boolean(value.detailsCompacted);
   turn.costRevision = positiveInteger(value.costRevision);
   turn.isSubagent = Boolean(value.isSubagent);
   turn.isSubagentSummary = false;
@@ -179,7 +180,30 @@ function normalizeCachedFileState(value) {
     parserVersion: positiveInteger(value.parserVersion),
     unknownModelChecked: Boolean(value.unknownModelChecked),
     unknownModelCheckOffset: positiveInteger(value.unknownModelCheckOffset),
+    summaryProjectionVersion: positiveInteger(value.summaryProjectionVersion),
     lastUsedAt: positiveNumber(value.lastUsedAt),
+  };
+}
+
+function normalizeCachedSummaryRollout(value) {
+  const threadId = nonEmptyString(value?.threadId);
+  const paths = Array.isArray(value?.paths)
+    ? [...new Set(value.paths.map(nonEmptyString).filter(Boolean))].sort()
+    : [];
+  if (!threadId || paths.length === 0) return null;
+  const isSubagent = Boolean(value.isSubagent);
+  const rootThreadId = nonEmptyString(value.rootThreadId) ??
+    (isSubagent ? null : threadId);
+  if (!rootThreadId) return null;
+  return {
+    threadId,
+    rootThreadId,
+    isSubagent,
+    parentThreadId: isSubagent ? nonEmptyString(value.parentThreadId) ?? "" : "",
+    agentPath: isSubagent ? String(value.agentPath ?? "") : "",
+    agentNickname: isSubagent ? String(value.agentNickname ?? "") : "",
+    agentDepth: isSubagent ? Math.max(1, positiveInteger(value.agentDepth)) : 0,
+    paths,
   };
 }
 
@@ -235,4 +259,4 @@ async function writeJsonAtomic(path, value) {
   }
 }
 
-export { normalizeCachedTurn, normalizeCachedFileState, normalizeCachedHistory, readJson, writeJsonAtomic };
+export { normalizeCachedTurn, normalizeCachedFileState, normalizeCachedSummaryRollout, normalizeCachedHistory, readJson, writeJsonAtomic };

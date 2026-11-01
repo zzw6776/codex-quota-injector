@@ -1,6 +1,6 @@
 import { projectToolExecutions } from "../tool-executions.mjs";
 import { TOKEN_FIELDS, toCamelCase, positiveNumber, positiveInteger, nonEmptyString } from "./contract.mjs";
-import { emptyTurn, mergeUsageSegment, calculateTurnCost } from "./turns.mjs";
+import { emptyTurn, turnBelongsToThread, mergeUsageSegment, calculateTurnCost } from "./turns.mjs";
 import { normalizeNetworkLatency, calculateOutputSpeed } from "./generation.mjs";
 
 function buildDisplayTurns(turns, summaryGroups) {
@@ -32,6 +32,41 @@ function publicGenerationDetails(details, ledger) {
   });
 }
 
+function lightweightPublicTurn(turn) {
+  return {
+    turnId: turn.turnId,
+    threadId: turn.threadId,
+    isSubagent: Boolean(turn.isSubagent),
+    isSubagentSummary: Boolean(turn.isSubagentSummary),
+    rootThreadId: turn.rootThreadId,
+    parentThreadId: turn.parentThreadId,
+    parentTurnId: turn.parentTurnId,
+    agentPath: turn.agentPath,
+    agentNickname: turn.agentNickname,
+    agentDepth: positiveInteger(turn.agentDepth),
+    completed: Boolean(turn.completed),
+    status: turn.status,
+    inputTokens: positiveNumber(turn.inputTokens),
+    cachedInputTokens: positiveNumber(turn.cachedInputTokens),
+    cacheWriteInputTokens: positiveNumber(turn.cacheWriteInputTokens),
+    outputTokens: positiveNumber(turn.outputTokens),
+    reasoningOutputTokens: positiveNumber(turn.reasoningOutputTokens),
+    totalTokens: positiveNumber(turn.totalTokens),
+    cumulativeTotalTokens: positiveNumber(turn.cumulativeTotalTokens),
+    modelContextWindow: positiveNumber(turn.modelContextWindow),
+    model: turn.model,
+    firstTokenLatencyMs: positiveNumber(turn.firstTokenLatencyMs) || null,
+    outputSpeed: positiveNumber(turn.outputSpeed) || null,
+    networkLatencySupported: Boolean(turn.networkLatencySupported),
+    networkConnectionId: turn.networkConnectionId,
+    networkLatency: normalizeNetworkLatency(turn.networkLatency),
+    generationDetails: [],
+    detailsAvailable: false,
+    startedAt: positiveNumber(turn.startedAt),
+    updatedAt: positiveNumber(turn.updatedAt),
+  };
+}
+
 function summarizeSubagentTurns(turns, { includeDetails = true } = {}) {
   const ordered = [...turns].sort((left, right) =>
     positiveNumber(left.startedAt) - positiveNumber(right.startedAt) ||
@@ -45,6 +80,7 @@ function summarizeSubagentTurns(turns, { includeDetails = true } = {}) {
   summary.taskKey = summary.turnId;
   summary.isSubagent = true;
   summary.isSubagentSummary = true;
+  summary.rootThreadId = first.rootThreadId;
   summary.parentThreadId = first.parentThreadId;
   summary.parentTurnId = first.parentTurnId;
   summary.agentPath = first.agentPath;
@@ -122,7 +158,7 @@ function summarizeSubagentTurns(turns, { includeDetails = true } = {}) {
   return summary;
 }
 
-function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, turns, pricingManager, rolloutMetadataByThread, maxViewTurns, initializing, error, getCachedTurnCost }) {
+function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, turns, pricingManager, rolloutMetadataByThread, maxViewTurns, viewThreadId = null, initializing, error, getCachedTurnCost }) {
     const cumulativeCosts = new Map();
     for (const [threadId, history] of historicalSegmentsByThread) {
       const revision = positiveInteger(history.costRevision);
@@ -154,10 +190,16 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
     // Cost totals still traverse the complete working set, but heavyweight
     // generation/tool projections are created only for rows the widget can
     // actually expose.
-    const visibleTurns = new Set([
+    const detailedTurns = new Set([
       ...orderedTurns.filter((turn) => turn.completed).slice(-maxViewTurns),
       ...orderedTurns.filter((turn) => !turn.completed).slice(-maxViewTurns),
     ]);
+    const visibleTurns = new Set(detailedTurns);
+    if (viewThreadId) {
+      for (const turn of orderedTurns) {
+        if (turnBelongsToThread(turn, viewThreadId)) visibleTurns.add(turn);
+      }
+    }
     const mappedTurns = [];
     for (const turn of orderedTurns) {
       const hasUsage = turn.totalTokens > 0;
@@ -171,35 +213,49 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
       else if ((hasUsage && !cost.available) || turn.completed) taskCost.pendingTurns += 1;
       cumulativeCosts.set(turn.taskKey, taskCost);
       if (!visibleTurns.has(turn)) continue;
+      const includeDetails = detailedTurns.has(turn) && !turn.detailsCompacted;
       const visibleTurn = turn.isSubagentSummary
-        ? summarizeSubagentTurns(summaryGroups.get(turn.turnId) ?? [], { includeDetails: true })
+        ? summarizeSubagentTurns(summaryGroups.get(turn.turnId) ?? [], { includeDetails })
         : turn;
-      const {
-        taskKey: _taskKey,
-        source: _source,
-        modelSource: _modelSource,
-        segments: _segments,
-        rolloutPath: _rolloutPath,
-        rolloutUsageFallback: _rolloutUsageFallback,
-        rolloutParserVersion: _rolloutParserVersion,
-        rolloutTokenCountTotalTokens: _rolloutTokenCountTotalTokens,
-        responseCumulativeTotalTokens: _responseCumulativeTotalTokens,
-        usageResponseIds: _usageResponseIds,
-        generationMetricsVersion: _generationMetricsVersion,
-        generationMetricsEnabled: _generationMetricsEnabled,
-        firstTokenLatencyTotalMs: _firstTokenLatencyTotalMs,
-        firstTokenLatencySamples: _firstTokenLatencySamples,
-        outputGenerationDurationMs: _outputGenerationDurationMs,
-        outputGenerationTokens: _outputGenerationTokens,
-        pendingGenerationSamples: _pendingGenerationSamples,
-        pendingGenerationUsages: _pendingGenerationUsages,
-        pendingToolTimings: _pendingToolTimings,
-        costRevision: _costRevision,
-        ...publicTurn
-      } = visibleTurn;
+      let publicTurn;
+      if (includeDetails) {
+        const {
+          taskKey: _taskKey,
+          source: _source,
+          modelSource: _modelSource,
+          segments: _segments,
+          rolloutPath: _rolloutPath,
+          rolloutUsageFallback: _rolloutUsageFallback,
+          rolloutParserVersion: _rolloutParserVersion,
+          rolloutTokenCountTotalTokens: _rolloutTokenCountTotalTokens,
+          responseCumulativeTotalTokens: _responseCumulativeTotalTokens,
+          usageResponseIds: _usageResponseIds,
+          generationMetricsVersion: _generationMetricsVersion,
+          generationMetricsEnabled: _generationMetricsEnabled,
+          firstTokenLatencyTotalMs: _firstTokenLatencyTotalMs,
+          firstTokenLatencySamples: _firstTokenLatencySamples,
+          outputGenerationDurationMs: _outputGenerationDurationMs,
+          outputGenerationTokens: _outputGenerationTokens,
+          pendingGenerationSamples: _pendingGenerationSamples,
+          pendingGenerationUsages: _pendingGenerationUsages,
+          pendingToolTimings: _pendingToolTimings,
+          detailsCompacted: _detailsCompacted,
+          costRevision: _costRevision,
+          ...detailedPublicTurn
+        } = visibleTurn;
+        publicTurn = {
+          ...detailedPublicTurn,
+          detailsAvailable: true,
+          generationDetails: publicGenerationDetails(
+            detailedPublicTurn.generationDetails,
+            detailedPublicTurn.toolExecutionLedger,
+          ),
+        };
+      } else {
+        publicTurn = lightweightPublicTurn(visibleTurn);
+      }
       mappedTurns.push({
         ...publicTurn,
-        generationDetails: publicGenerationDetails(publicTurn.generationDetails, publicTurn.toolExecutionLedger),
         cost: {
           ...cost,
           cumulativeAvailable: taskCost.pendingTurns === 0,

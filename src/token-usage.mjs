@@ -4,12 +4,12 @@ import { basename, dirname, join } from "node:path";
 import { defaultAccountDataDir } from "./platform.mjs";
 import { TokenPricingManager } from "./token-pricing.mjs";
 import { createToolExecutionLedger } from "./tool-executions.mjs";
-import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
+import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_STORED_TURN_SUMMARIES, TURN_SUMMARY_PROJECTION_VERSION, SUMMARY_ROLLOUT_INDEX_VERSION, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
 import { RolloutWorkerClient } from "./token-usage/rollout-worker.mjs";
 import { buildUsageViewModel } from "./token-usage/display.mjs";
 import { applySubagentMetadata } from "./token-usage/subagents.mjs";
-import { turnHasUnknownModel, calculateTurnCost, mergeUsageSegment, compactUsageSegments } from "./token-usage/turns.mjs";
-import { normalizeCachedTurn, normalizeCachedFileState, normalizeCachedHistory, readJson, writeJsonAtomic } from "./token-usage/cache.mjs";
+import { turnBelongsToThread, turnHasUnknownModel, calculateTurnCost, mergeUsageSegment, compactUsageSegments } from "./token-usage/turns.mjs";
+import { normalizeCachedTurn, normalizeCachedFileState, normalizeCachedSummaryRollout, normalizeCachedHistory, readJson, writeJsonAtomic } from "./token-usage/cache.mjs";
 import { readAppendedChunks, refreshRolloutCatalogFiles } from "./token-usage/rollout-files.mjs";
 import { processRolloutRecord } from "./token-usage/rollout-records.mjs";
 import { processTurnUsageEvent } from "./token-usage/usage-events.mjs";
@@ -35,12 +35,35 @@ function normalizedTurnState(value) {
   };
 }
 
+function sameSummaryRollout(left, right) {
+  if (!left || !right) return false;
+  return left.threadId === right.threadId &&
+    left.rootThreadId === right.rootThreadId &&
+    left.isSubagent === right.isSubagent &&
+    left.parentThreadId === right.parentThreadId &&
+    left.agentPath === right.agentPath &&
+    left.agentNickname === right.agentNickname &&
+    left.agentDepth === right.agentDepth &&
+    left.paths.length === right.paths.length &&
+    left.paths.every((path, index) => path === right.paths[index]);
+}
+
+function sameSummaryRolloutMap(left, right) {
+  if (left.size !== right.size) return false;
+  for (const [threadId, value] of left) {
+    if (!sameSummaryRollout(value, right.get(threadId))) return false;
+  }
+  return true;
+}
+
 export class TokenUsageManager {
   constructor({
     codexHome = resolveCodexHome(),
     dataDir = defaultAccountDataDir(),
     discoveryIntervalMs = DISCOVERY_INTERVAL_MS,
     maxViewTurns = MAX_VIEW_TURNS,
+    maxStoredTurns = MAX_STORED_TURNS,
+    maxStoredTurnSummaries = MAX_STORED_TURN_SUMMARIES,
     pricingManager = new TokenPricingManager(),
     watchEvents = true,
     refreshPricing = true,
@@ -50,7 +73,11 @@ export class TokenUsageManager {
     this.cachePath = join(dataDir, "token-usage-cache.json");
     this.discoveryIntervalMs = discoveryIntervalMs;
     this.maxViewTurns = Math.max(1, positiveInteger(maxViewTurns) || MAX_VIEW_TURNS);
-    this.maxStoredTurns = Math.max(MAX_STORED_TURNS, this.maxViewTurns * 2);
+    this.maxStoredTurns = Math.max(1, positiveInteger(maxStoredTurns) || MAX_STORED_TURNS);
+    this.maxStoredTurnSummaries = Math.max(
+      this.maxStoredTurns,
+      positiveInteger(maxStoredTurnSummaries) || MAX_STORED_TURN_SUMMARIES,
+    );
     this.pricingManager = pricingManager;
     this.watchEvents = Boolean(watchEvents);
     this.refreshPricing = Boolean(refreshPricing);
@@ -62,6 +89,7 @@ export class TokenUsageManager {
     this.historicalSegmentsByThread = new Map();
     this.historicalCostCache = new Map();
     this.activeThreadId = null;
+    this.viewThreadId = null;
     this.activeThreadHint = false;
     this.activeThreadHintAt = 0;
     this.rolloutFallbackThreads = new Map();
@@ -69,6 +97,8 @@ export class TokenUsageManager {
     this.rolloutPathsByThread = new Map();
     this.rolloutMetadataByPath = new Map();
     this.rolloutMetadataByThread = new Map();
+    this.summaryRolloutsByThread = new Map();
+    this.summaryRolloutIndexComplete = false;
     this.rolloutReconcileRequested = false;
     this.rolloutReconcilePromise = null;
     this.rolloutReadPromises = new Map();
@@ -108,7 +138,7 @@ export class TokenUsageManager {
     return () => this.changeListeners.delete(listener);
   }
 
-  initialize({ forceDiscovery = true, rolloutPaths = [] } = {}) {
+  initialize({ forceDiscovery = true, rolloutPaths = [], viewThreadId = null } = {}) {
     if (this.initializationPromise) return this.initializationPromise;
     this.initializing = true;
     const task = (async () => {
@@ -130,6 +160,7 @@ export class TokenUsageManager {
         forceDiscovery,
         skipDiscovery: !forceDiscovery,
         rolloutPaths,
+        viewThreadId,
       });
       this.initialized = true;
       const viewModel = this.getViewModel();
@@ -151,7 +182,7 @@ export class TokenUsageManager {
     return task;
   }
 
-  async refresh({ forceDiscovery = false, notify = false, rolloutPaths = [] } = {}) {
+  async refresh({ forceDiscovery = false, notify = false, rolloutPaths = [], viewThreadId = this.viewThreadId } = {}) {
     if (this.closed) return this.getViewModel();
     if (this.initializing) {
       const viewModel = await this.initializationPromise;
@@ -163,7 +194,7 @@ export class TokenUsageManager {
       if (notify) this.#notifyChange(viewModel);
       return viewModel;
     }
-    const task = this.#refreshOnce({ forceDiscovery, rolloutPaths })
+    const task = this.#refreshOnce({ forceDiscovery, rolloutPaths, viewThreadId })
       .catch((error) => {
         this.error = error.message;
         this.#invalidateViewModel();
@@ -190,6 +221,7 @@ export class TokenUsageManager {
       pricingManager: this.pricingManager,
       rolloutMetadataByThread: this.rolloutMetadataByThread,
       maxViewTurns: this.maxViewTurns,
+      viewThreadId: this.viewThreadId,
       initializing: this.initializing,
       error: this.error,
       getCachedTurnCost: turn => this.#getCachedTurnCost(turn),
@@ -316,8 +348,18 @@ export class TokenUsageManager {
     }
   }
 
-  async #refreshOnce({ forceDiscovery, skipDiscovery = false, rolloutPaths = [] }) {
+  async #refreshOnce({
+    forceDiscovery,
+    skipDiscovery = false,
+    rolloutPaths = [],
+    viewThreadId = this.viewThreadId,
+  }) {
     const revision = this.cacheRevision;
+    const normalizedViewThreadId = nonEmptyString(viewThreadId);
+    if (normalizedViewThreadId !== this.viewThreadId) {
+      this.viewThreadId = normalizedViewThreadId;
+      this.#invalidateViewModel();
+    }
     this.#startEventWatcher();
     // Exchange-rate refresh is deliberately detached from usage parsing. A
     // cached rate is sufficient for the current view; the pricing listener
@@ -329,21 +371,56 @@ export class TokenUsageManager {
     }
     await this.#readUsageEvents();
     const now = Date.now();
+    let catalogRefreshed = false;
     if (forceDiscovery || (!skipDiscovery &&
       now - this.lastDiscoveryAt >= this.discoveryIntervalMs)) {
       await this.#refreshRolloutCatalog();
       this.lastDiscoveryAt = now;
+      catalogRefreshed = true;
+    }
+    const summaryProjectionThreads = new Set();
+    const preloadedRolloutStates = new Map();
+    if (this.viewThreadId) {
+      // Cache versions before the summary-rollout index need one migration
+      // discovery. Once the compact index exists, changing the visible
+      // conversation must never enumerate all historical rollout files.
+      if (!catalogRefreshed && !this.summaryRolloutIndexComplete) {
+        await this.#refreshRolloutCatalog();
+        this.lastDiscoveryAt = now;
+        catalogRefreshed = true;
+      }
+      summaryProjectionThreads.add(this.viewThreadId);
+      const viewStates = this.rolloutPathsByThread.has(this.viewThreadId)
+        ? await this.#ensureRolloutStates(this.viewThreadId, { discover: false })
+        : [];
+      preloadedRolloutStates.set(this.viewThreadId, viewStates);
+      for (const summaryRollout of this.summaryRolloutsByThread.values()) {
+        if (!summaryRollout.isSubagent ||
+          summaryRollout.rootThreadId !== this.viewThreadId) continue;
+        if (this.#summaryProjectionIncomplete(summaryRollout.threadId)) {
+          summaryProjectionThreads.add(summaryRollout.threadId);
+        }
+      }
     }
     const rolloutThreadIds = new Set(this.rolloutFallbackThreads.keys());
     for (const threadId of this.recentRolloutThreads) rolloutThreadIds.add(threadId);
     if (this.activeThreadId) rolloutThreadIds.add(this.activeThreadId);
+    for (const threadId of summaryProjectionThreads) rolloutThreadIds.add(threadId);
     for (const path of rolloutPaths) {
       const threadId = this.fileStates.get(path)?.threadId;
       if (threadId) rolloutThreadIds.add(threadId);
     }
     for (const threadId of rolloutThreadIds) {
-      const states = await this.#ensureRolloutStates(threadId);
-      for (const state of states) await this.#readAppendedRollout(state);
+      const states = preloadedRolloutStates.has(threadId)
+        ? preloadedRolloutStates.get(threadId)
+        : await this.#ensureRolloutStates(threadId);
+      for (const state of states) {
+        if (summaryProjectionThreads.has(threadId) &&
+          state.summaryProjectionVersion < TURN_SUMMARY_PROJECTION_VERSION) {
+          state.modelReconciled = false;
+        }
+        await this.#readAppendedRollout(state);
+      }
       const latestState = states.at(-1);
       const currentTurn = latestState?.currentTurnId
         ? this.turns.get(latestState.currentTurnId)
@@ -406,7 +483,25 @@ export class TokenUsageManager {
         this.rolloutFallbackThreads.set(state.threadId, state.lastUsedAt || Date.now());
       }
     }
-    for (const paths of this.rolloutPathsByThread.values()) paths.sort();
+    if (cachedVersion >= CACHE_VERSION &&
+      positiveInteger(cached.summaryRolloutIndexVersion) >= SUMMARY_ROLLOUT_INDEX_VERSION) {
+      for (const value of Array.isArray(cached.summaryRollouts)
+        ? cached.summaryRollouts
+        : []) {
+        const summaryRollout = normalizeCachedSummaryRollout(value);
+        if (!summaryRollout) continue;
+        this.summaryRolloutsByThread.set(summaryRollout.threadId, summaryRollout);
+        const { paths, ...metadata } = summaryRollout;
+        this.rolloutMetadataByThread.set(summaryRollout.threadId, metadata);
+        const knownPaths = this.rolloutPathsByThread.get(summaryRollout.threadId) ?? [];
+        knownPaths.push(...paths);
+        this.rolloutPathsByThread.set(summaryRollout.threadId, knownPaths);
+      }
+      this.summaryRolloutIndexComplete = true;
+    }
+    for (const [threadId, paths] of this.rolloutPathsByThread) {
+      this.rolloutPathsByThread.set(threadId, [...new Set(paths)].sort());
+    }
     if (this.fileStates.size > MAX_TRACKED_ROLLOUT_STATES) {
       this.#pruneRolloutStates(null);
       this.#markCacheDirty();
@@ -418,7 +513,9 @@ export class TokenUsageManager {
       if (history) this.historicalSegmentsByThread.set(history.threadId, history);
     }
     if (this.#pruneHistoricalThreads()) this.#markCacheDirty();
-    if (cachedVersion !== CACHE_VERSION) this.#markCacheDirty();
+    if (cachedVersion !== CACHE_VERSION || !this.summaryRolloutIndexComplete) {
+      this.#markCacheDirty();
+    }
     this.#invalidateViewModel();
   }
 
@@ -432,6 +529,7 @@ export class TokenUsageManager {
     this.historicalCostCache.clear();
     this.turnCostCache.clear();
     this.activeThreadId = null;
+    this.viewThreadId = null;
     this.activeThreadHint = false;
     this.activeThreadHintAt = 0;
     this.rolloutFallbackThreads.clear();
@@ -439,6 +537,8 @@ export class TokenUsageManager {
     this.rolloutPathsByThread.clear();
     this.rolloutMetadataByPath.clear();
     this.rolloutMetadataByThread.clear();
+    this.summaryRolloutsByThread.clear();
+    this.summaryRolloutIndexComplete = false;
     this.#markCacheDirty();
     this.#invalidateViewModel();
   }
@@ -529,6 +629,10 @@ export class TokenUsageManager {
       activeThreadId: this.activeThreadId,
       activeThreadHint: this.activeThreadHint,
       activeThreadHintAt: this.activeThreadHintAt,
+      summaryRolloutIndexVersion: this.summaryRolloutIndexComplete
+        ? SUMMARY_ROLLOUT_INDEX_VERSION
+        : 0,
+      summaryRollouts: [...this.summaryRolloutsByThread.values()],
       fileStates: [...this.fileStates.values()],
       historicalSegmentsByThread: [...this.historicalSegmentsByThread.values()],
       turnStates: [...this.turnStates.values()],
@@ -630,6 +734,7 @@ export class TokenUsageManager {
       this.#markCacheDirty();
       this.#invalidateViewModel();
     }
+    this.#rebuildSummaryRolloutIndex();
     for (const [path] of this.fileStates) {
       if (!discoveredPaths.has(path)) {
         this.fileStates.delete(path);
@@ -666,10 +771,77 @@ export class TokenUsageManager {
     return applySubagentMetadata({ rolloutMetadataByThread: this.rolloutMetadataByThread, turns: this.turns, loggedSubagentModelTransitions: this.loggedSubagentModelTransitions });
   }
 
-  async #ensureRolloutStates(threadId) {
+  #summaryRolloutFromCatalog(threadId) {
+    const paths = this.rolloutPathsByThread.get(threadId);
+    if (!Array.isArray(paths) || paths.length === 0) return null;
+    const metadata = this.rolloutMetadataByThread.get(threadId) ?? {
+      threadId,
+      rootThreadId: threadId,
+      isSubagent: false,
+    };
+    return normalizeCachedSummaryRollout({ ...metadata, paths });
+  }
+
+  #rememberSummaryRollout(threadId) {
+    let currentThreadId = nonEmptyString(threadId);
+    const visited = new Set();
+    let changed = false;
+    while (currentThreadId && !visited.has(currentThreadId)) {
+      visited.add(currentThreadId);
+      const summaryRollout = this.#summaryRolloutFromCatalog(currentThreadId);
+      if (!summaryRollout) break;
+      if (!sameSummaryRollout(
+        summaryRollout,
+        this.summaryRolloutsByThread.get(currentThreadId),
+      )) {
+        this.summaryRolloutsByThread.set(currentThreadId, summaryRollout);
+        changed = true;
+      }
+      currentThreadId = summaryRollout.isSubagent
+        ? nonEmptyString(summaryRollout.parentThreadId)
+        : null;
+    }
+    return changed;
+  }
+
+  #rebuildSummaryRolloutIndex() {
+    const next = new Map();
+    const pending = [
+      ...this.historicalSegmentsByThread.keys(),
+      ...[...this.summaryRolloutsByThread.keys()]
+        .filter((threadId) => this.#summaryProjectionIncomplete(threadId)),
+    ];
+    const visited = new Set();
+    while (pending.length > 0) {
+      const threadId = nonEmptyString(pending.pop());
+      if (!threadId || visited.has(threadId)) continue;
+      visited.add(threadId);
+      const summaryRollout = this.#summaryRolloutFromCatalog(threadId);
+      if (!summaryRollout) continue;
+      next.set(threadId, summaryRollout);
+      if (summaryRollout.isSubagent && summaryRollout.parentThreadId) {
+        pending.push(summaryRollout.parentThreadId);
+      }
+    }
+    const changed = !this.summaryRolloutIndexComplete ||
+      !sameSummaryRolloutMap(this.summaryRolloutsByThread, next);
+    this.summaryRolloutsByThread = next;
+    this.summaryRolloutIndexComplete = true;
+    if (changed) this.#markCacheDirty();
+  }
+
+  #summaryProjectionIncomplete(threadId) {
+    const paths = this.rolloutPathsByThread.get(threadId);
+    return Array.isArray(paths) && paths.some((path) => {
+      const state = this.fileStates.get(path);
+      return !state || state.summaryProjectionVersion < TURN_SUMMARY_PROJECTION_VERSION;
+    });
+  }
+
+  async #ensureRolloutStates(threadId, { discover = true } = {}) {
     if (!threadId) return [];
     let paths = this.rolloutPathsByThread.get(threadId);
-    if (!paths) {
+    if (!paths && discover) {
       await this.#refreshRolloutCatalog();
       paths = this.rolloutPathsByThread.get(threadId);
     }
@@ -691,6 +863,7 @@ export class TokenUsageManager {
           parserVersion: 0,
           unknownModelChecked: false,
           unknownModelCheckOffset: 0,
+          summaryProjectionVersion: 0,
           lastUsedAt: Date.now(),
         };
         this.fileStates.set(path, state);
@@ -731,6 +904,7 @@ export class TokenUsageManager {
       threadModel: state.threadModel,
       modelReconciled: state.modelReconciled,
       parserVersion: state.parserVersion,
+      summaryProjectionVersion: state.summaryProjectionVersion,
     };
     if (reconcile) {
       this.#clearRolloutTurns(state.threadId, {
@@ -796,13 +970,15 @@ export class TokenUsageManager {
     if (reconcile || result.reset) {
       state.modelReconciled = true;
       state.parserVersion = ROLLOUT_PARSER_VERSION;
+      state.summaryProjectionVersion = TURN_SUMMARY_PROJECTION_VERSION;
     }
     const stateChanged = previousState.offset !== state.offset ||
       previousState.pending !== state.pending ||
       previousState.currentTurnId !== state.currentTurnId ||
       previousState.threadModel !== state.threadModel ||
       previousState.modelReconciled !== state.modelReconciled ||
-      previousState.parserVersion !== state.parserVersion;
+      previousState.parserVersion !== state.parserVersion ||
+      previousState.summaryProjectionVersion !== state.summaryProjectionVersion;
     if (stateChanged) this.#markCacheDirty();
     if (stateChanged) this.#invalidateViewModel();
   }
@@ -816,8 +992,10 @@ export class TokenUsageManager {
       threadModel: state.threadModel,
       modelReconciled: state.modelReconciled,
       parserVersion: state.parserVersion,
+      summaryProjectionVersion: state.summaryProjectionVersion,
     };
     let info;
+    let reset = false;
     try {
       info = await stat(state.path);
     } catch (error) {
@@ -850,6 +1028,7 @@ export class TokenUsageManager {
       state.threadModel = null;
       state.pendingUsageRecords = [];
       state.modelReconciled = false;
+      reset = true;
     }
     await readAppendedChunks(state.path, state, (line) => {
       if (!line) return;
@@ -861,16 +1040,18 @@ export class TokenUsageManager {
       }
       this.#processRolloutRecord(record, state);
     });
-    if (reconcile) {
+    if (reconcile || reset) {
       state.modelReconciled = true;
       state.parserVersion = ROLLOUT_PARSER_VERSION;
+      state.summaryProjectionVersion = TURN_SUMMARY_PROJECTION_VERSION;
     }
     const stateChanged = previousState.offset !== state.offset ||
       previousState.pending !== state.pending ||
       previousState.currentTurnId !== state.currentTurnId ||
       previousState.threadModel !== state.threadModel ||
       previousState.modelReconciled !== state.modelReconciled ||
-      previousState.parserVersion !== state.parserVersion;
+      previousState.parserVersion !== state.parserVersion ||
+      previousState.summaryProjectionVersion !== state.summaryProjectionVersion;
     if (stateChanged) this.#markCacheDirty();
     if (stateChanged || this.cacheRevision !== previousCacheRevision) {
       this.#invalidateViewModel();
@@ -904,6 +1085,7 @@ export class TokenUsageManager {
     const removable = [...this.fileStates.entries()]
       .filter(([path, state]) => state.threadId !== protectedThreadId &&
         state.threadId !== this.activeThreadId &&
+        state.threadId !== this.viewThreadId &&
         !this.rolloutFallbackThreads.has(state.threadId) &&
         !this.recentRolloutThreads.has(state.threadId) &&
         !this.rolloutReadPromises.has(path))
@@ -916,14 +1098,53 @@ export class TokenUsageManager {
   }
 
   #pruneCompletedTurns() {
-    if (this.turns.size <= this.maxStoredTurns) return;
+    let changed = false;
+    for (const turn of this.turns.values()) {
+      if (!turn.detailsCompacted) continue;
+      const ledger = turn.toolExecutionLedger;
+      const restoredDetails =
+        turn.generationDetails.length > 0 ||
+        (ledger?.calls?.length ?? 0) > 0 ||
+        (ledger?.items?.length ?? 0) > 0 ||
+        turn.pendingGenerationSamples.length > 0 ||
+        turn.pendingGenerationUsages.length > 0 ||
+        turn.pendingToolTimings.length > 0;
+      if (!restoredDetails) continue;
+      turn.generationDetails = [];
+      turn.toolExecutionLedger = createToolExecutionLedger();
+      turn.pendingGenerationSamples = [];
+      turn.pendingGenerationUsages = [];
+      turn.pendingToolTimings = [];
+      changed = true;
+    }
+
+    const detailedTurns = [...this.turns.values()]
+      .filter((turn) => !turn.detailsCompacted)
+      .sort((left, right) => left.updatedAt - right.updatedAt);
+    let detailsToCompact = Math.max(0, detailedTurns.length - this.maxStoredTurns);
+    for (const turn of detailedTurns) {
+      if (detailsToCompact <= 0) break;
+      if (!turn.completed) continue;
+      turn.generationDetails = [];
+      turn.toolExecutionLedger = createToolExecutionLedger();
+      turn.pendingGenerationSamples = [];
+      turn.pendingGenerationUsages = [];
+      turn.pendingToolTimings = [];
+      turn.detailsCompacted = true;
+      detailsToCompact -= 1;
+      changed = true;
+    }
+
+    const summariesToArchive = Math.max(0, this.turns.size - this.maxStoredTurnSummaries);
     const removable = [...this.turns.values()]
       .filter((turn) => turn.completed)
-      .sort((left, right) => left.updatedAt - right.updatedAt);
-    const target = this.turns.size - this.maxStoredTurns;
-    let pruned = 0;
+      .sort((left, right) =>
+        Number(turnBelongsToThread(left, this.viewThreadId)) -
+          Number(turnBelongsToThread(right, this.viewThreadId)) ||
+        left.updatedAt - right.updatedAt);
+    let archived = 0;
     for (const turn of removable) {
-      if (pruned >= target) break;
+      if (archived >= summariesToArchive) break;
       if (turn.totalTokens > 0) {
         const cost = calculateTurnCost(turn, this.pricingManager);
         let history = this.historicalSegmentsByThread.get(turn.taskKey);
@@ -949,12 +1170,17 @@ export class TokenUsageManager {
         history.updatedAt = Date.now();
         this.historicalCostCache.delete(turn.taskKey);
       }
+      if (this.#rememberSummaryRollout(turn.threadId)) changed = true;
       this.turns.delete(turn.turnId);
       this.turnCostCache.delete(turn.turnId);
-      pruned += 1;
+      for (const state of this.fileStates.values()) {
+        if (state.threadId === turn.threadId) state.summaryProjectionVersion = 0;
+      }
+      archived += 1;
+      changed = true;
     }
     const historiesPruned = this.#pruneHistoricalThreads();
-    if (pruned > 0 || historiesPruned) {
+    if (changed || historiesPruned) {
       this.#markCacheDirty();
       this.#invalidateViewModel();
     }

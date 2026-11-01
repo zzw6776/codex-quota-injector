@@ -88,6 +88,7 @@ class TokenUsageProcessClient {
     this.pricingManager = pricingManager;
 
     this.viewModel = { status: "loading", error: null, turns: [] };
+    this.viewThreadId = null;
     this.turns = new Map();
     this.turnSignatures = new Map();
     this.turnStates = new Map();
@@ -180,6 +181,16 @@ class TokenUsageProcessClient {
 
   getViewModel() {
     return this.viewModel;
+  }
+
+  setViewThread(threadId) {
+    const normalized = String(threadId ?? "").trim() || null;
+    if (normalized === this.viewThreadId) return false;
+    this.viewThreadId = normalized;
+    if (!this.closed && (this.initialized || this.initializationPromise)) {
+      this.#scheduleRefresh({ notify: true, forceProcess: true });
+    }
+    return true;
   }
 
   getTurnStateViewModel(threadId) {
@@ -435,6 +446,7 @@ class TokenUsageProcessClient {
       action,
       forceDiscovery,
       rolloutPaths,
+      viewThreadId: this.viewThreadId,
       turnSignatures: [...this.turnSignatures],
       stateSignatures: [...this.stateSignatures],
     });

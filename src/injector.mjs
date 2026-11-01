@@ -802,6 +802,10 @@ export async function runInjector({
     }
     try {
       await hostHealthSession.syncHostHealth();
+      const visibleTask = hostHealthSession.selectedTask;
+      tokenUsageManager.setViewThread?.(
+        visibleTask?.hostId === "local" ? visibleTask.threadId : null,
+      );
       syncAsyncAccountOperation();
       debugLog(`[DEBUG] loop#${_loopCount} calling connectAndInject...`);
       const injected = await connectAndInject();

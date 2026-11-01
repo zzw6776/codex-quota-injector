@@ -65,6 +65,65 @@ test("用量视图不展开窗口外回合的生成与工具明细", () => {
   });
   assert.equal(view.turns.length, 120);
   assert.equal(view.turns.some((turn) => turn.turnId === "turn-0"), false);
+
+  const focused = buildUsageViewModel({
+    historicalSegmentsByThread: new Map(),
+    historicalCostCache: new Map(),
+    turns,
+    pricingManager: { toViewModel: () => ({ available: false, totalCny: 0 }) },
+    rolloutMetadataByThread: new Map(),
+    maxViewTurns: 120,
+    viewThreadId: "thread-0",
+    initializing: false,
+    error: null,
+    getCachedTurnCost: () => null,
+  });
+  const historical = focused.turns.find((turn) => turn.turnId === "turn-0");
+  assert.ok(historical, "当前页面会话必须保留窗口外的逐回合摘要");
+  assert.equal(historical.detailsAvailable, false);
+  assert.deepEqual(historical.generationDetails, []);
+});
+
+test("根会话保留窗口外的嵌套子智能体摘要", () => {
+  const turns = new Map();
+  const nested = emptyTurn("nested-turn", "grandchild-thread", "event");
+  Object.assign(nested, {
+    isSubagent: true,
+    rootThreadId: "root-thread",
+    parentThreadId: "child-thread",
+    parentTurnId: "root-turn",
+    agentDepth: 2,
+    completed: true,
+    status: "completed",
+    totalTokens: 5,
+    updatedAt: 1,
+  });
+  turns.set(nested.turnId, nested);
+  for (let index = 0; index < 121; index += 1) {
+    const turn = emptyTurn(`newer-turn-${index}`, `newer-thread-${index}`, "event");
+    turn.completed = true;
+    turn.status = "completed";
+    turn.totalTokens = 1;
+    turn.updatedAt = index + 2;
+    turns.set(turn.turnId, turn);
+  }
+  const view = buildUsageViewModel({
+    historicalSegmentsByThread: new Map(),
+    historicalCostCache: new Map(),
+    turns,
+    pricingManager: { toViewModel: () => ({ available: false, totalCny: 0 }) },
+    rolloutMetadataByThread: new Map(),
+    maxViewTurns: 120,
+    viewThreadId: "root-thread",
+    initializing: false,
+    error: null,
+    getCachedTurnCost: () => null,
+  });
+  const summary = view.turns.find((turn) => turn.isSubagentSummary);
+  assert.ok(summary);
+  assert.equal(summary.rootThreadId, "root-thread");
+  assert.equal(summary.parentTurnId, "root-turn");
+  assert.equal(summary.detailsAvailable, false);
 });
 
 test("独立统计进程不重复刷新由父进程维护的汇率", async (t) => {
@@ -100,20 +159,96 @@ test("flush 会处理延迟补全并清除补全期间重新安排的落盘计�
   assert.equal(manager.cachePersistTimer, null);
 });
 
-test("完整回合工作集超过界面缓冲后压缩最旧历史", async t => {
-  const { manager } = await createManager(t);
-  for (let index = 0; index < 513; index += 1) {
+test("完整回合超过明细缓冲后只压缩重型详情，超过摘要缓冲才归档", async t => {
+  const { manager } = await createManager(t, { managerOptions: {
+    maxViewTurns: 1,
+    maxStoredTurns: 2,
+    maxStoredTurnSummaries: 4,
+  } });
+  for (let index = 0; index < 3; index += 1) {
     const turn = emptyTurn(`turn-${index}`, `thread-${index}`, "event");
     turn.completed = true;
     turn.status = "completed";
     turn.totalTokens = 1;
     turn.updatedAt = index + 1;
+    turn.generationDetails = [{ responseId: `response-${index}` }];
+    turn.toolExecutionLedger.calls.push({ id: `call-${index}` });
     manager.turns.set(turn.turnId, turn);
   }
   await manager.refresh();
-  assert.equal(manager.turns.size, 512);
-  assert.equal(manager.turns.has("turn-0"), false);
-  assert.equal(manager.historicalSegmentsByThread.has("thread-0"), true);
+  assert.equal(manager.turns.size, 3);
+  assert.equal(manager.turns.get("turn-0").detailsCompacted, true);
+  assert.deepEqual(manager.turns.get("turn-0").generationDetails, []);
+  assert.equal(manager.historicalSegmentsByThread.has("thread-0"), false);
+
+  await manager.refresh({ viewThreadId: "thread-0" });
+  const historical = manager.getViewModel().turns.find((turn) => turn.turnId === "turn-0");
+  assert.ok(historical);
+  assert.equal(historical.totalTokens, 1);
+  assert.equal(historical.detailsAvailable, false);
+
+  const turn = emptyTurn("turn-3", "thread-3", "event");
+  turn.completed = true;
+  turn.status = "completed";
+  turn.totalTokens = 1;
+  turn.updatedAt = 4;
+  manager.turns.set(turn.turnId, turn);
+  const fifth = emptyTurn("turn-4", "thread-4", "event");
+  fifth.completed = true;
+  fifth.status = "completed";
+  fifth.totalTokens = 1;
+  fifth.updatedAt = 5;
+  manager.turns.set(fifth.turnId, fifth);
+  await manager.refresh();
+  assert.equal(manager.turns.size, 4);
+  assert.equal(manager.turns.has("turn-0"), true, "当前页面会话优先保留");
+  assert.equal(manager.turns.has("turn-1"), false);
+  assert.equal(manager.historicalSegmentsByThread.has("thread-1"), true);
+});
+
+test("当前会话的子智能体摘要与根回合使用同一保留范围", async t => {
+  const { manager } = await createManager(t, { managerOptions: {
+    maxViewTurns: 1,
+    maxStoredTurns: 4,
+    maxStoredTurnSummaries: 4,
+  } });
+  const addTurn = (turnId, threadId, updatedAt, extra = {}) => {
+    const turn = emptyTurn(turnId, threadId, "event");
+    Object.assign(turn, {
+      completed: true,
+      status: "completed",
+      totalTokens: 1,
+      updatedAt,
+      ...extra,
+    });
+    manager.turns.set(turnId, turn);
+  };
+  addTurn("child-turn", "child-thread", 1, {
+    isSubagent: true,
+    rootThreadId: "root-thread",
+    parentThreadId: "root-thread",
+    parentTurnId: "root-turn",
+  });
+  addTurn("root-turn", "root-thread", 2);
+  addTurn("other-1", "other-thread-1", 3);
+  addTurn("other-2", "other-thread-2", 4);
+  addTurn("other-3", "other-thread-3", 5);
+
+  await manager.refresh({ viewThreadId: "root-thread" });
+  assert.equal(manager.turns.has("root-turn"), true);
+  assert.equal(manager.turns.has("child-turn"), true);
+  assert.equal(manager.turns.has("other-1"), false);
+  assert.ok(manager.getViewModel().turns.some((turn) =>
+    turn.isSubagentSummary && turn.threadId === "child-thread"));
+});
+
+test("摘要索引完整时切换到无 rollout 会话不扫描历史目录", async t => {
+  const { manager } = await createManager(t, { managerOptions: {
+    discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+  } });
+  const discoveryRevision = manager.getDiscoveryRevision();
+  await manager.refresh({ viewThreadId: "thread-without-rollout" });
+  assert.equal(manager.getDiscoveryRevision(), discoveryRevision);
 });
 
 test("复用视图不能隐藏读取错误及恢复状态", async t => {

@@ -4,7 +4,314 @@ import { join } from "node:path";
 import test from "node:test";
 import { GENERATION_METRICS_VERSION } from "../src/relay-contract.mjs";
 import { TokenUsageManager } from "../src/token-usage.mjs";
+import { CACHE_VERSION, SUMMARY_ROLLOUT_INDEX_VERSION, TURN_SUMMARY_PROJECTION_VERSION } from "../src/token-usage/contract.mjs";
 import { pricing, event, rolloutUsage, turnContext, tokenUsageRecord, createManager, protocolUsage, tokenCount, taskComplete } from "./token-usage/support.mjs";
+
+test("打开旧会话时按需重建旧缓存缺失的逐回合摘要", async (t) => {
+  const threadId = "12121212-1212-4212-8212-121212121212";
+  const usage = rolloutUsage({ input: 20, cached: 10, output: 5 });
+  const records = [];
+  for (let index = 0; index < 3; index += 1) {
+    const turnId = `turn-summary-${index}`;
+    records.push(
+      turnContext(turnId, "gpt-6-luna"),
+      tokenUsageRecord(turnId, `response-summary-${index}`, usage, 25),
+      taskComplete(),
+    );
+  }
+  const { manager, codexHome, dataDir } = await createManager(t, {
+    rollouts: [{ threadId, records }],
+  });
+  await manager.flush();
+  manager.close();
+
+  const cachePath = join(dataDir, "token-usage-cache.json");
+  const legacy = JSON.parse(await readFile(cachePath, "utf8"));
+  legacy.version = 28;
+  legacy.turns = legacy.turns.filter((turn) => turn.turnId === "turn-summary-2");
+  for (const state of legacy.fileStates) delete state.summaryProjectionVersion;
+  await writeFile(cachePath, JSON.stringify(legacy));
+
+  const passive = new TokenUsageManager({
+    codexHome,
+    dataDir,
+    discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+    pricingManager: pricing(dataDir),
+  });
+  await passive.initialize({ forceDiscovery: false });
+  await passive.flush();
+  passive.close();
+  const pendingMigration = JSON.parse(await readFile(cachePath, "utf8"));
+  assert.equal(pendingMigration.version, CACHE_VERSION);
+  assert.equal(pendingMigration.summaryRolloutIndexVersion, 0,
+    "未执行目录发现时不能把旧缓存标记为索引完整");
+
+  const restored = new TokenUsageManager({
+    codexHome,
+    dataDir,
+    discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+    pricingManager: pricing(dataDir),
+  });
+  t.after(() => restored.close());
+  await restored.initialize({ forceDiscovery: false, viewThreadId: threadId });
+  assert.deepEqual(
+    restored.getViewModel().turns.map((turn) => turn.turnId),
+    ["turn-summary-0", "turn-summary-1", "turn-summary-2"],
+  );
+  assert.ok([...restored.fileStates.values()].every((state) =>
+    state.summaryProjectionVersion === TURN_SUMMARY_PROJECTION_VERSION));
+  await restored.flush();
+  const migrated = JSON.parse(await readFile(cachePath, "utf8"));
+  assert.equal(migrated.version, CACHE_VERSION);
+  assert.equal(migrated.turns.length, 3);
+});
+
+test("压缩后的事件回合按需重建时保留响应去重状态", async (t) => {
+  const threadId = "34343434-3434-4434-8434-343434343434";
+  const turnId = "turn-compacted-rebuild";
+  const responseId = "response-compacted-rebuild";
+  const liveUsage = protocolUsage({ input: 10, output: 5 });
+  const exactUsage = rolloutUsage({ input: 10, output: 5 });
+  const now = Date.now();
+  const { manager, codexHome, dataDir } = await createManager(t, {
+    events: [
+      event("compact-start", "turn-started", threadId, turnId, {
+        model: "gpt-6-luna", recordedAt: now,
+      }),
+      event("compact-usage", "usage", threadId, turnId, {
+        responseId,
+        tokenUsage: { last: liveUsage, total: liveUsage },
+        recordedAt: now + 1,
+      }),
+      event("compact-complete", "turn-completed", threadId, turnId, {
+        status: "completed", recordedAt: now + 2,
+      }),
+      event("newer-start", "turn-started", "thread-newer", "turn-newer", {
+        model: "gpt-6-luna", recordedAt: now + 3,
+      }),
+      event("newer-complete", "turn-completed", "thread-newer", "turn-newer", {
+        status: "completed", recordedAt: now + 4,
+      }),
+    ],
+    rollouts: [{
+      threadId,
+      records: [
+        turnContext(turnId, "gpt-6-luna"),
+        tokenUsageRecord(turnId, responseId, exactUsage, 15),
+        taskComplete(),
+      ],
+    }],
+    managerOptions: { maxStoredTurns: 1, maxStoredTurnSummaries: 4 },
+  });
+  const compacted = manager.turns.get(turnId);
+  assert.equal(compacted.detailsCompacted, true);
+  assert.deepEqual(compacted.usageResponseIds, [responseId]);
+  assert.equal(compacted.totalTokens, 15);
+  await manager.flush();
+  manager.close();
+
+  const cachePath = join(dataDir, "token-usage-cache.json");
+  const cached = JSON.parse(await readFile(cachePath, "utf8"));
+  for (const state of cached.fileStates) state.summaryProjectionVersion = 0;
+  await writeFile(cachePath, JSON.stringify(cached));
+
+  const restored = new TokenUsageManager({
+    codexHome,
+    dataDir,
+    discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+    maxStoredTurns: 1,
+    maxStoredTurnSummaries: 4,
+    pricingManager: pricing(dataDir),
+  });
+  t.after(() => restored.close());
+  await restored.initialize({ forceDiscovery: false, viewThreadId: threadId });
+  assert.equal(restored.turns.get(turnId).totalTokens, 15);
+  assert.deepEqual(restored.turns.get(turnId).usageResponseIds, [responseId]);
+  await restored.flush();
+  restored.close();
+});
+
+test("打开根会话时重建已归档的子智能体摘要", async (t) => {
+  const rootThreadId = "45454545-4545-4454-8454-454545454545";
+  const childThreadId = "56565656-5656-4565-8565-565656565656";
+  const rootTurnId = "turn-root-archived";
+  const childTurnId = "turn-child-archived";
+  const usage = rolloutUsage({ input: 20, output: 5 });
+  const oldAt = Date.now() - 60_000;
+  const at = (offset) => new Date(oldAt + offset).toISOString();
+  const liveUsage = protocolUsage({ input: 10, output: 5 });
+  const events = [];
+  for (let index = 0; index < 2; index += 1) {
+    const threadId = `newer-thread-${index}`;
+    const turnId = `newer-turn-${index}`;
+    events.push(
+      event(`newer-start-${index}`, "turn-started", threadId, turnId, {
+        model: "gpt-6-luna", recordedAt: oldAt + 10_000 + index * 3,
+      }),
+      event(`newer-usage-${index}`, "usage", threadId, turnId, {
+        responseId: `newer-response-${index}`,
+        tokenUsage: { last: liveUsage, total: liveUsage },
+        recordedAt: oldAt + 10_001 + index * 3,
+      }),
+      event(`newer-complete-${index}`, "turn-completed", threadId, turnId, {
+        status: "completed", recordedAt: oldAt + 10_002 + index * 3,
+      }),
+    );
+  }
+  const { manager, codexHome, dataDir } = await createManager(t, {
+    events,
+    rollouts: [
+      {
+        threadId: rootThreadId,
+        records: [
+          turnContext(rootTurnId, "gpt-6-luna", at(3)),
+          tokenUsageRecord(rootTurnId, "root-response", usage, 25, at(4)),
+          taskComplete(at(5)),
+        ],
+      },
+      {
+        threadId: childThreadId,
+        records: [
+          turnContext(childTurnId, "gpt-6-luna", at(0)),
+          tokenUsageRecord(childTurnId, "child-response", usage, 25, at(1)),
+          taskComplete(at(2)),
+        ],
+        options: { metadata: {
+          session_id: rootThreadId,
+          thread_source: "subagent",
+          source: { subagent: { thread_spawn: {
+            parent_thread_id: rootThreadId,
+            agent_path: "reviewer",
+            depth: 1,
+          } } },
+        } },
+      },
+    ],
+    managerOptions: { maxStoredTurns: 1, maxStoredTurnSummaries: 3 },
+  });
+  assert.equal(manager.turns.has(rootTurnId), true);
+  assert.equal(manager.turns.has(childTurnId), false);
+  assert.equal([...manager.fileStates.values()].find((state) =>
+    state.threadId === rootThreadId)?.summaryProjectionVersion,
+  TURN_SUMMARY_PROJECTION_VERSION);
+  assert.equal([...manager.fileStates.values()].find((state) =>
+    state.threadId === childThreadId)?.summaryProjectionVersion,
+  0);
+  await manager.flush();
+  const cached = JSON.parse(await readFile(
+    join(dataDir, "token-usage-cache.json"),
+    "utf8",
+  ));
+  assert.equal(cached.version, CACHE_VERSION);
+  assert.equal(cached.summaryRolloutIndexVersion, SUMMARY_ROLLOUT_INDEX_VERSION);
+  assert.deepEqual(
+    cached.summaryRollouts.map((entry) => entry.threadId).sort(),
+    [childThreadId, rootThreadId].sort(),
+  );
+  manager.close();
+
+  const restored = new TokenUsageManager({
+    codexHome,
+    dataDir,
+    discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+    maxStoredTurns: 1,
+    maxStoredTurnSummaries: 3,
+    pricingManager: pricing(dataDir),
+  });
+  t.after(() => restored.close());
+  await restored.initialize({ forceDiscovery: false, viewThreadId: rootThreadId });
+  assert.equal(restored.getDiscoveryRevision(), 0,
+    "缓存索引应避免在切换旧会话时扫描全部 rollout");
+  assert.equal(restored.turns.get(rootTurnId)?.totalTokens, 25);
+  assert.equal(restored.turns.get(childTurnId)?.totalTokens, 25);
+  const childSummary = restored.getViewModel().turns.find((turn) =>
+    turn.isSubagentSummary && turn.threadId === childThreadId);
+  assert.equal(childSummary?.totalTokens, 25);
+  assert.ok([...restored.fileStates.values()]
+    .filter((state) => [rootThreadId, childThreadId].includes(state.threadId))
+    .every((state) => state.summaryProjectionVersion === TURN_SUMMARY_PROJECTION_VERSION));
+  await restored.flush();
+  restored.close();
+});
+
+test("没有 Token 的子智能体回合归档后仍可按根会话恢复", async (t) => {
+  const rootThreadId = "67676767-6767-4676-8676-676767676767";
+  const childThreadId = "68686868-6868-4686-8686-686868686868";
+  const rootTurnId = "turn-root-zero-child";
+  const childTurnId = "turn-child-zero";
+  const oldAt = Date.now() - 60_000;
+  const at = (offset) => new Date(oldAt + offset).toISOString();
+  const { manager, codexHome, dataDir } = await createManager(t, {
+    events: [
+      event("newer-zero-start", "turn-started", "newer-zero-thread", "newer-zero-turn", {
+        model: "gpt-6-luna", recordedAt: oldAt + 20_000,
+      }),
+      event("newer-zero-complete", "turn-completed", "newer-zero-thread", "newer-zero-turn", {
+        status: "completed", recordedAt: oldAt + 20_001,
+      }),
+    ],
+    rollouts: [
+      {
+        threadId: rootThreadId,
+        records: [
+          turnContext(rootTurnId, "gpt-6-luna", at(10_000)),
+          tokenUsageRecord(
+            rootTurnId,
+            "root-zero-child-response",
+            rolloutUsage({ input: 10, output: 5 }),
+            15,
+            at(10_001),
+          ),
+          taskComplete(at(10_002)),
+        ],
+      },
+      {
+        threadId: childThreadId,
+        records: [
+          turnContext(childTurnId, "gpt-6-luna", at(0)),
+          taskComplete(at(1)),
+        ],
+        options: { metadata: {
+          session_id: rootThreadId,
+          thread_source: "subagent",
+          source: { subagent: { thread_spawn: {
+            parent_thread_id: rootThreadId,
+            agent_path: "zero-usage-reviewer",
+            depth: 1,
+          } } },
+        } },
+      },
+    ],
+    managerOptions: { maxStoredTurns: 1, maxStoredTurnSummaries: 2 },
+  });
+  assert.equal(manager.turns.has(childTurnId), false);
+  assert.equal(manager.historicalSegmentsByThread.has(childThreadId), false);
+  await manager.flush();
+  const cached = JSON.parse(await readFile(
+    join(dataDir, "token-usage-cache.json"),
+    "utf8",
+  ));
+  assert.ok(cached.summaryRollouts.some((entry) => entry.threadId === childThreadId));
+  manager.close();
+
+  const restored = new TokenUsageManager({
+    codexHome,
+    dataDir,
+    discoveryIntervalMs: Number.MAX_SAFE_INTEGER,
+    maxStoredTurns: 1,
+    maxStoredTurnSummaries: 2,
+    pricingManager: pricing(dataDir),
+  });
+  t.after(() => restored.close());
+  await restored.initialize({ forceDiscovery: false, viewThreadId: rootThreadId });
+  assert.equal(restored.getDiscoveryRevision(), 0);
+  const summary = restored.getViewModel().turns.find((turn) =>
+    turn.isSubagentSummary && turn.threadId === childThreadId);
+  assert.ok(summary);
+  assert.equal(summary.completed, true);
+  assert.equal(summary.totalTokens, 0);
+  restored.close();
+});
 
 test("短生命周期恢复可按父进程指出的旧 rollout 路径增量续读", async (t) => {
   const threadId = "78787878-7878-4787-8787-787878787878";

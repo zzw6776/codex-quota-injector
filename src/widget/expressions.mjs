@@ -1,4 +1,4 @@
-import { WIDGET_RUNTIME_VERSION } from "./contract.mjs";
+import { MAX_CONVERSATION_USAGE_CACHE, WIDGET_RUNTIME_VERSION } from "./contract.mjs";
 import { paginateGenerationDetails, formatGenerationDetailTitle, formatGenerationPhaseText, generationToolRows, generationExecutionRemainder, formatGenerationPrimaryText, averageGenerationNetworkLatency } from "./generation-display.mjs";
 import { createGenerationToolRow } from "./generation-display.mjs";
 import { selectConversationNetworkLatency, formatNetworkLatencyText, formatConversationUsageSummary } from "./usage-display.mjs";
@@ -8,7 +8,7 @@ import { WIDGET_FEATURES } from "./browser-features.mjs";
 import { WIDGET_STYLES } from "./styles.mjs";
 
 function widgetInstallExpression() {
-  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()},${WIDGET_RUNTIME_VERSION},${paginateGenerationDetails.toString()},${formatGenerationDetailTitle.toString()},${formatGenerationPhaseText.toString()},${formatGenerationPrimaryText.toString()},${formatConversationUsageSummary.toString()},${selectConversationNetworkLatency.toString()},${formatNetworkLatencyText.toString()},${averageGenerationNetworkLatency.toString()},${generationToolRows.toString()},${createGenerationToolRow.toString()},${generationExecutionRemainder.toString()},${calculateScrollbarEndPadding.toString()},${serializeWidgetFeatures()},${JSON.stringify(WIDGET_STYLES)})`;
+  return `(${installQuotaWidget.toString()})(${calculatePopoverMaxHeight.toString()},${WIDGET_RUNTIME_VERSION},${paginateGenerationDetails.toString()},${formatGenerationDetailTitle.toString()},${formatGenerationPhaseText.toString()},${formatGenerationPrimaryText.toString()},${formatConversationUsageSummary.toString()},${selectConversationNetworkLatency.toString()},${formatNetworkLatencyText.toString()},${averageGenerationNetworkLatency.toString()},${generationToolRows.toString()},${createGenerationToolRow.toString()},${generationExecutionRemainder.toString()},${calculateScrollbarEndPadding.toString()},${serializeWidgetFeatures()},${JSON.stringify(WIDGET_STYLES)},${MAX_CONVERSATION_USAGE_CACHE})`;
 }
 
 function widgetRuntimeVersionExpression() {
