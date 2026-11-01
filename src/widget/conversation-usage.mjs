@@ -25,21 +25,17 @@ function createConversationUsage({ usageSummaryText, selectNetworkLatency, MAX_C
     const incomingUsageItems = Array.isArray(state.data.tokenUsage?.turns)
       ? state.data.tokenUsage.turns
       : [];
-    const incomingIds = new Set();
     for (const usage of incomingUsageItems) {
       const turnId = String(usage?.turnId ?? "");
       if (turnId) {
-        incomingIds.add(turnId);
         state.conversationUsageByTurn.set(turnId, usage);
       }
     }
-    if (incomingIds.size > 0) {
-      for (const turnId of state.conversationUsageByTurn.keys()) {
-        if (!incomingIds.has(turnId)) state.conversationUsageByTurn.delete(turnId);
-      }
-    } else if (state.data.tokenUsage?.status === "ready") {
-      state.conversationUsageByTurn.clear();
-    }
+    // The backend publishes only the current view plus a small recent window.
+    // Keep lightweight rows from previously visited conversations so Codex can
+    // rebuild its conversation DOM without waiting for the usage worker. The
+    // bounded cache below prevents this browser-side convenience from growing
+    // without limit.
     if (state.conversationUsageByTurn.size > MAX_CONVERSATION_USAGE_CACHE) {
       const retained = [...state.conversationUsageByTurn.values()]
         .sort((left, right) => Number(left.updatedAt) - Number(right.updatedAt))

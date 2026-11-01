@@ -21,6 +21,8 @@ import {
   TOKEN_USAGE_PROCESS_SHUTDOWN_MS,
 } from "./process-contract.mjs";
 
+const MAX_CACHED_THREAD_VIEWS = 32;
+
 function unknownTurnStateViewModel() {
   return { byteLength: null, model: null, observedAt: null };
 }
@@ -89,6 +91,8 @@ class TokenUsageProcessClient {
 
     this.viewModel = { status: "loading", error: null, turns: [] };
     this.viewThreadId = null;
+    this.viewRevision = 0;
+    this.threadViews = new Map();
     this.turns = new Map();
     this.turnSignatures = new Map();
     this.turnStates = new Map();
@@ -113,6 +117,7 @@ class TokenUsageProcessClient {
     this.appliedPricingRevision = 0;
     this.removePricingListener = this.pricingManager.onChange?.(() => {
       this.pricingRevision += 1;
+      this.threadViews.clear();
       if (this.initialized && !this.closed) {
         this.#scheduleRefresh({ notify: true, forceProcess: true, restartService: true });
       }
@@ -135,10 +140,22 @@ class TokenUsageProcessClient {
     const task = (async () => {
       await this.pricingManager.initialize?.();
       const pricingRevision = this.pricingRevision;
-      const response = await this.#request("initialize", { forceDiscovery: true });
+      const requestedViewRevision = this.viewRevision;
+      const requestedViewThreadId = this.viewThreadId;
+      const response = await this.#request("initialize", {
+        forceDiscovery: true,
+        viewThreadId: requestedViewThreadId,
+      });
       this.appliedPricingRevision = pricingRevision;
       this.initialized = true;
-      this.#applyDelta(response.delta, { notify: true });
+      if (requestedViewRevision === this.viewRevision) {
+        this.#applyDelta(response.delta, {
+          notify: true,
+          viewThreadId: requestedViewThreadId,
+        });
+      } else {
+        this.#scheduleRefresh({ notify: true, forceProcess: true });
+      }
       if (response.fullDiscoveryCompleted && response.delta?.status === "ready") {
         this.lastFullDiscoveryAt = Date.now();
       }
@@ -187,8 +204,14 @@ class TokenUsageProcessClient {
     const normalized = String(threadId ?? "").trim() || null;
     if (normalized === this.viewThreadId) return false;
     this.viewThreadId = normalized;
+    this.viewRevision += 1;
+    const cached = this.#getCachedThreadView(normalized);
+    if (cached) {
+      this.viewModel = cached;
+      this.#notifyChange();
+    }
     if (!this.closed && (this.initialized || this.initializationPromise)) {
-      this.#scheduleRefresh({ notify: true, forceProcess: true });
+      this.#scheduleRefresh({ notify: true, forceProcess: !cached });
     }
     return true;
   }
@@ -246,13 +269,23 @@ class TokenUsageProcessClient {
     if (pricingChanged && this.service) await this.#beginRetirement(this.service);
     const requestForceDiscovery = forceDiscovery || discoveryDue;
     const pricingRevision = this.pricingRevision;
+    const requestedViewRevision = this.viewRevision;
+    const requestedViewThreadId = this.viewThreadId;
     try {
       const response = await this.#request("refresh", {
         forceDiscovery: requestForceDiscovery,
         rolloutPaths: sourceChanges.rolloutPaths,
+        viewThreadId: requestedViewThreadId,
       });
       this.appliedPricingRevision = pricingRevision;
-      this.#applyDelta(response.delta, { notify });
+      if (sourceChanges.changed || pricingChanged || requestForceDiscovery) {
+        this.threadViews.clear();
+      }
+      if (requestedViewRevision !== this.viewRevision) {
+        this.#scheduleRefresh({ notify: true, forceProcess: true });
+        return this.viewModel;
+      }
+      this.#applyDelta(response.delta, { notify, viewThreadId: requestedViewThreadId });
       if (requestForceDiscovery && response.fullDiscoveryCompleted &&
         response.delta?.status === "ready") {
         this.lastFullDiscoveryAt = Date.now();
@@ -261,12 +294,16 @@ class TokenUsageProcessClient {
         this.#scheduleRefresh({ notify: true, forceProcess: true, restartService: true });
       }
     } catch (error) {
+      if (requestedViewRevision !== this.viewRevision) {
+        this.#scheduleRefresh({ notify: true, forceProcess: true });
+        return this.viewModel;
+      }
       this.#setError(error, { notify });
     }
     return this.viewModel;
   }
 
-  #applyDelta(delta, { notify }) {
+  #applyDelta(delta, { notify, viewThreadId = this.viewThreadId }) {
     if (!delta || typeof delta !== "object") throw new Error("Token 用量服务返回了无效结果");
     let turnsChanged = false;
     for (const turnId of Array.isArray(delta.removedTurnIds) ? delta.removedTurnIds : []) {
@@ -309,10 +346,31 @@ class TokenUsageProcessClient {
         : this.viewModel.turns;
       this.viewModel = { status, error, turns };
     }
+    this.#rememberThreadView(viewThreadId, this.viewModel);
     this.sourceSnapshot = delta.sourceSnapshot ?? this.sourceSnapshot;
     this.#startSourceWatchers();
     if ((turnsChanged || statesChanged || coreChanged) && notify) this.#notifyChange();
     return turnsChanged || statesChanged || coreChanged;
+  }
+
+  #getCachedThreadView(threadId) {
+    const key = threadId ?? "";
+    const cached = this.threadViews.get(key);
+    if (!cached) return null;
+    this.threadViews.delete(key);
+    this.threadViews.set(key, cached);
+    return cached;
+  }
+
+  #rememberThreadView(threadId, view) {
+    if (view?.status !== "ready") return;
+    const key = threadId ?? "";
+    const cached = { status: "ready", error: null, turns: view.turns };
+    this.threadViews.delete(key);
+    this.threadViews.set(key, cached);
+    while (this.threadViews.size > MAX_CACHED_THREAD_VIEWS) {
+      this.threadViews.delete(this.threadViews.keys().next().value);
+    }
   }
 
   #setError(error, { notify }) {
@@ -440,13 +498,17 @@ class TokenUsageProcessClient {
     this.sourceWatchTimer.unref?.();
   }
 
-  async #request(action, { forceDiscovery = false, rolloutPaths = [] } = {}) {
+  async #request(action, {
+    forceDiscovery = false,
+    rolloutPaths = [],
+    viewThreadId = this.viewThreadId,
+  } = {}) {
     const service = await this.#ensureService();
     return this.#sendRequest(service, {
       action,
       forceDiscovery,
       rolloutPaths,
-      viewThreadId: this.viewThreadId,
+      viewThreadId,
       turnSignatures: [...this.turnSignatures],
       stateSignatures: [...this.stateSignatures],
     });

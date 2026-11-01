@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { appendFile, mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import {
@@ -22,6 +24,67 @@ async function appendEvents(dataDir, events) {
     join(dataDir, "token-usage-events.jsonl"),
     `${events.map((value) => JSON.stringify(value)).join("\n")}\n`,
   );
+}
+
+function controlledUsageService() {
+  const requests = [];
+  const child = new EventEmitter();
+  child.pid = 43210;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.stdin.on("data", (chunk) => {
+    for (const line of String(chunk).split("\n").filter(Boolean)) {
+      const request = JSON.parse(line);
+      requests.push(request);
+      if (request.action === "flush") {
+        child.stdout.write(`${JSON.stringify({
+          protocol: 1,
+          type: "response",
+          id: request.id,
+          ok: true,
+        })}\n`);
+      }
+    }
+  });
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    queueMicrotask(() => child.emit("close", 0, null));
+  };
+  child.stdin.on("finish", close);
+  child.kill = close;
+  const respond = (request, turnId) => {
+    const turn = turnId ? {
+      turnId,
+      threadId: request.viewThreadId ?? "thread-global",
+      totalTokens: 15,
+      updatedAt: Date.now(),
+    } : null;
+    child.stdout.write(`${JSON.stringify({
+      protocol: 1,
+      type: "response",
+      id: request.id,
+      ok: true,
+      fullDiscoveryCompleted: Boolean(request.forceDiscovery),
+      delta: {
+        status: "ready",
+        error: null,
+        turnIds: turn ? [turnId] : [],
+        turnUpdates: turn ? [{ value: turn, signature: `signature-${turnId}` }] : [],
+        removedTurnIds: [],
+        stateUpdates: [],
+        removedStateIds: [],
+        sourceSnapshot: {
+          event: { path: "/missing/token-usage-events.jsonl", exists: false, size: 0,
+            mtimeMs: 0 },
+          rollouts: [],
+        },
+      },
+    })}\n`);
+  };
+  return { child, requests, respond };
 }
 
 test("Token 统计进程空闲退出，无变化不重启，追加事件后按需恢复", async (t) => {
@@ -139,6 +202,108 @@ test("切换页面会话后短生命周期进程返回该会话的窗口外摘�
   }, { timeoutMs: 5_000 });
   assert.deepEqual(focused.turns.map((turn) => turn.turnId), ["turn-0", "turn-1"]);
   assert.equal(focused.turns[0].detailsAvailable, false);
+});
+
+test("切回已访问会话立即复用轻量视图且不重新拉起统计进程", async (t) => {
+  const codexHome = await useTempDir(t, "codex-usage-view-cache-home-");
+  const dataDir = await useTempDir(t, "codex-usage-view-cache-data-");
+  const usage = protocolUsage({ input: 10, output: 5 });
+  const events = [];
+  for (const [index, threadId] of ["thread-old", "thread-new"].entries()) {
+    const turnId = `turn-cache-${index}`;
+    events.push(
+      event(`start-cache-${index}`, "turn-started", threadId, turnId, {
+        model: "gpt-6-luna",
+      }),
+      event(`usage-cache-${index}`, "usage", threadId, turnId, {
+        responseId: `response-cache-${index}`,
+        tokenUsage: { last: usage, total: usage },
+      }),
+      event(`complete-cache-${index}`, "turn-completed", threadId, turnId, {
+        status: "completed",
+      }),
+    );
+  }
+  await writeFile(
+    join(dataDir, "token-usage-events.jsonl"),
+    `${events.map((value) => JSON.stringify(value)).join("\n")}\n`,
+  );
+  const client = new TokenUsageProcessClient({
+    codexHome,
+    dataDir,
+    maxViewTurns: 1,
+    idleTimeoutMs: 30,
+    eventWatchDebounceMs: 5,
+    fullDiscoveryIntervalMs: 60_000,
+    watchSources: false,
+    pricingManager: inertPricingManager(),
+  });
+  t.after(async () => {
+    await client.close();
+    await client.flush();
+  });
+
+  assert.deepEqual(
+    (await client.initialize()).turns.map((turn) => turn.turnId),
+    ["turn-cache-1"],
+  );
+  assert.equal(client.setViewThread("thread-old"), true);
+  await waitFor(() => client.getViewModel().turns.some((turn) =>
+    turn.turnId === "turn-cache-0"), { timeoutMs: 5_000 });
+  assert.equal(client.setViewThread(null), true);
+  assert.deepEqual(client.getViewModel().turns.map((turn) => turn.turnId), ["turn-cache-1"]);
+  await waitFor(() => client.servicePid == null, { timeoutMs: 5_000 });
+
+  assert.equal(client.setViewThread("thread-old"), true);
+  assert.deepEqual(
+    client.getViewModel().turns.map((turn) => turn.turnId),
+    ["turn-cache-0", "turn-cache-1"],
+    "切换调用返回前就应恢复已访问会话",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(client.servicePid, null, "源文件未变化时后台校验不应重新拉起进程");
+});
+
+test("快速切换会话时迟到的旧视图不能覆盖当前会话", async (t) => {
+  const service = controlledUsageService();
+  const client = new TokenUsageProcessClient({
+    codexHome: "/missing/codex-home",
+    dataDir: "/missing/injector-data",
+    idleTimeoutMs: 5_000,
+    eventWatchDebounceMs: 5,
+    fullDiscoveryIntervalMs: 60_000,
+    watchSources: false,
+    spawnImpl: () => service.child,
+    pricingManager: inertPricingManager(),
+  });
+  t.after(async () => {
+    await client.close();
+    await client.flush();
+  });
+
+  const initializing = client.initialize();
+  const initializeRequest = await waitFor(() => service.requests[0], { timeoutMs: 1_000 });
+  service.respond(initializeRequest, "turn-global");
+  await initializing;
+
+  client.setViewThread("thread-a");
+  const requestA = await waitFor(() => service.requests[1], { timeoutMs: 1_000 });
+  assert.equal(requestA.viewThreadId, "thread-a");
+  client.setViewThread("thread-b");
+  service.respond(requestA, "turn-a");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    client.getViewModel().turns.some((turn) => turn.turnId === "turn-a"),
+    false,
+    "thread-a 的迟到响应不能发布到 thread-b",
+  );
+
+  const requestB = await waitFor(() => service.requests[2], { timeoutMs: 1_000 });
+  assert.equal(requestB.viewThreadId, "thread-b");
+  service.respond(requestB, "turn-b");
+  await waitFor(() => client.getViewModel().turns[0]?.turnId === "turn-b", {
+    timeoutMs: 1_000,
+  });
 });
 
 test("全量发现失败不会推进成功时间，下一次兜底刷新立即重试", async (t) => {
