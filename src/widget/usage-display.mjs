@@ -89,7 +89,9 @@ function formatConversationUsageSummary(usage, network, subagentLabel = "") {
     ...(firstToken ? [`首字 ${firstToken}`] : []),
     ...(speed ? [`速率 ${speed}`] : []),
     networkLatencyText,
-    cost.available ? `价格 ${formatCny(cost.totalCny)}` : "价格暂不可算",
+    cost.available ? `价格 ${cost.rangeCny
+      ? `${formatCny(cost.rangeCny.min)}–${formatCny(cost.rangeCny.max)}`
+      : formatCny(cost.totalCny)}` : "价格暂不可算",
   ].join(" · ");
 }
 

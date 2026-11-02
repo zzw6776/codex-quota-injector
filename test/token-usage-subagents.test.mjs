@@ -42,7 +42,7 @@ test("子智能体用量形成摘要并计入根任务累计费用", async (t) =
       },
     },
     records: [
-      turnContext(childTurn, "gpt-5.6-luna", started),
+      turnContext(childTurn, "deepseek-flash", started),
       tokenCount(rolloutUsage({ input: 8, output: 2 }), 10, completed),
       taskComplete(completed),
     ],
@@ -58,6 +58,12 @@ test("子智能体用量形成摘要并计入根任务累计费用", async (t) =
   assert.equal(summary.totalTokens, 10);
   assert.equal(summary.agentNickname, "review");
   assert.ok(root.cost.cumulativeCny > root.cost.totalCny);
+  assert.deepEqual(summary.cost.rangeCny, child.cost.rangeCny);
+  assert.deepEqual(summary.cost.cumulativeRangeCny, child.cost.rangeCny);
+  assert.deepEqual(root.cost.cumulativeRangeCny, {
+    min: root.cost.totalCny + child.cost.rangeCny.min,
+    max: root.cost.totalCny + child.cost.rangeCny.max,
+  }, "跨供应商子智能体的上下界只累计一次");
 });
 
 test("子智能体按各自开始时间归属根回合，嵌套任务继承父回合并可随迟到元数据修正", () => {

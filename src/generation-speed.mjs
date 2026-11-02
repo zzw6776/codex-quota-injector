@@ -1,5 +1,10 @@
 // Keep output timing separate from tool execution and from the token ledger.
 // The server currently supplies response-level usage, not per-item usage.
+// Short streamed bursts are commonly delivered in one buffered SSE batch.
+// Their local arrival span measures dispatch jitter rather than model output
+// throughput, so do not publish a rate until the observation is long enough.
+export const MIN_MEASURABLE_GENERATION_DURATION_MS = 500;
+
 export function normalizeOutputPhases(value) {
   if (!Array.isArray(value)) return null;
   return value.map((phase) => ({
@@ -20,7 +25,9 @@ export function generationSpeedWindow(sample) {
     if (!sample?.hasVisibleText) return { durationMs: 0, reason: "no-visible-text" };
     if (sample?.hasNonTextOutput) return { durationMs: 0, reason: "unattributed-output" };
     const durationMs = finiteDuration(sample?.generationDurationMs) ?? 0;
-    return { durationMs, reason: durationMs > 0 ? null : "insufficient-data" };
+    return durationMs >= MIN_MEASURABLE_GENERATION_DURATION_MS
+      ? { durationMs, reason: null }
+      : { durationMs: 0, reason: "insufficient-data" };
   }
   if (!sample.outputPhasesComplete || phases.length === 0 || phases.some((phase) =>
     phase.kind === "unknown" || phase.startLatencyMs == null || !(phase.durationMs > 0))) {
@@ -36,7 +43,9 @@ export function generationSpeedWindow(sample) {
     durationMs += Math.max(0, nextEnd - Math.max(start, end));
     end = Math.max(end, nextEnd);
   }
-  return { durationMs, reason: durationMs > 0 ? null : "insufficient-data" };
+  return durationMs >= MIN_MEASURABLE_GENERATION_DURATION_MS
+    ? { durationMs, reason: null }
+    : { durationMs: 0, reason: "insufficient-data" };
 }
 
 export function assignOutputPhaseSpeed(detail, speed) {

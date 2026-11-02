@@ -26,21 +26,32 @@ const FALLBACK_EXCHANGE_RATE = Object.freeze({
   fallback: true,
 });
 
-const DEEPSEEK_V41_FLASH_PRICE = priceTier(1, 0.02, 1, 2);
+// Official CNY peak rates per 1M tokens, checked 2026-11-02:
+// https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+// Usage segments do not retain request times. Quote the peak/off-peak range
+// instead of assigning historical requests to the time the view is opened.
+const DEEPSEEK_OFF_PEAK_RATIO = 0.5;
+const DEEPSEEK_V41_FLASH_PRICE = priceTier(2, 0.04, 2, 8);
 const DEEPSEEK_PRICES = Object.freeze({
   "deepseek-flash": DEEPSEEK_V41_FLASH_PRICE,
   "deepseek-v4-flash": DEEPSEEK_V41_FLASH_PRICE,
   "deepseek-v4-flash-vision-exp": DEEPSEEK_V41_FLASH_PRICE,
-  "deepseek-v4-pro": DEEPSEEK_V41_FLASH_PRICE,
+  "deepseek-v4-pro": priceTier(9, 0.3, 9, 27),
 });
 
-// Standard API USD per 1M tokens; GPT-6.1 Sol checked 2026-10-11:
+// Standard API USD per 1M tokens; latest models checked 2026-11-02:
 // https://developers.openai.com/api/docs/pricing?latest-pricing=standard
+// https://developers.openai.com/api/docs/models/gpt-6.1-terra
+// Cache writes use 30-minute retention where the provider distinguishes it.
 // GPT-5.6 Sol promotional rates are published through at least 2026-11-21.
 const OPENAI_PRICES = Object.freeze({
   "gpt-6.1-sol": modelPrice(
     priceTier(2, 0.1, 2.5, 10),
     priceTier(4, 0.2, 5, 15),
+  ),
+  "gpt-6.1-terra": modelPrice(
+    priceTier(1, 0.05, 1.25, 5),
+    priceTier(2, 0.1, 2.5, 7.5),
   ),
   "gpt-6-astra": modelPrice(
     priceTier(10, 1, 12.5, 50),
@@ -156,7 +167,7 @@ export class TokenPricingManager {
         normalizedModel,
         provider: "deepseek",
         currency: "CNY",
-        label: "本轮预估费用",
+        label: "Token 预估费用",
         contextTier: "standard",
         rates: DEEPSEEK_PRICES[normalizedModel],
         usage,
@@ -200,6 +211,12 @@ export class TokenPricingManager {
       },
       exchangeRate: cost.currency === "USD" ? { ...this.exchangeRate } : null,
     };
+    if (cost.provider === "deepseek") {
+      viewModel.rangeCny = {
+        min: viewModel.totalCny * DEEPSEEK_OFF_PEAK_RATIO,
+        max: viewModel.totalCny,
+      };
+    }
     if (Array.isArray(cost.tiers)) {
       viewModel.tiers = cost.tiers.map((tier) => this.toViewModel(tier));
     }

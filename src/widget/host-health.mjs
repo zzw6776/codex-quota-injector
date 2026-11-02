@@ -23,6 +23,28 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
     return state.hostHealthDetailsThread === (health?.threadId ?? "global");
   }
 
+  function safeRestartView() {
+    const operation = state.data.safeRestart;
+    const phase = operation?.phase ?? "idle";
+    const busy = phase === "waiting" || phase === "restarting";
+    const disabled = phase === "restarting";
+    const labels = {
+      idle: "释放内存并重启",
+      waiting: "等待中，再点强制重启",
+      restarting: "正在重启…",
+      failed: "重试安全重启",
+    };
+    return {
+      phase,
+      busy,
+      disabled,
+      label: labels[phase] ?? labels.idle,
+      title: phase === "waiting"
+        ? `${operation?.message ?? "正在等待任务安全结束"}；再次点击可确认强制重启`
+        : operation?.message ?? "等待所有活动回合结束并确认历史落盘后，重启 Codex 释放工具进程内存",
+    };
+  }
+
   function renderHostHealthBanner(health) {
     if (!health?.required) return "";
     const view = presentation(health);
@@ -55,6 +77,7 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
       : health?.toolsVerified || view.checks.length > 0 ? "重新检查" : "检查";
     const message = view.status === "unconfirmed" && health?.code === "startup-status-timeout"
       ? "等待工具服务就绪超时，暂时无法确认状态。" : health?.message;
+    const safeRestart = safeRestartView();
     return `<aside class="host-health-flyout ${view.status}" popover="manual" role="dialog" aria-label="任务工具检查详情">
       <header class="host-health-flyout-head">
         <div><div class="host-health-title"><span class="host-health-dot ${view.status}" aria-hidden="true"></span>任务工具</div>
@@ -70,7 +93,7 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
           ${health?.canCheck && health?.threadId ? `<button class="btn host-health-recheck" type="button" title="实际调用当前任务的 4 项必需工具，确认是否可用" ${checking ? "disabled" : ""}>${checkLabel}</button>` : ""}
           ${health?.canCheck ? `<button class="btn host-health-diagnose" type="button" title="查询完整注册目录，用于诊断工具缺失或加载异常；可能耗时较长" ${health?.diagnostic?.status === "checking" ? "disabled" : ""}>诊断工具目录</button>` : ""}
           ${health?.canCheck ? '<button class="btn host-health-reload" type="button" title="重新读取工具配置并刷新已加载任务的连接，可能影响其他任务">刷新工具配置</button>' : ""}
-          ${health?.canRestart ? '<button class="btn host-health-restart" type="button" title="退出并重新启动整个 Codex 应用">重启 Codex</button>' : ""}
+          ${health?.canRestart ? `<button class="btn safe-restart host-health-restart ${safeRestart.phase}" type="button" title="${escapeHtml(safeRestart.title)}" ${safeRestart.busy ? 'aria-busy="true"' : ""} ${safeRestart.disabled ? "disabled" : ""}>${escapeHtml(safeRestart.label)}</button>` : ""}
         </div>
         <footer class="host-health-flyout-footer">
           <span>${health?.updatedAt ? `更新于 ${escapeHtml(formatUpdatedAt(health.updatedAt))}` : "尚无更新时间"}</span>
@@ -117,7 +140,9 @@ function createHostHealth({ state, formatUpdatedAt, escapeHtml }) {
       turnState.observedAt ? `观察时间：${formatUpdatedAt(turnState.observedAt)}` : null]
       .filter(Boolean).join("\n");
     const turnStateText = escapeHtml(`${turnStateDetails}${turnStateMeta ? `\n${turnStateMeta}` : ""}`);
-    return `<div class="panel-controls"><span class="turn-state-status" data-account-tooltip="${turnStateText}" aria-label="${turnStateText}">${escapeHtml(turnStateLabel)}</span><button class="host-health-status status-${view.status}" type="button" data-account-tooltip="${text}" aria-label="${text}"><span class="host-health-dot ${view.status}" aria-hidden="true"></span></button><button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
+    const safeRestart = safeRestartView();
+    const safeRestartText = escapeHtml(safeRestart.title);
+    return `<div class="panel-controls"><span class="turn-state-status" data-account-tooltip="${turnStateText}" aria-label="${turnStateText}">${escapeHtml(turnStateLabel)}</span><button class="host-health-status status-${view.status}" type="button" data-account-tooltip="${text}" aria-label="${text}"><span class="host-health-dot ${view.status}" aria-hidden="true"></span></button><button class="icon-btn safe-restart ${safeRestart.phase}" type="button" title="${safeRestartText}" data-account-tooltip="${safeRestartText}" aria-label="${safeRestartText}" ${safeRestart.busy ? 'aria-busy="true"' : ""} ${safeRestart.disabled ? "disabled" : ""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 1-2.35-5.65L20 7.7"/><path d="M20 3v4.7h-4.7"/></svg></button><button class="icon-btn close-panel" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div>`;
   }
 
   function hostToolLabel(name) {

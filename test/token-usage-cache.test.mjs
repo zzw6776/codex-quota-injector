@@ -5,7 +5,50 @@ import test from "node:test";
 import { GENERATION_METRICS_VERSION } from "../src/relay-contract.mjs";
 import { TokenUsageManager } from "../src/token-usage.mjs";
 import { CACHE_VERSION, SUMMARY_ROLLOUT_INDEX_VERSION, TURN_SUMMARY_PROJECTION_VERSION } from "../src/token-usage/contract.mjs";
+import { normalizeCachedTurn } from "../src/token-usage/cache.mjs";
 import { pricing, event, rolloutUsage, turnContext, tokenUsageRecord, createManager, protocolUsage, tokenCount, taskComplete } from "./token-usage/support.mjs";
+
+test("旧缓存重算速率时清除短批次并保留可靠输出窗口", () => {
+  const turn = normalizeCachedTurn({
+    turnId: "turn-speed-cache",
+    threadId: "thread-speed-cache",
+    generationMetricsVersion: GENERATION_METRICS_VERSION,
+    generationMetricsEnabled: true,
+    firstTokenLatencyMs: 400,
+    firstTokenLatencyTotalMs: 400,
+    firstTokenLatencySamples: 1,
+    outputSpeed: 80 / 0.653,
+    outputGenerationTokens: 80,
+    outputGenerationDurationMs: 653,
+    generationDetails: [
+      {
+        sequence: 1,
+        outputSpeed: 35_000,
+        outputGenerationTokens: 35,
+        outputPhasesComplete: true,
+        outputPhases: [{ kind: "tool", startLatencyMs: 9_323, durationMs: 1 }],
+      },
+      {
+        sequence: 2,
+        outputSpeed: 45 / 0.652,
+        outputGenerationTokens: 45,
+        outputPhasesComplete: true,
+        outputPhases: [{ kind: "tool", startLatencyMs: 1_404, durationMs: 652 }],
+      },
+    ],
+  }, {
+    generationMetricsCompatible: true,
+    generationSpeedCompatible: false,
+  });
+  assert.equal(turn.firstTokenLatencyMs, 400);
+  assert.equal(turn.generationDetails[0].outputSpeed, null);
+  assert.equal(turn.generationDetails[0].outputGenerationTokens, 0);
+  assert.equal(turn.generationDetails[0].outputSpeedUnavailableReason, "insufficient-data");
+  assert.equal(turn.generationDetails[1].outputSpeed, 45 / 0.652);
+  assert.equal(turn.outputGenerationTokens, 45);
+  assert.equal(turn.outputGenerationDurationMs, 652);
+  assert.equal(turn.outputSpeed, 45 / 0.652);
+});
 
 test("打开旧会话时按需重建旧缓存缺失的逐回合摘要", async (t) => {
   const threadId = "12121212-1212-4212-8212-121212121212";
@@ -207,6 +250,11 @@ test("打开根会话时重建已归档的子智能体摘要", async (t) => {
   assert.deepEqual(
     cached.summaryRollouts.map((entry) => entry.threadId).sort(),
     [childThreadId, rootThreadId].sort(),
+  );
+  cached.version = 30;
+  await writeFile(
+    join(dataDir, "token-usage-cache.json"),
+    JSON.stringify(cached),
   );
   manager.close();
 

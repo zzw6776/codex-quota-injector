@@ -37,7 +37,7 @@ test("超时为黄色未确认，操作直接平铺，详情不把未检查项�
   assert.doesNotMatch(flyout, /高级处理|role="menu/);
   assert.match(flyout, /host-health-action-grid/);
   assert.match(flyout, />刷新工具配置</);
-  assert.match(flyout, />重启 Codex</);
+  assert.match(flyout, />释放内存并重启</);
 });
 
 test("检查通过时主面板不渲染状态卡片，逐项结果只进入独立浮窗", () => {
@@ -127,4 +127,69 @@ test("任务状态旁直接显示当前任务的长度，不比较目标值", ()
   assert.match(controls, /turn-state-status"[^>]*>--<\/span>/);
   assert.match(controls, /尚未观察到当前任务/);
   assert.doesNotMatch(controls, /目标长度/);
+});
+
+test("主面板常驻安全重启入口并展示等待状态", () => {
+  const state = { data: { hostHealth: { status: "ready" }, safeRestart: null } };
+  const widget = createHostHealth({ state, escapeHtml: String, formatUpdatedAt: String });
+  let controls = widget.renderPanelControls();
+  assert.match(controls, /class="icon-btn safe-restart idle"/);
+  assert.match(controls, /等待所有活动回合结束并确认历史落盘/);
+  assert.doesNotMatch(controls, /aria-busy="true"/);
+
+  state.data.safeRestart = { phase: "waiting", message: "等待当前任务结束" };
+  controls = widget.renderPanelControls();
+  assert.match(controls, /safe-restart waiting/);
+  assert.match(controls, /aria-busy="true"/);
+  assert.doesNotMatch(controls, /safe-restart waiting[^>]*disabled/);
+  assert.match(controls, /等待当前任务结束/);
+  assert.match(controls, /再次点击可确认强制重启/);
+
+  state.data.safeRestart = { phase: "restarting", message: "正在重启 Codex" };
+  assert.match(widget.renderPanelControls(), /safe-restart restarting[^>]*disabled/);
+  state.data.safeRestart = { phase: "failed", message: "安全重启失败：launch failed" };
+  controls = widget.renderPanelControls();
+  assert.match(controls, /safe-restart failed/);
+  assert.match(controls, /安全重启失败：launch failed/);
+  assert.doesNotMatch(controls, /safe-restart failed[^>]*disabled|aria-busy="true"/);
+});
+
+test("重复点击安全重启时确认后发送强制重启动作", (t) => {
+  const listeners = [];
+  const actions = [];
+  const previousWindow = globalThis.window;
+  const confirmations = [false, true];
+  globalThis.window = { ...(previousWindow ?? {}), confirm: () => confirmations.shift() };
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  });
+  const panel = createPanel({
+    state: { data: { hostHealth: {} } },
+    enqueue: (action) => actions.push(action),
+    render() {},
+  });
+  const buttons = [{ disabled: false }, { disabled: false }];
+  panel.bindGeneralEvents({
+    querySelector(selector) {
+      if (selector === ".detail-popover" || selector === ".panel-scroll") return null;
+      return { addEventListener() {} };
+    },
+    querySelectorAll(selector) {
+      if (selector !== ".safe-restart") return [];
+      return buttons.map((button) => ({
+        ...button,
+        addEventListener(event, listener) { listeners.push({ event, listener, button }); },
+      }));
+    },
+  });
+  listeners[0].listener({ currentTarget: listeners[0].button });
+  listeners[1].listener({ currentTarget: listeners[1].button });
+  assert.deepEqual(actions, [{ type: "safe-restart" }], "取消确认时继续安全等待");
+  listeners[1].listener({ currentTarget: listeners[1].button });
+  assert.deepEqual(actions, [{ type: "safe-restart" }, { type: "safe-restart-force" }]);
+  listeners[0].listener({ currentTarget: listeners[0].button });
+  assert.equal(actions.length, 2, "确认强制重启后不再重复排队");
+  assert.equal(listeners[0].button.disabled, false);
+  assert.equal(listeners[1].button.disabled, true);
 });

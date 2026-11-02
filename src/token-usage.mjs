@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { defaultAccountDataDir } from "./platform.mjs";
 import { TokenPricingManager } from "./token-pricing.mjs";
 import { createToolExecutionLedger } from "./tool-executions.mjs";
-import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_STORED_TURN_SUMMARIES, TURN_SUMMARY_PROJECTION_VERSION, SUMMARY_ROLLOUT_INDEX_VERSION, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
+import { CACHE_VERSION, MIN_SUPPORTED_CACHE_VERSION, MIN_GENERATION_METRICS_CACHE_VERSION, MIN_RELIABLE_GENERATION_SPEED_CACHE_VERSION, MIN_SUMMARY_ROLLOUT_CACHE_VERSION, DISCOVERY_INTERVAL_MS, MAX_VIEW_TURNS, MAX_STORED_TURNS, MAX_STORED_TURN_SUMMARIES, TURN_SUMMARY_PROJECTION_VERSION, SUMMARY_ROLLOUT_INDEX_VERSION, MAX_TRACKED_ROLLOUT_STATES, MAX_TRACKED_TURN_STATES, MAX_HISTORICAL_THREADS, COST_CACHE_VERSION, ROLLOUT_PARSER_VERSION, MAX_SEEN_EVENT_IDS, CACHE_PERSIST_DELAY_MS, UNKNOWN_ROLLOUT_CHECK_INTERVAL_MS, UNKNOWN_ROLLOUT_RECONCILE_CONCURRENCY, ACTIVE_THREAD_HINT_TTL_MS, RECENT_ROLLOUT_ACTIVITY_MS, EVENT_WATCH_DEBOUNCE_MS, resolveCodexHome, positiveNumber, positiveInteger, nonEmptyString } from "./token-usage/contract.mjs";
 import { RolloutWorkerClient } from "./token-usage/rollout-worker.mjs";
 import { buildUsageViewModel } from "./token-usage/display.mjs";
 import { applySubagentMetadata } from "./token-usage/subagents.mjs";
@@ -459,6 +459,8 @@ export class TokenUsageManager {
       const turn = normalizeCachedTurn(value, {
         generationMetricsCompatible:
           cachedVersion >= MIN_GENERATION_METRICS_CACHE_VERSION,
+        generationSpeedCompatible:
+          cachedVersion >= MIN_RELIABLE_GENERATION_SPEED_CACHE_VERSION,
       });
       if (turn) this.turns.set(turn.turnId, turn);
     }
@@ -483,7 +485,7 @@ export class TokenUsageManager {
         this.rolloutFallbackThreads.set(state.threadId, state.lastUsedAt || Date.now());
       }
     }
-    if (cachedVersion >= CACHE_VERSION &&
+    if (cachedVersion >= MIN_SUMMARY_ROLLOUT_CACHE_VERSION &&
       positiveInteger(cached.summaryRolloutIndexVersion) >= SUMMARY_ROLLOUT_INDEX_VERSION) {
       for (const value of Array.isArray(cached.summaryRollouts)
         ? cached.summaryRollouts

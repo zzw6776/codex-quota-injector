@@ -1,5 +1,8 @@
 // Browser-serializable factory: all external values arrive through this explicit boundary.
 function createUsageTooltip({ state, conversationTooltipPointer, appendGenerationDetails, syncConversationScrollbarPadding, conversationSubagentLabel, formatContextTier, formatUnitPrice, ensureConversationTokenTooltip, positionConversationTokenTooltip, clearConversationTooltipTimer, isLightTheme, formatTokenCount, formatCny, formatTooltipPercent, formatExchangeRate }) {
+  const formatAmount = (amount, range) => range
+    ? `${formatCny(range.min)}–${formatCny(range.max)}`
+    : formatCny(amount);
   function showConversationTokenTooltip(line, event = null) {
     clearConversationTooltipTimer();
     const usage = line?.__codexTokenUsage;
@@ -24,7 +27,7 @@ function createUsageTooltip({ state, conversationTooltipPointer, appendGeneratio
     total.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
     const totalLabel = usage.completed ? (cost.label ?? "本轮费用") : "实时估算";
     total.textContent = cost.available
-      ? `${totalLabel} ${formatCny(cost.totalCny)}`
+      ? `${totalLabel} ${formatAmount(cost.totalCny, cost.rangeCny)}`
       : "费用暂不可算";
     header.append(title, total);
     tooltip.append(header);
@@ -101,13 +104,13 @@ function createUsageTooltip({ state, conversationTooltipPointer, appendGeneratio
     const cumulative = document.createElement("div");
     cumulative.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-top:7px;font-weight:650";
     const cumulativeLabel = document.createElement("span");
-    cumulativeLabel.textContent = "累计费用";
+    cumulativeLabel.textContent = cost.cumulativeRangeCny ? "累计 Token 估价" : "累计费用";
     const cumulativeAmount = document.createElement("strong");
     cumulativeAmount.style.cssText = "font-variant-numeric:tabular-nums;white-space:nowrap";
     cumulativeAmount.textContent = cost.cumulativeAvailable
-      ? formatCny(cost.cumulativeCny)
+      ? formatAmount(cost.cumulativeCny, cost.cumulativeRangeCny)
       : Number(cost.cumulativeCny) > 0
-        ? `已确认 ${formatCny(cost.cumulativeCny)} · 待确认 ${Number(cost.cumulativePendingTurns) || 1} 轮`
+        ? `${cost.cumulativeRangeCny ? "已估算" : "已确认"} ${formatAmount(cost.cumulativeCny, cost.cumulativeRangeCny)} · 待确认 ${Number(cost.cumulativePendingTurns) || 1} 轮`
         : "待确认";
     cumulative.append(cumulativeLabel, cumulativeAmount);
     tooltip.append(cumulative);
@@ -126,11 +129,18 @@ function createUsageTooltip({ state, conversationTooltipPointer, appendGeneratio
       }
       pricing.textContent = `OpenAI 标准 API 价格 · ${tiersText}`;
     } else if (cost.provider === "deepseek") {
-      pricing.textContent = "DeepSeek API 官方价格";
+      pricing.textContent = cost.rangeCny
+        ? "DeepSeek 官方峰谷 Token 估价 · 明细按高峰价，空闲半价"
+        : "DeepSeek API 官方价格";
     } else {
       pricing.textContent = cost.reason || "当前模型没有可用价格";
     }
     footer.append(pricing);
+    if (cost.rangeCny) {
+      const scope = document.createElement("span");
+      scope.textContent = "未含搜索、抓取等按次费用";
+      footer.append(scope);
+    }
     if (usage.isSubagent) {
       const scope = document.createElement("span");
       scope.textContent = usage.isSubagentSummary

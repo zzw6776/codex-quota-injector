@@ -293,10 +293,36 @@ function calculateOutputSpeed(turn) {
   return durationMs > 0 && tokens > 0 ? tokens / (durationMs / 1_000) : null;
 }
 
+function rebuildGenerationSpeedAttribution(turn) {
+  turn.outputGenerationDurationMs = 0;
+  turn.outputGenerationTokens = 0;
+  for (const detail of Array.isArray(turn.generationDetails) ? turn.generationDetails : []) {
+    assignOutputPhaseSpeed(detail, null);
+    const tokens = positiveNumber(detail.outputGenerationTokens);
+    detail.outputSpeed = null;
+    if (tokens <= 0) continue;
+    const window = generationSpeedWindow({
+      ...detail,
+      hasNonTextOutput: detail.outputSpeedUnavailableReason === "unattributed-output",
+    });
+    if (window.reason) {
+      detail.outputGenerationTokens = 0;
+      detail.outputSpeedUnavailableReason = window.reason;
+      continue;
+    }
+    detail.outputSpeed = tokens / (window.durationMs / 1_000);
+    detail.outputSpeedUnavailableReason = null;
+    turn.outputGenerationTokens += tokens;
+    turn.outputGenerationDurationMs += window.durationMs;
+    assignOutputPhaseSpeed(detail, detail.outputSpeed);
+  }
+  turn.outputSpeed = calculateOutputSpeed(turn);
+}
+
 function trimGenerationQueue(queue) {
   if (queue.length > MAX_PENDING_GENERATION_RECORDS) {
     queue.splice(0, queue.length - MAX_PENDING_GENERATION_RECORDS);
   }
 }
 
-export { normalizeNetworkLatency, calculateOutputSpeed, resetGenerationUsageAttribution, normalizeToolTiming, normalizeTextPhases, outputPhaseFields, recordGenerationUsage, recordGenerationSample, resetGenerationMetrics, recordGenerationToolTiming };
+export { normalizeNetworkLatency, calculateOutputSpeed, rebuildGenerationSpeedAttribution, resetGenerationUsageAttribution, normalizeToolTiming, normalizeTextPhases, outputPhaseFields, recordGenerationUsage, recordGenerationSample, resetGenerationMetrics, recordGenerationToolTiming };

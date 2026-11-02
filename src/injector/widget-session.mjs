@@ -51,6 +51,7 @@ function createWidgetSession(dependencies) {
       windows: account.windows,
       currentAccountId: account.currentAccountId,
       operation: account.operation,
+      safeRestart: dependencies.safeRestart ?? null,
       context: dependencies.contextManager.getViewModel(),
       hostHealth: dependencies.hostHealth,
       turnState: dependencies.tokenUsageManager.getTurnStateViewModel?.(

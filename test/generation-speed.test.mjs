@@ -141,3 +141,43 @@ test("一次性工具内容或无可测生成阶段的其他输出，不伪造�
   assert.equal(result.outputPhases[0].durationMs, null);
   assert.equal(generationSpeedWindow(result).reason, "insufficient-data");
 });
+
+test("同批到达的多个输出增量不把派发时间误算成模型生成速率", () => {
+  const recorder = observation();
+  recorder.send(100, {
+    type: "response.output_item.added",
+    item: { type: "function_call", id: "t", call_id: "call", name: "wait" },
+  });
+  recorder.send(1_000, {
+    type: "response.function_call_arguments.delta",
+    item_id: "t",
+    call_id: "call",
+    delta: "{\"cell_id\":",
+  });
+  recorder.send(1_001, {
+    type: "response.function_call_arguments.delta",
+    item_id: "t",
+    call_id: "call",
+    delta: "\"task\"}",
+  });
+  recorder.send(2_000, {
+    type: "response.completed",
+    response: { id: "buffered-tool", output: [] },
+  });
+  const result = recorder.finish();
+  assert.equal(result.outputPhasesComplete, true);
+  assert.equal(result.outputPhases[0].durationMs, 1);
+  assert.deepEqual(generationSpeedWindow(result), {
+    durationMs: 0,
+    reason: "insufficient-data",
+  });
+
+  assert.equal(generationSpeedWindow({
+    outputPhasesComplete: true,
+    outputPhases: [{ kind: "tool", startLatencyMs: 1_000, durationMs: 499 }],
+  }).reason, "insufficient-data");
+  assert.equal(generationSpeedWindow({
+    outputPhasesComplete: true,
+    outputPhases: [{ kind: "tool", startLatencyMs: 1_000, durationMs: 500 }],
+  }).durationMs, 500);
+});

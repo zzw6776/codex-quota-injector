@@ -174,6 +174,32 @@ test("请求明细包含纯工具请求，并区分混合工具调用和可计�
   restored.close();
 });
 
+test("缓冲派发的短输出窗口不展示虚假的万级 Token 速率", async (t) => {
+  const usage = protocolUsage({ input: 100, output: 36 });
+  const { manager } = await createManager(t, { events: [
+    event("short-start", "turn-started", "short-thread", "short-turn", {
+      generationMetricsVersion: GENERATION_METRICS_VERSION,
+    }),
+    event("short-usage", "usage", "short-thread", "short-turn", {
+      responseId: "short-response",
+      tokenUsage: { last: usage, total: usage },
+    }),
+    event("short-generation", "generation", "short-thread", "short-turn", {
+      generation: {
+        responseId: "short-response",
+        hasVisibleText: false,
+        hasNonTextOutput: true,
+        outputPhasesComplete: true,
+        outputPhases: [{ kind: "tool", startLatencyMs: 9_323, durationMs: 1 }],
+      },
+    }),
+  ] });
+  const turn = manager.getViewModel().turns.find((value) => value.turnId === "short-turn");
+  assert.equal(turn.outputSpeed, null);
+  assert.equal(turn.generationDetails[0].outputSpeed, null);
+  assert.equal(turn.generationDetails[0].outputSpeedUnavailableReason, "insufficient-data");
+});
+
 test("文字、工具和混合请求按生成耗时加权，段落只在可归属时显示速率，缓存恢复不重复计账", async (t) => {
   const threadId = "thread-all-output";
   const turnId = "turn-all-output";

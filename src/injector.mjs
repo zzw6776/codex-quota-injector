@@ -30,6 +30,7 @@ import { delay, debugLog } from "./injector/logging.mjs";
 import { createWidgetSession } from "./injector/widget-session.mjs";
 import { createHostHealthSession } from "./injector/host-health-session.mjs";
 import { readVisibleHostTask } from "./injector/active-task.mjs";
+import { createSafeRestartCoordinator } from "./injector/safe-restart.mjs";
 import { AppUpdateManager } from "./app-update/manager.mjs";
 import packageJson from "../package.json" with { type: "json" };
 
@@ -107,6 +108,7 @@ export async function runInjector({
   let pendingWidgetReload = null;
   let widgetReloading = false;
   let modelRouterClosePromise = null;
+  let safeRestartCoordinator = null;
 
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
   const widgetSession = createWidgetSession({
@@ -139,6 +141,7 @@ export async function runInjector({
     },
     get appUpdate() { return appUpdateManager.getViewModel(); },
     get codexRuntime() { return codexRuntimeManager.getViewModel(); },
+    get safeRestart() { return safeRestartCoordinator?.getViewModel() ?? null; },
   });
 
   const appUpdateManager = updateManager ?? new AppUpdateManager({ version: packageJson.version,
@@ -167,6 +170,21 @@ export async function runInjector({
     });
   });
 
+  safeRestartCoordinator = createSafeRestartCoordinator({
+    getLaunchOptions,
+    getThreadId: () => hostHealthSession.selectedTask?.hostId === "local"
+      ? hostHealthSession.selectedTask.threadId
+      : null,
+    restart: restartForHostHealth,
+    onChange() {
+      if (stopped) return;
+      widgetSession.markWidgetDataDirty();
+      void widgetSession.requestWidgetUpdate().catch((error) => {
+        console.error(`[lifecycle] 安全重启状态刷新失败：${error.message}`);
+      });
+    },
+  });
+
   function syncAsyncAccountOperation() {
     const operationJson = JSON.stringify(accountManager.operation ?? null);
     if (operationJson === lastAccountOperationJson) return;
@@ -176,6 +194,7 @@ export async function runInjector({
 
   const stop = () => {
     stopped = true;
+    safeRestartCoordinator?.close();
     widgetSession.reset();
     registerLaunchRecovery?.(null);
     registerWidgetReload?.(null);
@@ -426,9 +445,19 @@ export async function runInjector({
           hostHealthSession.lastHostHealthCheckAt = 0;
           await hostHealthSession.syncHostHealth({ force: true });
           break;
+        case "safe-restart":
         case "host-health-restart":
           hostHealthSession.hostHealthActionError = null;
-          await restartForHostHealth();
+          // Keep draining page actions while the safe gate waits, otherwise a
+          // second click cannot deliver the user's confirmed force request.
+          void safeRestartCoordinator.request().catch((error) => {
+            if (!stopped) console.error(`[action] ${error.message}`);
+          });
+          break;
+        case "safe-restart-force":
+          // The original request owns failure reporting; this is the same
+          // promise and only changes it from waiting to forced restart.
+          void safeRestartCoordinator.force().catch(() => {});
           break;
         case "wakeup-save":
           await wakeupManager.save(action.accountId, {

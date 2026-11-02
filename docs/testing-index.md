@@ -88,6 +88,10 @@ macOS 定向启停补测使用 `npm run test:lifecycle -- --plan --task-tools-on
 
 ## 结果总表与证据来源
 
+2026-11-02 的[强制重启失败恢复定向验证](test-reports/macos-native/2026-11-02-safe-restart-failure.md)为 macOS arm64 免费公共组件局部结果：修复前 **5/6**、修复后 **17/17**，应用 0.1.342 / Widget 209 / Relay 102。覆盖失败重试、停止取消和页面按钮恢复；全部重启回调为模拟，未执行日常重启或真实模型测试。
+
+2026-11-02 的[速率设计与价格更新定向验证](test-reports/macos-native/2026-11-02-pricing-targeted.md)为 macOS arm64 免费公共组件的局部结果：基础 **60/60**、临时浏览器 **1/1**。源码 `0.1.340 / Widget 209 / Relay 102`；日常 Terra 新价已加载，页面仍为 Widget 208。速率部分尚未实施新协议，本轮未执行真实模型或启停恢复，不替代完整或跨平台验收。
+
 2026-10-25 的[官方用量入口屏蔽定向验证](test-reports/macos-native/2026-10-25-official-usage-suppression.md)为 macOS arm64 免费公共组件的局部结果：执行版本 `0.1.328 / Widget 202`，提交版本 `0.1.329` 复用浏览器 **2/2** 通过结果。当前正式版 Widget 201 已应用页面样式补丁，重载后持久生效需加载新版；未执行真实模型或启停恢复。
 
 2026-10-15 的[临时侧聊统计定向验证](test-reports/macos-native/2026-10-15-ephemeral-token-ledger.md)为 macOS arm64 免费公共组件的局部结果：最终提交 0.1.325，58/58 通过（复测 23 项，复用 35 项），保留移除自动迁移前的执行和审查证据；三个真实遗漏回合已由原始事件补回并确认当前页面收到、缓存落盘。源码 Relay 98，日常仍为 Relay 97，永久修复待加载新版；未执行真实模型或启停恢复。

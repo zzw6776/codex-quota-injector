@@ -799,6 +799,10 @@ test("会话外层按约定展示缓存命中率、加权速率和连接 RTT", (
     ),
     "本轮 Token 0.184M · 缓存命中率 99.5% · 累计 2.285M · 首字 7.4s · 速率 56.8 tok/s · 延时 48ms · 价格 ¥0.5685",
   );
+  assert.match(formatConversationUsageSummary({
+    ...usage,
+    cost: { available: true, totalCny: 2, rangeCny: { min: 1, max: 2 } },
+  }, liveNetwork), /价格 ¥1\.00–¥2\.00$/);
 
   const completed = { ...usage, completed: true };
   assert.equal(selectConversationNetworkLatency(completed, liveNetwork), usage.networkLatency);

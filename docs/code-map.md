@@ -11,7 +11,7 @@
 | 页面账号、迁移、唤醒 | 同上 | `accounts.mjs`、`migration.mjs`、`wakeup.mjs`；余额与宿主状态分别在 `balance.mjs`、`host-health.mjs` |
 | 页面用量和请求详情 | 同上 | `conversation-usage.mjs` 会话用量与 DOM 观察；`usage-tooltip.mjs` 费用；`usage-details.mjs` 请求详情；`tooltip-position.mjs` 提示位置 |
 | 页面布局与样式 | 同上 | `panel.mjs` 布局、开关、缩放和账号提示；`styles.mjs` 样式；纯展示函数在 `*-display.mjs` 与 `formatting.mjs` |
-| 注入器连接、刷新与动作调度 | `src/injector.mjs` | `injector/widget-session.mjs` 页面同步；`injector/host-health-session.mjs` 健康状态监听与轮询 |
+| 注入器连接、刷新与动作调度 | `src/injector.mjs` | `injector/widget-session.mjs` 页面同步；`injector/host-health-session.mjs` 健康状态监听与轮询；`injector/safe-restart.mjs` 等待终态、历史落盘及跨原生环境安全重启 |
 | 用量采集与计账 | `src/token-usage.mjs` | `token-usage/usage-events.mjs` 实时事件；`rollout-records.mjs` 历史记录；`turns.mjs` 回合；`generation.mjs` 请求与生成指标 |
 | 用量缓存、历史读取和展示 | 同上 | `cache.mjs` 缓存；`rollout-files.mjs` 文件发现、元数据缓存与按任务分组；`rollout-worker.mjs` Worker；`subagents.mjs` 子任务归属；`display.mjs` 视图 |
 | 模型路由与任务供应商绑定 | `src/model-router.mjs` | `model-router/configuration.mjs` 模型路由；`request-policy.mjs` 能力约束；`request-metadata.mjs` 请求上下文；`request-ledger.mjs` 供应商绑定、用量与工具批次记录 |
@@ -36,6 +36,7 @@
 - `AccountManager` 持有账户库、操作状态与锁。迁移模块在既有锁和操作边界内执行完整事务，不把刷新、凭据交接和回滚拆成独立交易。
 - `runAppServerRelay` 持有 Relay 会话状态，各消息模块使用明确传入的同一状态；`HostHealthTracker` 按任务保存启动与目录核验证据，生命周期检查指定发起任务；平台可执行文件的可变缓存留在各自发现模块。
 - `runInjector` 管理连接和调度；页面同步模块独占每个连接的安装状态、revision 和已确认快照，只暴露重置、等待空闲、标记变化和请求更新。首个完整快照使用连接独立编号，后续差量同批一次 CDP 执行并确认；宿主健康模块持有监听器、轮询和操作错误。
+- 安全重启协调器只在 `lifecycle-shutdown-gate.mjs` 确认所有活动回合终态和 SQLite 历史投影连续稳定后调用平台重启；WSL 复用当前原生 Relay 执行同一门禁，页面入口和任务工具入口不各自实现生命周期判断。
 - Widget 的 `runtime.mjs` 持有唯一页面状态；公共额度、健康和版本独立于编辑页更新，模型表单保留节点。一个整页结构观察器负责挂载恢复和会话节点变化，不再叠加会话子树观察器。`browser-features.mjs` 注册功能工厂，每个工厂通过显式依赖执行原有功能。工厂必须能独立序列化：不能依赖模块导入或 Node.js 闭包；已初始化的依赖直接传入，仅对尚未初始化的跨功能回调使用延迟调用。经常同时修改的页面、表单和事件放在同一个功能文件中。
 - `expressions.mjs` 将运行时、功能工厂和样式组装为浏览器表达式。`src/dev-runtime.mjs` 对整个 Widget 目录创建独立 ESM 快照，导入后清理临时文件，子模块变更不会命中旧模块缓存。
 
@@ -57,3 +58,5 @@
 版本规则保持原意：应用版本在 `package.json` 与 `package-lock.json`；Widget 版本定义在 `src/widget/contract.mjs` 并从原入口导出；Relay 协议仍在 `src/relay-contract.mjs`。等价的内部拆分不改变 Relay、缓存或模型检测结论的版本。
 
 页面同步和渲染的失效机制、删减理由及前后对照见[2026-09-17 架构审查](architecture-review-2026-09-17.md)。
+
+输出速率的接收批次、估算口径与兼容策略见[输出速率重新设计](generation-rate-design.md)（尚未实施）；最新核对的价格与估价范围见[2026-11-02 价格核对](pricing-2026-11-02.md)。

@@ -158,6 +158,15 @@ function summarizeSubagentTurns(turns, { includeDetails = true } = {}) {
   return summary;
 }
 
+function cumulativeCostFields({ totalCny, minimumCny, pendingTurns }) {
+  return {
+    cumulativeAvailable: pendingTurns === 0,
+    cumulativeCny: totalCny,
+    cumulativePendingTurns: pendingTurns,
+    cumulativeRangeCny: minimumCny < totalCny ? { min: minimumCny, max: totalCny } : null,
+  };
+}
+
 function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, turns, pricingManager, rolloutMetadataByThread, maxViewTurns, viewThreadId = null, initializing, error, getCachedTurnCost }) {
     const cumulativeCosts = new Map();
     for (const [threadId, history] of historicalSegmentsByThread) {
@@ -174,6 +183,8 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
         (history.segments.length > 0 && !historyCost?.available ? 1 : 0);
       cumulativeCosts.set(threadId, {
         totalCny: historyCost?.available ? positiveNumber(viewCost.totalCny) : 0,
+        minimumCny: historyCost?.available
+          ? positiveNumber(viewCost.rangeCny?.min ?? viewCost.totalCny) : 0,
         pendingTurns: historyPendingTurns,
       });
     }
@@ -207,9 +218,13 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
       const cost = pricingManager.toViewModel(rawCost);
       const taskCost = cumulativeCosts.get(turn.taskKey) ?? {
         totalCny: 0,
+        minimumCny: 0,
         pendingTurns: 0,
       };
-      if (hasUsage && cost.available) taskCost.totalCny += positiveNumber(cost.totalCny);
+      if (hasUsage && cost.available) {
+        taskCost.totalCny += positiveNumber(cost.totalCny);
+        taskCost.minimumCny += positiveNumber(cost.rangeCny?.min ?? cost.totalCny);
+      }
       else if ((hasUsage && !cost.available) || turn.completed) taskCost.pendingTurns += 1;
       cumulativeCosts.set(turn.taskKey, taskCost);
       if (!visibleTurns.has(turn)) continue;
@@ -258,9 +273,7 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
         ...publicTurn,
         cost: {
           ...cost,
-          cumulativeAvailable: taskCost.pendingTurns === 0,
-          cumulativeCny: taskCost.totalCny,
-          cumulativePendingTurns: taskCost.pendingTurns,
+          ...cumulativeCostFields(taskCost),
         },
       });
     }
@@ -281,9 +294,11 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
       if (!subagentCost) continue;
       const rootCost = subagentCumulativeByRoot.get(rootThreadId) ?? {
         totalCny: 0,
+        minimumCny: 0,
         pendingTurns: 0,
       };
       rootCost.totalCny += positiveNumber(subagentCost.totalCny);
+      rootCost.minimumCny += positiveNumber(subagentCost.minimumCny);
       rootCost.pendingTurns += positiveInteger(subagentCost.pendingTurns);
       subagentCumulativeByRoot.set(rootThreadId, rootCost);
     }
@@ -297,15 +312,15 @@ function buildUsageViewModel({ historicalSegmentsByThread, historicalCostCache, 
           cumulativeCost = {
             totalCny: positiveNumber(turn.cost.cumulativeCny) +
               positiveNumber(subagentCost.totalCny),
+            minimumCny: positiveNumber(turn.cost.cumulativeRangeCny?.min ?? turn.cost.cumulativeCny) +
+              positiveNumber(subagentCost.minimumCny),
             pendingTurns: positiveInteger(turn.cost.cumulativePendingTurns) +
               positiveInteger(subagentCost.pendingTurns),
           };
         }
       }
       if (!cumulativeCost) continue;
-      turn.cost.cumulativeAvailable = positiveInteger(cumulativeCost.pendingTurns) === 0;
-      turn.cost.cumulativeCny = positiveNumber(cumulativeCost.totalCny);
-      turn.cost.cumulativePendingTurns = positiveInteger(cumulativeCost.pendingTurns);
+      Object.assign(turn.cost, cumulativeCostFields(cumulativeCost));
     }
     return {
       status: initializing ? "loading" : error ? "error" : "ready",

@@ -5,9 +5,12 @@ import { readFile, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { MAX_SEEN_USAGE_RESPONSE_IDS, MAX_PENDING_GENERATION_RECORDS, TOKEN_FIELDS, toCamelCase, positiveNumber, nonNegativeNumberOrNull, positiveInteger, nonEmptyString, MAX_PENDING_USAGE_RECORDS } from "./contract.mjs";
 import { emptyTurn, normalizeRolloutUsage } from "./turns.mjs";
-import { normalizeToolTiming, normalizeTextPhases, outputPhaseFields, normalizeNetworkLatency } from "./generation.mjs";
+import { normalizeToolTiming, normalizeTextPhases, outputPhaseFields, normalizeNetworkLatency, rebuildGenerationSpeedAttribution } from "./generation.mjs";
 
-function normalizeCachedTurn(value, { generationMetricsCompatible = false } = {}) {
+function normalizeCachedTurn(value, {
+  generationMetricsCompatible = false,
+  generationSpeedCompatible = false,
+} = {}) {
   const turnId = nonEmptyString(value?.turnId);
   const threadId = nonEmptyString(value?.threadId ?? value?.taskKey);
   if (!turnId || !threadId) return null;
@@ -77,6 +80,9 @@ function normalizeCachedTurn(value, { generationMetricsCompatible = false } = {}
           : null,
       }))
     : [];
+  if (keepGenerationMetrics && !generationSpeedCompatible) {
+    rebuildGenerationSpeedAttribution(turn);
+  }
   turn.pendingGenerationSamples = keepGenerationMetrics && Array.isArray(value.pendingGenerationSamples)
     ? value.pendingGenerationSamples.slice(-MAX_PENDING_GENERATION_RECORDS).map((sample) => ({
         responseId: nonEmptyString(sample?.responseId),

@@ -67,6 +67,7 @@ function installQuotaWidget(
       codexRuntime: { supported: false, status: "idle" },
       tokenUsage: { status: "ready", turns: [] },
       hostHealth: { required: false, status: "direct" },
+      safeRestart: null,
       turnState: { byteLength: null, model: null, observedAt: null },
     },
     dataJson: "",
@@ -82,6 +83,8 @@ function installQuotaWidget(
     pinned: false,
     dismissed: false,
     actions: [],
+    safeRestartRequested: false,
+    safeRestartForcing: false,
     page: "accounts",
     migrationMode: "temporary",
     migrationSelectedIds: new Set(),
@@ -493,6 +496,7 @@ function installQuotaWidget(
     // A detail page does not display quota timestamps or live network samples.
     // Compare its actual inputs, not the complete app view or editable DOM.
     const chromeKey = JSON.stringify([state.data.version, state.data.injectionMode, hostHealth,
+      state.data.safeRestart,
       state.data.appUpdate,
       state.appUpdateOpening,
       state.data.turnState,
@@ -717,6 +721,12 @@ function installQuotaWidget(
       state.dataRevision = revision;
       if (data && Object.prototype.hasOwnProperty.call(data, "tokenUsage")) state.tokenUsageRevision = revision;
       state.data = { ...state.data, ...data };
+      if (data && Object.prototype.hasOwnProperty.call(data, "safeRestart")) {
+        const phase = data.safeRestart?.phase;
+        if (phase === "waiting") state.safeRestartRequested = true;
+        else if (phase) state.safeRestartRequested = false;
+        state.safeRestartForcing = phase === "restarting";
+      }
       if (data?.appUpdate?.requestId && data.appUpdate.requestId === state.appUpdateRequestId &&
           data.appUpdate.opening === false) state.appUpdateOpening = false;
       ensureMounted();

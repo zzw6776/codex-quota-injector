@@ -42,10 +42,11 @@ test("长上下文按单次请求分层，显式短上下文可以覆盖自动�
   );
 });
 
-test("GPT-6.1 Sol、GPT-6 Sol 和 Luna 按官方 Standard 短、长上下文价格计算缓存写入", () => {
+test("GPT-6.1 Sol/Terra、GPT-6 Sol 和 Luna 按官方 Standard 短、长上下文价格计算缓存写入", () => {
   const pricing = new TokenPricingManager({ fetchImpl: null });
   for (const [model, shortRates, longRates] of [
     ["gpt-6.1-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]],
+    ["gpt-6.1-terra", [1, 0.05, 1.25, 5], [2, 0.1, 2.5, 7.5]],
     ["gpt-6-sol", [2, 0.2, 2.5, 10], [4, 0.4, 5, 15]],
     ["gpt-6-luna", [0.1, 0.01, 0.125, 0.5], [0.2, 0.02, 0.25, 0.75]],
   ]) {
@@ -62,6 +63,31 @@ test("GPT-6.1 Sol、GPT-6 Sol 和 Luna 按官方 Standard 短、长上下文价�
       assert.equal(cost.total, expected[0] + expected[1] + expected[2] + expected[3]);
     }
   }
+});
+
+test("DeepSeek Flash 别名和 Pro 使用独立的官方峰谷价格，区间不随查看时间变化", () => {
+  const pricing = new TokenPricingManager({ fetchImpl: null });
+  for (const model of ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"]) {
+    const expected = model === "deepseek-v4-pro" ? [9, 0.3, 9, 27] : [2, 0.04, 2, 8];
+    const cost = pricing.calculate(model, {
+      input_tokens: 3_000_000,
+      cached_input_tokens: 1_000_000,
+      cache_write_input_tokens: 1_000_000,
+      output_tokens: 1_000_000,
+      reasoning_output_tokens: 250_000,
+    });
+    assert.equal(cost.currency, "CNY");
+    assert.deepEqual(Object.values(cost.rates), expected);
+    const total = expected.reduce((sum, value) => sum + value, 0);
+    assert.equal(cost.total, total);
+    const view = pricing.toViewModel(cost);
+    assert.deepEqual(view.rangeCny, { min: total / 2, max: total });
+    assert.equal(view.exchangeRate, null);
+  }
+  const first = pricing.calculate("deepseek-flash", { output_tokens: 1_000_000 });
+  const next = pricing.calculate("deepseek-v4-pro", { output_tokens: 1_000_000 });
+  assert.deepEqual(pricing.toViewModel(accumulateTokenCost(first, next)).rangeCny,
+    { min: 17.5, max: 35 });
 });
 
 test("GPT-6.1 Sol 按请求输入跨过 272K 后全请求计长价，缓存价不借用旧 Sol", () => {

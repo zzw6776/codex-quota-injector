@@ -236,6 +236,10 @@ const WIDGET_STYLES = {
     .host-health-missing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
     .host-health-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .host-health-actions .btn { padding: 4px 8px; }
+    .safe-restart.waiting, .safe-restart.restarting { color: #e5b86a; }
+    .safe-restart.failed { color: #ef8e86; }
+    .safe-restart.waiting svg, .safe-restart.restarting svg { animation: safe-restart-spin 1s linear infinite; }
+    @keyframes safe-restart-spin { to { transform: rotate(360deg); } }
     .host-health-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
     .host-health-check-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 24px; }
     .host-health-check-status { flex-shrink: 0; border-radius: 5px; padding: 1px 6px; font-size: 9px; background: rgba(138,138,149,.1); color: var(--token-text-secondary, #b5b5bf); }

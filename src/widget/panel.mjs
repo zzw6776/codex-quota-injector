@@ -199,10 +199,22 @@ wrap.querySelector(".host-health-flyout-close")?.addEventListener("click", () =>
   state.hostHealthDetailsThread = null;
   render({ background: true });
 });
-wrap.querySelector(".host-health-restart")?.addEventListener("click", (event) => {
+wrap.querySelectorAll(".safe-restart").forEach((button) => {
+  button.addEventListener("click", (event) => {
+    if (state.safeRestartForcing || state.data.safeRestart?.phase === "restarting") return;
+    const waiting = state.safeRestartRequested || state.data.safeRestart?.phase === "waiting";
+    if (waiting) {
+      if (!window.confirm("当前仍有任务未结束或历史尚未落盘。\n\n确定强制重启 Codex？这可能中断正在运行的任务，且最后一轮内容可能来不及保存。")) return;
+      state.safeRestartRequested = false;
+      state.safeRestartForcing = true;
       event.currentTarget.disabled = true;
-      enqueue({ type: "host-health-restart" });
-    });
+      enqueue({ type: "safe-restart-force" });
+      return;
+    }
+    state.safeRestartRequested = true;
+    enqueue({ type: "safe-restart" });
+  });
+});
 wrap.querySelector(".host-health-open-logs")?.addEventListener("click", (event) => {
       event.currentTarget.disabled = true;
       enqueue({ type: "host-health-open-logs" });
