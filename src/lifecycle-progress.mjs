@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { readFile, rename, writeFile } from "node:fs/promises";
-import process from "node:process";
+import { readFile } from "node:fs/promises";
 
 import { readLifecycleReport, writeLifecycleReport } from "./lifecycle-runner.mjs";
+import { writeLifecycleFile } from "./lifecycle-files.mjs";
 
 const STEP_LABELS = new Map([
   ["verify-package", "验证正式包签名、架构与哈希"],
@@ -128,11 +127,9 @@ ${components}
 </main></body></html>`;
 }
 
-export async function writeLifecycleProgressPage(reportPath, outputPath) {
+export async function writeLifecycleProgressPage(reportPath, outputPath, options) {
   const report = JSON.parse(await readFile(reportPath, "utf8"));
-  const temporary = `${outputPath}.tmp.${process.pid}.${randomUUID()}`;
-  await writeFile(temporary, renderLifecycleProgressHtml(report), { mode: 0o600 });
-  await rename(temporary, outputPath);
+  await writeLifecycleFile(outputPath, renderLifecycleProgressHtml(report), options);
   return report.updatedAt ?? null;
 }
 

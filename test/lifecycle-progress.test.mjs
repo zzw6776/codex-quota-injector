@@ -101,14 +101,41 @@ test("[HAR-02 HAR-03] 报告更新后渲染器刷新页面，停止前写入最�
     outputPath: progressPath,
     intervalMs: 5,
   });
-  report.status = "passed";
-  report.finishedAt = new Date(Date.now() + 1_000).toISOString();
-  report.steps[0].status = "passed";
-  report.updatedAt = report.finishedAt;
-  await writeLifecycleReport(reportPath, report);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  await renderer.stop();
+  try {
+    report.status = "passed";
+    report.finishedAt = new Date(Date.now() + 1_000).toISOString();
+    report.steps[0].status = "passed";
+    report.updatedAt = report.finishedAt;
+    await writeLifecycleReport(reportPath, report);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally {
+    await renderer.stop();
+  }
   assert.match(await readFile(progressPath, "utf8"), /生命周期测试全部通过/);
+});
+
+test("[HAR-02 HAR-03] 报告替换持续失败时仍停止渲染器并保留上次完整进度", { timeout: 2_000 }, async t => {
+  const directory = await useTempDir(t);
+  const reportPath = join(directory, "report.json");
+  const outputPath = join(directory, "progress.html");
+  const report = createLifecycleReport({ steps: ["verify-package"], targetRelayProtocol: 52 });
+  await writeLifecycleReport(reportPath, report);
+  const renderer = await startLifecycleProgressRenderer({ reportPath, outputPath, intervalMs: 5 });
+  const original = await readFile(reportPath, "utf8");
+  const locked = Object.assign(new Error("report locked"), { code: "EPERM" });
+  await assert.rejects(async () => {
+    try {
+      report.status = "passed";
+      report.finishedAt = new Date().toISOString();
+      await writeLifecycleReport(reportPath, report, {
+        platform: "win32", renameFile: async () => { throw locked; }, sleep: async () => {},
+      });
+    } finally {
+      await renderer.stop();
+    }
+  }, error => error === locked);
+  assert.equal(await readFile(reportPath, "utf8"), original);
+  assert.match(await readFile(outputPath, "utf8"), /等待外部监督器开始/);
 });
 
 test("[HAR-02 LCH-01] 进度页未成功显示时不调度重启，并留下可读失败终态", async (t) => {

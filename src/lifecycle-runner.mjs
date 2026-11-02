@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { writeLifecycleFile } from "./lifecycle-files.mjs";
 
 export const LIFECYCLE_REPORT_VERSION = 3;
 
@@ -116,14 +117,11 @@ export function lifecycleResumeDecision(report, {
   return "resume";
 }
 
-export async function writeLifecycleReport(path, report) {
+export async function writeLifecycleReport(path, report, options) {
   updateLifecycleComponents(report);
   validateLifecycleReport(report);
   report.version = LIFECYCLE_REPORT_VERSION;
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp.${process.pid}.${randomUUID()}`;
-  await writeFile(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, path);
+  await writeLifecycleFile(path, `${JSON.stringify(report, null, 2)}\n`, options);
 }
 
 export async function runLifecycleReport({

@@ -88,6 +88,8 @@ macOS 定向启停补测使用 `npm run test:lifecycle -- --plan --task-tools-on
 
 ## 结果总表与证据来源
 
+2026-11-02 的[Windows 报告替换修复](test-reports/macos-native/2026-11-02-windows-report-replace.md)保留远端 **731 通过、1 失败、1 取消、13 跳过**，本地 macOS / Node v26.7.0 故障注入最终 **23/23**。应用 0.1.344；Windows 原生恢复待新版 CI，未执行真实模型、日常启停或完整免费回归。
+
 2026-11-02 的[macOS CI 测试收尾修复](test-reports/macos-native/2026-11-02-ci-process-cleanup.md)保留远端 **738 通过、1 失败、2 跳过**及本地复现 **0/1**，修复后 Node v26.7.0 定向 **7/7**。应用 0.1.343，仅调整测试清理顺序；远端 Node 22.23.1 恢复待新版 CI 验证，不重复运行真实模型或启停。
 
 2026-11-02 的[强制重启失败恢复定向验证](test-reports/macos-native/2026-11-02-safe-restart-failure.md)为 macOS arm64 免费公共组件局部结果：修复前 **5/6**、修复后 **17/17**，应用 0.1.342 / Widget 209 / Relay 102。覆盖失败重试、停止取消和页面按钮恢复；全部重启回调为模拟，未执行日常重启或真实模型测试。
