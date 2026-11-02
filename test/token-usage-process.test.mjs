@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { appendFile, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -88,6 +88,11 @@ function controlledUsageService() {
 }
 
 test("Token 统计进程空闲退出，无变化不重启，追加事件后按需恢复", async (t) => {
+  let client;
+  t.after(async () => {
+    await client?.close();
+    await client?.flush();
+  });
   const codexHome = await useTempDir(t, "codex-usage-process-home-");
   const dataDir = await useTempDir(t, "codex-usage-process-data-");
   const firstUsage = protocolUsage({ input: 10, output: 5 });
@@ -105,7 +110,7 @@ test("Token 统计进程空闲退出，无变化不重启，追加事件后按�
     }),
   ].map((value) => JSON.stringify(value)).join("\n") + "\n");
 
-  const client = new TokenUsageProcessClient({
+  client = new TokenUsageProcessClient({
     codexHome,
     dataDir,
     discoveryIntervalMs: 0,
@@ -114,11 +119,6 @@ test("Token 统计进程空闲退出，无变化不重启，追加事件后按�
     eventWatchDebounceMs: 5,
     pricingManager: inertPricingManager(),
   });
-  t.after(async () => {
-    await client.close();
-    await client.flush();
-  });
-
   const initial = await client.initialize();
   assert.equal(initial.status, "ready");
   assert.equal(initial.turns[0].totalTokens, 15);
@@ -150,6 +150,11 @@ test("Token 统计进程空闲退出，无变化不重启，追加事件后按�
 });
 
 test("切换页面会话后短生命周期进程返回该会话的窗口外摘要", async (t) => {
+  let client;
+  t.after(async () => {
+    await client?.close();
+    await client?.flush();
+  });
   const codexHome = await useTempDir(t, "codex-usage-focus-home-");
   const dataDir = await useTempDir(t, "codex-usage-focus-data-");
   const usage = protocolUsage({ input: 10, output: 5 });
@@ -169,7 +174,7 @@ test("切换页面会话后短生命周期进程返回该会话的窗口外摘�
     join(dataDir, "token-usage-events.jsonl"),
     `${events.map((value) => JSON.stringify(value)).join("\n")}\n`,
   );
-  const client = new TokenUsageProcessClient({
+  client = new TokenUsageProcessClient({
     codexHome,
     dataDir,
     maxViewTurns: 1,
@@ -178,11 +183,6 @@ test("切换页面会话后短生命周期进程返回该会话的窗口外摘�
     watchSources: false,
     pricingManager: inertPricingManager(),
   });
-  t.after(async () => {
-    await client.close();
-    await client.flush();
-  });
-
   const initializing = client.initialize();
   assert.equal(client.setViewThread("thread-old"), true);
   assert.ok(client.scheduledRefresh, "初始化期间切换会话必须排队补一次刷新");
@@ -205,6 +205,11 @@ test("切换页面会话后短生命周期进程返回该会话的窗口外摘�
 });
 
 test("切回已访问会话立即复用轻量视图且不重新拉起统计进程", async (t) => {
+  let client;
+  t.after(async () => {
+    await client?.close();
+    await client?.flush();
+  });
   const codexHome = await useTempDir(t, "codex-usage-view-cache-home-");
   const dataDir = await useTempDir(t, "codex-usage-view-cache-data-");
   const usage = protocolUsage({ input: 10, output: 5 });
@@ -228,7 +233,7 @@ test("切回已访问会话立即复用轻量视图且不重新拉起统计进�
     join(dataDir, "token-usage-events.jsonl"),
     `${events.map((value) => JSON.stringify(value)).join("\n")}\n`,
   );
-  const client = new TokenUsageProcessClient({
+  client = new TokenUsageProcessClient({
     codexHome,
     dataDir,
     maxViewTurns: 1,
@@ -238,11 +243,6 @@ test("切回已访问会话立即复用轻量视图且不重新拉起统计进�
     watchSources: false,
     pricingManager: inertPricingManager(),
   });
-  t.after(async () => {
-    await client.close();
-    await client.flush();
-  });
-
   assert.deepEqual(
     (await client.initialize()).turns.map((turn) => turn.turnId),
     ["turn-cache-1"],
@@ -307,11 +307,23 @@ test("快速切换会话时迟到的旧视图不能覆盖当前会话", async (t
 });
 
 test("全量发现失败不会推进成功时间，下一次兜底刷新立即重试", async (t) => {
+  let client;
+  let dataDir;
+  // after hooks run in registration order: retire the writer before either
+  // useTempDir hook removes its data or rollout directory.
+  t.after(async () => {
+    if (!client) return;
+    const directoryExists = await access(dataDir).then(() => true, () => false);
+    await client.close();
+    await client.flush();
+    assert.equal(directoryExists, true, "关闭统计子进程前不得删除临时数据目录");
+    assert.equal(client.servicePid, null, "删除临时目录前统计子进程必须已退出");
+  });
   const codexHome = await useTempDir(t, "codex-usage-discovery-home-");
-  const dataDir = await useTempDir(t, "codex-usage-discovery-data-");
+  dataDir = await useTempDir(t, "codex-usage-discovery-data-");
   const sessionsPath = join(codexHome, "sessions");
   await writeFile(sessionsPath, "not-a-directory");
-  const client = new TokenUsageProcessClient({
+  client = new TokenUsageProcessClient({
     codexHome,
     dataDir,
     idleTimeoutMs: 5_000,
@@ -319,11 +331,6 @@ test("全量发现失败不会推进成功时间，下一次兜底刷新立即�
     watchSources: false,
     pricingManager: inertPricingManager(),
   });
-  t.after(async () => {
-    await client.close();
-    await client.flush();
-  });
-
   const failed = await client.initialize();
   assert.equal(failed.status, "error");
   assert.match(failed.error, /ENOTDIR/);
@@ -338,6 +345,11 @@ test("全量发现失败不会推进成功时间，下一次兜底刷新立即�
 });
 
 test("短生命周期统计服务在响应前完成已排队的未知模型补全", async (t) => {
+  let client;
+  t.after(async () => {
+    await client?.close();
+    await client?.flush();
+  });
   const codexHome = await useTempDir(t, "codex-usage-reconcile-home-");
   const dataDir = await useTempDir(t, "codex-usage-reconcile-data-");
   const targetThreadId = "11111111-1111-4111-8111-111111111111";
@@ -354,7 +366,7 @@ test("短生命周期统计服务在响应前完成已排队的未知模型补�
   await utimes(targetPath, stale, stale);
   await utimes(decoyPath, now, now);
 
-  const client = new TokenUsageProcessClient({
+  client = new TokenUsageProcessClient({
     codexHome,
     dataDir,
     idleTimeoutMs: 5_000,
@@ -362,11 +374,6 @@ test("短生命周期统计服务在响应前完成已排队的未知模型补�
     watchSources: false,
     pricingManager: inertPricingManager(),
   });
-  t.after(async () => {
-    await client.close();
-    await client.flush();
-  });
-
   assert.equal((await client.initialize()).status, "ready");
   const servicePid = client.servicePid;
   const usage = protocolUsage({ input: 12, output: 4 });
