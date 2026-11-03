@@ -138,6 +138,55 @@ function createState(path, rolloutPath) {
   db.close();
 }
 
+test("[LCH-04] 官方更新自动恢复回合没有新用户消息，完成且投影追平后允许关闭", async t => {
+  const root = await useTempDir(t, "codex-history-update-resume-");
+  const rolloutPath = join(root, "rollout.jsonl");
+  const prefix = `${JSON.stringify({ type: "session_meta", ordinal: 0, payload: { id: "thread", note: "中文" } })}\n`;
+  const start = { type: "event_msg", ordinal: 1, payload: { type: "task_started", turn_id: "turn",
+    turn_attribution: { turn_id: "turn", turn_trigger: "app_update_resume" } } };
+  const writeStart = async record => {
+    const contents = prefix + JSON.stringify(record) + "\n";
+    await writeFile(rolloutPath, contents);
+    db.prepare("UPDATE thread_history_projection_state SET next_rollout_byte_offset=?").run(Buffer.byteLength(contents));
+  };
+  createState(join(root, "state_5.sqlite"), rolloutPath);
+  createHistory(join(root, "thread_history_1.sqlite"), 0, 3, "completed", 2);
+  const db = new DatabaseSync(join(root, "thread_history_1.sqlite"));
+  try {
+    db.exec("DELETE FROM thread_items WHERE item_type='userMessage'; UPDATE thread_turns SET first_user_item_id=NULL, rollout_ordinal=1");
+    db.prepare("UPDATE thread_turns SET rollout_byte_offset=?").run(Buffer.byteLength(prefix));
+    await writeStart(start);
+    const check = () => inspectThreadHistoryStore({ sqliteHome: root, threadId: "thread", rolloutPath, turnIds: ["turn"] });
+    const result = await check();
+    assert.equal(result.healthy, true);
+    assert.equal(result.turns[0].firstUserItemPresent, false);
+    assert.equal(result.turns[0].trigger, "app_update_resume");
+    for (const record of [
+      { ...start, payload: { ...start.payload, turn_attribution: { turn_id: "turn", turn_trigger: "user" } } },
+      { ...start, payload: { ...start.payload, turn_id: "other" } },
+      { ...start, ordinal: 0 },
+      { ...start, type: "response_item" },
+      { ...start, payload: { ...start.payload, turn_attribution: { turn_id: "other", turn_trigger: "app_update_resume" } } },
+    ]) {
+      await writeStart(record);
+      assert.equal((await check()).reason, "turn-not-durable");
+    }
+    await writeStart(start);
+    db.exec("UPDATE thread_turns SET first_user_item_id='missing-user-item'");
+    assert.equal((await check()).reason, "turn-not-durable");
+    db.exec("UPDATE thread_turns SET first_user_item_id=NULL");
+    db.exec("UPDATE thread_history_projection_state SET next_rollout_byte_offset=0");
+    assert.equal((await check()).reason, "projection-behind");
+    await writeStart(start);
+    db.exec("UPDATE thread_turns SET status='inProgress'");
+    assert.equal((await check()).reason, "turn-not-durable");
+    db.exec("UPDATE thread_turns SET status='completed', rollout_end_ordinal=NULL");
+    assert.equal((await check()).reason, "turn-not-durable");
+    db.exec("UPDATE thread_turns SET rollout_end_ordinal=2; DELETE FROM thread_items WHERE item_type='agentMessage'");
+    assert.equal((await check()).reason, "turn-not-durable");
+  } finally { db.close(); }
+});
+
 test("[LCH-04] 专用任务的完整官方委托输入可持久化验收，截断或其他回合输出不能替代", async t => {
   const root = await useTempDir(t, "codex-history-delegated-");
   const rolloutPath = join(root, "rollout.jsonl");
@@ -164,13 +213,13 @@ function createHistory(path, offset, ordinal, status, endOrdinal) {
   const db = new DatabaseSync(path);
   db.exec(`
     CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER, next_rollout_ordinal INTEGER);
-    CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, status TEXT, rollout_ordinal INTEGER, rollout_end_ordinal INTEGER, first_user_item_id TEXT, final_agent_item_id TEXT);
+    CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, status TEXT, rollout_ordinal INTEGER, rollout_end_ordinal INTEGER, first_user_item_id TEXT, final_agent_item_id TEXT, rollout_byte_offset INTEGER);
     CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT, item_id TEXT, item_type TEXT, item_json TEXT);
     CREATE TABLE thread_realtime_items (thread_id TEXT, value TEXT);
   `);
   db.prepare("INSERT INTO thread_history_projection_state VALUES (?, ?, ?)").run("thread", offset, ordinal);
-  db.prepare("INSERT INTO thread_turns VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-    "thread", "turn", status, 0, endOrdinal, "user-item", "agent-item",
+  db.prepare("INSERT INTO thread_turns VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "thread", "turn", status, 0, endOrdinal, "user-item", "agent-item", 0,
   );
   db.prepare("INSERT INTO thread_items VALUES (?, ?, ?, ?, ?)").run(
     "thread", "turn", "user-item", "userMessage", "target-user",

@@ -20,7 +20,7 @@ export function updateWindowFragment(state) {
     ${state.status === "downloading" ? `<div class="meter"><div style="width:${percent}%"></div></div><p>${percent}% · ${(Number(state.received) / 1048576).toFixed(1)} / ${(Number(state.total) / 1048576).toFixed(1)} MB</p>` : ""}
     ${state.status === "success" ? '<p>正式版已启动，窗口将保留，直到你手动关闭。</p>' : ""}
     </div>
-    <div class="actions">${confirm ? '<button onclick="action(\'close\')">取消</button><button class="primary" onclick="action(\'confirm\')">立即更新</button>' : `${finished ? "" : `<button class="danger" onclick="action('terminate')" ${state.terminating ? "disabled" : ""}>${state.terminating ? "终止中…" : "终止更新"}</button>`}<button onclick="action('close')" ${finished ? "" : "disabled"}>关闭</button>`}</div>`;
+    <div class="actions">${confirm ? '<button onclick="action(\'close\')">取消</button><button class="primary" onclick="action(\'confirm\')">立即更新</button>' : `${state.status === "waiting" && !state.terminating && !state.forceRestartRequested ? '<button class="danger" onclick="showForceConfirmation()">强制重启并继续更新</button>' : ""}${finished ? "" : `<button class="danger" onclick="action('terminate')" ${state.terminating ? "disabled" : ""}>${state.terminating ? "终止中…" : "终止更新"}</button>`}<button onclick="action('close')" ${finished ? "" : "disabled"}>关闭</button>`}</div>`;
 }
 
 export function updateWindowHtml() {
@@ -29,17 +29,22 @@ export function updateWindowHtml() {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><title>Codex Quota Injector 更新</title><style>
     html,body{height:100%;margin:0}body{background:#f5f6f8;color:#25282b;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{height:100%;min-height:460px;padding:24px;box-sizing:border-box;display:flex;flex-direction:column}.update-content{flex:1 1 0%;min-height:0;overflow:auto}.update-confirm{display:flex;flex-direction:column}.update-confirm>*{flex-shrink:0}h1{font-size:20px;margin:0 0 12px}.versions{color:#73777e;font-size:12px;word-wrap:break-word}.status{font-size:16px;margin:20px 0 12px}.success,.done{color:#238348}.failed{color:#b43c34}.current{font-weight:600;color:#238348}p{line-height:1.7;color:#73777e;margin:0 0 12px}ol{padding-left:24px}li{line-height:2.2;color:#92979e}.actions{flex:0 0 auto;text-align:right;margin-top:16px}button{padding:9px 16px;margin-left:8px;border:1px solid #d1d5da;border-radius:8px;background:#fff;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:default}.primary{background:#238348;border-color:#238348;color:white}.meter{height:6px;border-radius:3px;background:#dfe4e0}.meter div{height:6px;background:#238348;border-radius:3px}
     .release-notes{flex:1 1 0px;min-height:100px;display:flex;flex-direction:column;margin-top:6px}.release-notes h2{flex:0 0 auto;font-size:14px;margin:0 0 8px}.release-notes-content{flex:1 1 0px;min-height:0;overflow:auto;padding:12px;border:1px solid #dfe2e6;border-radius:8px;background:#fff;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:break-word;word-wrap:break-word}
-    </style></head><body><main id="content">正在读取更新状态…</main><script>
+    .danger{color:#b43c34}.actions button{margin-top:8px}.confirmation{display:none;position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.35);align-items:center;justify-content:center;padding:24px;box-sizing:border-box}.confirmation.open{display:flex}.confirmation-card{background:#fff;border-radius:12px;padding:24px;max-width:400px}.confirmation-card h2{margin:0 0 12px;font-size:18px}
+    </style></head><body><main id="content">正在读取更新状态…</main>
+    <div id="force-confirmation" class="confirmation" role="dialog" aria-modal="true" aria-labelledby="force-title"><div class="confirmation-card"><h2 id="force-title">确认强制重启并继续更新？</h2><p>将跳过任务结束和历史落盘检查，安装新版并重启 Codex。正在运行的任务会被中断，最后一轮内容可能来不及保存。</p><div class="actions"><button id="force-cancel" onclick="hideForceConfirmation()">继续等待</button><button class="danger" onclick="hideForceConfirmation();action('force-restart')">确认强制重启</button></div></div></div><script>
     var previous='';var posting=false;var ready=false;var acknowledging=false;var root=location.pathname.slice(0,-1);
     function request(method,path,done){var xhr=new XMLHttpRequest();xhr.open(method,root+path,true);xhr.onreadystatechange=function(){if(xhr.readyState===4)done(xhr.status,xhr.responseText);};xhr.send(null);}
     function acknowledge(){if(ready||acknowledging)return;acknowledging=true;request('POST','/ready',function(status){acknowledging=false;ready=status===200;});}
     function refresh(){request('GET','/fragment',function(status,html){if(status===200){if(html!==previous){previous=html;document.getElementById('content').innerHTML=html;}if(window.requestAnimationFrame)window.requestAnimationFrame(acknowledge);else setTimeout(acknowledge,0);}});}
     function action(name){if(posting)return;posting=true;request('POST','/'+name,function(status){posting=false;if(name==='close'&&status===200)window.close();else refresh();});}
+    function showForceConfirmation(){if(posting)return;document.getElementById('force-confirmation').className='confirmation open';document.getElementById('force-cancel').focus();}
+    function hideForceConfirmation(){document.getElementById('force-confirmation').className='confirmation';}
     refresh();setInterval(refresh,750);
     </script></body></html>`;
 }
 
-export async function startUpdateWindowServer({ state, confirm, close, terminate = () => {}, show = () => {}, port = 0 }) {
+export async function startUpdateWindowServer({ state, confirm, close, terminate = () => {},
+  forceRestart = () => { throw new Error("当前更新器不支持强制重启"); }, show = () => {}, port = 0 }) {
   const token = randomBytes(24).toString("hex");
   const prefix = `/${token}`;
   let focus = false, windowReady = false, closingRequested = false;
@@ -70,6 +75,10 @@ export async function startUpdateWindowServer({ state, confirm, close, terminate
         confirm(); response.end("ok");
       } else if (request.method === "POST" && path === "/terminate") {
         terminate(); response.writeHead(202); response.end("ok");
+      } else if (request.method === "POST" && path === "/force-restart") {
+        const current = state();
+        if (current.status !== "waiting" || current.terminating) { response.writeHead(409); response.end(); return; }
+        forceRestart(); response.writeHead(202); response.end("ok");
       } else if (request.method === "POST" && path === "/close") {
         if (!["confirm", "success", "failed", "cancelled"].includes(state().status)) { response.writeHead(409); response.end(); return; }
         closingRequested = true;

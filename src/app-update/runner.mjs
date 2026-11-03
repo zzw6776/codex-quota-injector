@@ -21,14 +21,16 @@ export function createUpdateRun(control, { onState = () => {}, download = downlo
     currentVersion: control.owner.version, version: control.asset.version, received: 0,
     releaseNotes: control.asset.releaseNotes ?? "",
     total: control.asset.size, message: "是否更新到这个正式版本？" };
-  let started = false, tracked = [], lock = null;
+  let started = false, tracked = [], lock = null, forceRequested = false;
   const cancellation = new AbortController();
+  const safetyWait = new AbortController();
   const options = { signal: cancellation.signal };
+  const waitOptions = { signal: AbortSignal.any([cancellation.signal, safetyWait.signal]) };
   const checkpoint = () => cancellation.signal.throwIfAborted();
   const publish = patch => { state = { ...state, ...patch }; onState(state); };
-  const probe = async () => {
+  const probe = async (probeOptions = options) => {
     checkpoint();
-    const result = control.wslNative ? await wslHistory(control, options) : await history(control, tracked);
+    const result = control.wslNative ? await wslHistory(control, probeOptions) : await history(control, tracked);
     checkpoint();
     tracked = result.tracked;
     return result;
@@ -49,17 +51,23 @@ export function createUpdateRun(control, { onState = () => {}, download = downlo
       publish({ status: "waiting", message: "确认任务已结束并保存" });
       const deadline = now() + 30 * 60_000;
       let stable = null;
-      while (true) {
-        const result = await probe();
-        if (result.ready) {
-          const signature = JSON.stringify(result.tracked);
-          if (stable === signature) break;
-          stable = signature;
-        } else { stable = null; publish({ message: result.reason }); }
-        if (now() >= deadline) throw new Error("等待任务结束或历史落盘超时，未执行更新接管");
-        await sleep(1000, options);
+      try {
+        while (!forceRequested) {
+          const result = await probe(waitOptions);
+          if (forceRequested) break;
+          if (result.ready) {
+            const signature = JSON.stringify(result.tracked);
+            if (stable === signature) break;
+            stable = signature;
+          } else { stable = null; publish({ message: result.reason }); }
+          if (now() >= deadline) throw new Error("等待任务结束或历史落盘超时，未执行更新接管");
+          await sleep(1000, waitOptions);
+        }
+      } catch (error) {
+        if (!forceRequested || cancellation.signal.aborted) throw error;
       }
-      publish({ status: "installing", message: "正在替换正式版本" });
+      publish({ status: "installing", message: forceRequested
+        ? "已确认强制重启，正在替换正式版本" : "正在替换正式版本" });
       checkpoint();
       lock = await stop(control, options);
       checkpoint();
@@ -91,6 +99,14 @@ export function createUpdateRun(control, { onState = () => {}, download = downlo
   }
   let completion = null;
   return { get state() { return state; }, get completion() { return completion; },
+    forceRestart() {
+      if (state.status !== "waiting" || cancellation.signal.aborted) throw new Error("仅可在等待任务结束时强制重启");
+      if (forceRequested) return completion;
+      forceRequested = true;
+      publish({ forceRestartRequested: true, message: "已确认强制重启，正在停止安全等待" });
+      safetyWait.abort(new Error("用户确认强制重启并继续更新"));
+      return completion;
+    },
     terminate() {
       if (["success", "failed", "cancelled"].includes(state.status) || cancellation.signal.aborted) return completion;
       cancellation.abort(new Error("用户终止更新"));
@@ -133,6 +149,7 @@ export async function runAppUpdater() {
   };
   window = await startUpdateWindowServer({ state: () => ({ ...run.state, ...viewer?.state }),
     confirm: () => { void run.confirm(); }, terminate: () => { void run.terminate(); }, close: shutdown,
+    forceRestart: () => { void run.forceRestart(); },
     show: () => viewer?.show() });
   const descriptor = { id: control.id, pid: process.pid, url: window.url, logPath: join(control.directory, "updater.log") };
   await writeFile(`${control.registryPath}.tmp`, JSON.stringify(descriptor), { mode: 0o600 });

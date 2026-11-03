@@ -1,5 +1,5 @@
 import { backup, DatabaseSync } from "node:sqlite";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { mkdir, open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { readCodexDelegationInput } from "./codex-delegation.mjs";
 
@@ -30,9 +30,9 @@ export async function inspectThreadHistoryStore({
     const delegatedItems = history.prepare(
       "SELECT item_json FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_type = 'functionCallOutput'",
     );
-    const turns = turnIds.map((turnId) => {
+    const turns = await Promise.all(turnIds.map(async (turnId) => {
       const turn = history.prepare(
-        `SELECT turn_id, status, rollout_ordinal, rollout_end_ordinal,
+        `SELECT turn_id, status, rollout_ordinal, rollout_end_ordinal, rollout_byte_offset,
           first_user_item_id, final_agent_item_id
         FROM thread_turns WHERE thread_id = ? AND turn_id = ?`,
       ).get(projectionId, turnId) ?? { turn_id: turnId, status: "missing" };
@@ -51,8 +51,10 @@ export async function inspectThreadHistoryStore({
         ...turn,
         first_user_item_present: firstUserItem?.item_type === "userMessage" || delegatedInputPresent,
         final_agent_item_present: finalAgentItem?.item_type === "agentMessage",
+        trigger: turn.first_user_item_id == null && !delegatedInputPresent
+          ? await readTurnTrigger(rolloutPath, turn) : null,
       };
-    });
+    }));
     const rollout = await stat(rolloutPath).catch(() => null);
     const pathMatches = Boolean(thread?.rollout_path) &&
       normalizePath(thread.rollout_path) === normalizePath(rolloutPath);
@@ -61,7 +63,8 @@ export async function inspectThreadHistoryStore({
       (lastOrdinal == null || Number(projection.next_rollout_ordinal) >= Number(lastOrdinal) + 1);
     const turnsDurable = turns.every((turn) =>
       ["completed", "interrupted"].includes(String(turn.status)) &&
-      turn.rollout_end_ordinal != null && turn.first_user_item_present &&
+      turn.rollout_end_ordinal != null &&
+      (turn.first_user_item_present || turn.trigger === "app_update_resume") &&
       (turn.status === "interrupted" || turn.final_agent_item_present)
     );
     return {
@@ -90,12 +93,33 @@ export async function inspectThreadHistoryStore({
         rolloutEndOrdinal: turn.rollout_end_ordinal == null ? null : Number(turn.rollout_end_ordinal),
         firstUserItemPresent: turn.first_user_item_present,
         finalAgentItemPresent: turn.final_agent_item_present,
+        trigger: turn.trigger,
       })),
     };
   } finally {
     history.close();
     state.close();
   }
+}
+
+async function readTurnTrigger(path, turn) {
+  // Official app_update_resume turns continue existing input without a new
+  // userMessage. Bind that exception to this exact projected task_started.
+  if (!Number.isSafeInteger(turn.rollout_byte_offset) || turn.rollout_byte_offset < 0) return null;
+  const file = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, turn.rollout_byte_offset);
+    const end = buffer.subarray(0, bytesRead).indexOf(0x0a);
+    if (end < 0) return null;
+    let record;
+    try { record = JSON.parse(buffer.subarray(0, end).toString("utf8")); }
+    catch { return null; }
+    const payload = record.type === "event_msg" ? record.payload : null;
+    if (record.ordinal !== turn.rollout_ordinal || payload?.type !== "task_started" ||
+      payload.turn_id !== turn.turn_id || payload.turn_attribution?.turn_id !== turn.turn_id) return null;
+    return payload.turn_attribution.turn_trigger ?? null;
+  } finally { await file.close(); }
 }
 
 export async function resetThreadHistoryProjection({

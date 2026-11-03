@@ -6,12 +6,13 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import { releaseUpdate, fetchRelease } from "../src/app-update/releases.mjs";
 import { AppUpdateManager } from "../src/app-update/manager.mjs";
 import { downloadUpdate } from "../src/app-update/download.mjs";
 import { createUpdateRun, updateWindowArguments } from "../src/app-update/runner.mjs";
 import { inspectUpdateHistory } from "../src/app-update/history.mjs";
-import { startUpdateWindowServer, updateWindowFragment } from "../src/app-update/window.mjs";
+import { startUpdateWindowServer, updateWindowFragment, updateWindowHtml } from "../src/app-update/window.mjs";
 import { cleanUpdateEnvironment, loadedFileMatches, installNativeUpdate } from "../src/app-update/native-install.mjs";
 import { startHttpServer, useTempDir, waitFor } from "./helpers.mjs";
 import { createUpdateViewer } from "../src/app-update/viewer.mjs";
@@ -228,11 +229,11 @@ test("dev 只跳过版本比较，下载仍校验全部字节；网络/摘要/�
   assert.deepEqual(await readdir(directory), ["package.dmg"]);
 });
 
-function fakeRun(overrides = {}) {
+function fakeRun(overrides = {}, control = {}) {
   const calls = [], states = [];
   let probes = 0, readiness = 0;
   const run = createUpdateRun({ id: "job", directory: "/temporary", owner: { mode: "dev", version: "0.1.308" },
-    asset: { version: "0.1.295", name: "pkg.dmg", size: 12, platform: "darwin" } }, {
+    asset: { version: "0.1.295", name: "pkg.dmg", size: 12, platform: "darwin" }, ...control }, {
     onState: state => states.push({ ...state }),
     download: async (_asset, path, options) => { calls.push("download"); options.onProgress(12, 12); return path; },
     prepare: async () => { calls.push("prepare"); return {}; },
@@ -255,6 +256,93 @@ test("确认前不下载，重复确认不重跑；任务落盘后接管，启�
   assert.ok(states.some(state => state.status === "waiting" && state.message === "等待任务结束"));
   assert.match(updateWindowFragment(run.state), /窗口将保留/);
   assert.doesNotMatch(updateWindowFragment(run.state), /disabled/);
+});
+
+test("更新窗口强制重启须二次确认，取消不请求；只在等待阶段提供入口", () => {
+  const requests = [], elements = { 'force-confirmation': { className: 'confirmation' },
+    'force-cancel': { focus() {} } };
+  const context = { location: { pathname: '/token/' }, document: { getElementById: id => elements[id] },
+    setInterval() {}, XMLHttpRequest: function () {
+      this.open = (method, path) => requests.push([method, path]); this.send = () => {};
+    } };
+  const html = updateWindowHtml();
+  runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
+  requests.length = 0;
+  context.showForceConfirmation();
+  assert.equal(elements['force-confirmation'].className, 'confirmation open');
+  assert.deepEqual(requests, []);
+  context.hideForceConfirmation();
+  assert.equal(elements['force-confirmation'].className, 'confirmation');
+  assert.deepEqual(requests, []);
+  const handler = html.match(/onclick="([^"]+)">确认强制重启/)[1];
+  runInNewContext(handler, context);
+  assert.deepEqual(requests, [['POST', '/token/force-restart']]);
+  assert.match(html, /最后一轮内容可能来不及保存/);
+  assert.match(updateWindowFragment({ status: 'waiting' }), /showForceConfirmation/);
+  for (const state of [
+    ...['confirm', 'downloading', 'verifying', 'installing', 'launching', 'success', 'failed', 'cancelled'].map(status => ({ status })),
+    { status: 'waiting', terminating: true }, { status: 'waiting', forceRestartRequested: true },
+  ]) assert.doesNotMatch(updateWindowFragment(state), /showForceConfirmation/);
+});
+
+for (const wslNative of [false, true]) {
+  test(`确认强制更新中断${wslNative ? 'WSL 历史探测' : '等待休眠'}，复用同一控制器且仅接管一次`, async () => {
+    let entered, probes = 0;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const blocked = (_unused, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true }); entered();
+    });
+    const f = fakeRun({ history: async () => ({ ready: false, tracked: [], reason: '等待任务' }),
+      ...(wslNative ? { wslHistory: async (_control, options) => ++probes === 1
+        ? { ready: false, tracked: [] } : blocked(null, options) } : { sleep: blocked }),
+      ready: async () => true,
+    }, { wslNative });
+    assert.throws(() => f.run.forceRestart(), /仅可在等待/);
+    const completion = f.run.confirm(); await waiting;
+    assert.equal(f.run.forceRestart(), completion);
+    assert.equal(f.run.forceRestart(), completion);
+    await completion;
+    assert.equal(f.run.state.status, 'success');
+    assert.equal(f.run.state.forceRestartRequested, true);
+    assert.deepEqual(f.calls, ['download', 'prepare', 'stop', 'install', 'release', 'launch']);
+    assert.throws(() => f.run.forceRestart(), /仅可在等待/);
+  });
+}
+
+test("强制更新与终止同时触发时终止优先，强制后的安装错误仍显示失败", async () => {
+  for (const cancel of [true, false]) {
+    let entered;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const f = fakeRun({ history: async () => ({ ready: false, tracked: [], reason: '等待投影' }),
+      sleep: (_ms, { signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true }); entered();
+      }), install: async () => { throw new Error('install failed'); },
+    });
+    const completion = f.run.confirm(); await waiting;
+    f.run.forceRestart();
+    if (cancel) f.run.terminate();
+    await completion;
+    assert.equal(f.run.state.status, cancel ? 'cancelled' : 'failed');
+    if (cancel) assert.deepEqual(f.calls, ['download', 'prepare']);
+    else { assert.match(f.run.state.message, /install failed/); assert.ok(f.calls.includes('release')); }
+  }
+});
+
+test("强制更新接口仅允许等待阶段且禁止外部来源，终止中不能再强制", async t => {
+  let state = { status: 'waiting' }, calls = 0;
+  const window = await startUpdateWindowServer({ state: () => state,
+    confirm() {}, close() {}, forceRestart() { calls++; } });
+  t.after(() => window.close());
+  const force = headers => fetch(`${window.url}force-restart`, { method: 'POST', headers });
+  assert.equal((await force({ Origin: 'https://other.example' })).status, 403);
+  assert.equal(calls, 0);
+  for (const status of ['confirm', 'downloading', 'verifying', 'installing', 'launching', 'success', 'failed', 'cancelled']) {
+    state = { status }; assert.equal((await force()).status, 409);
+  }
+  state = { status: 'waiting', terminating: true };
+  assert.equal((await force()).status, 409); assert.equal(calls, 0);
+  state = { status: 'waiting' };
+  assert.equal((await force()).status, 202); assert.equal(calls, 1);
 });
 
 test("下载/校验失败不关闭应用；安装或正式进程核验失败不假报成功，保留错误窗口", async () => {

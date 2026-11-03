@@ -7,6 +7,52 @@ import { waitFor } from "../test/helpers.mjs";
 import { startUpdateWindowServer } from "../src/app-update/window.mjs";
 import { createUpdateRun } from "../src/app-update/runner.mjs";
 
+test("更新等待页强制重启先确认，取消和刷新保持等待，确认后仅继续一次更新", { timeout: 30_000 }, async t => {
+  const b = await startBrowser(t);
+  const calls = [];
+  const run = createUpdateRun({ id: 'force-fixture', directory: '/fixture',
+    owner: { mode: 'formal', version: '0.1.337' },
+    asset: { version: '0.1.344', name: 'pkg', size: 100 } }, {
+    history: async () => ({ ready: false, tracked: [], reason: '等待任务历史投影落盘' }),
+    download: async () => 'fixture', prepare: async () => ({}),
+    stop: async () => { calls.push('stop'); return 'fixture-lock'; },
+    releaseLock: async () => { calls.push('release'); },
+    install: async () => { calls.push('install'); }, launch: async () => { calls.push('launch'); },
+    ready: async () => true,
+  });
+  const window = await startUpdateWindowServer({ state: () => run.state,
+    confirm: () => { void run.confirm(); }, forceRestart: () => { void run.forceRestart(); }, close() {} });
+  t.after(() => window.close());
+  await b.client.request('Page.navigate', { url: window.url });
+  await waitFor(() => b.client.evaluate(`document.querySelector('.primary')?.textContent==='立即更新'`));
+  await b.click('.primary', { shadow: false });
+  await waitFor(() => b.client.evaluate(`document.querySelector('[onclick="showForceConfirmation()"]') != null`));
+  const directory = join(import.meta.dirname, '..', '.runtime', 'update-gate-20261103');
+  await mkdir(directory, { recursive: true });
+  for (const [width, height] of [[500, 510], [420, 460]]) {
+    await b.client.request('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    assert.equal(await b.client.evaluate(`Array.from(document.querySelectorAll('#content .actions button')).every(b=>{const r=b.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;})`), true);
+    await b.click('[onclick="showForceConfirmation()"]', { shadow: false });
+    assert.equal(await b.client.evaluate(`getComputedStyle(document.getElementById('force-confirmation')).display`), 'flex');
+    assert.equal(await b.client.evaluate(`(()=>{const r=document.querySelector('.confirmation-card').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()`), true);
+    const screenshot = await b.client.request('Page.captureScreenshot');
+    await writeFile(join(directory, `force-confirm-${width}.png`), Buffer.from(screenshot.data, 'base64'));
+    assert.deepEqual(calls, []);
+    // Poll a changed fragment while the separate confirmation dialog remains open.
+    await b.client.evaluate(`previous='';refresh()`);
+    await waitFor(() => b.client.evaluate(`previous!==''`));
+    assert.equal(await b.client.evaluate(`getComputedStyle(document.getElementById('force-confirmation')).display`), 'flex');
+    await b.click('#force-cancel', { shadow: false });
+    assert.equal(run.state.status, 'waiting'); assert.deepEqual(calls, []);
+  }
+  await b.click('[onclick="showForceConfirmation()"]', { shadow: false });
+  await b.click('#force-confirmation .danger', { shadow: false });
+  await waitFor(() => run.state.status === 'success');
+  assert.equal(run.state.forceRestartRequested, true);
+  assert.deepEqual(calls, ['stop', 'install', 'release', 'launch']);
+  await waitFor(() => b.client.evaluate(`document.querySelector('[onclick="showForceConfirmation()"]')===null`));
+});
+
 test("更新确认页随窗口伸缩，长短空日志框等大且按钮贴近底部", { timeout: 30_000 }, async t => {
   const b = await startBrowser(t);
   await b.client.request('Emulation.setDeviceMetricsOverride', { width: 500, height: 510, deviceScaleFactor: 1, mobile: false });
@@ -80,8 +126,9 @@ test("新旧额度入口小绿点不占行，右下角更新按钮在局部刷�
   await b.settled();
   assert.equal(await b.client.evaluate(`document.getElementById('codex-quota-injector-root').dataset.layout`), 'rail');
   assert.equal(await b.value('.app-update-open'), 'vtest → v0.1.296');
-  const rect = await b.client.evaluate(`(()=>{const q=${SHADOW}.querySelector('.quota-chip').getBoundingClientRect(),d=${SHADOW}.querySelector('.app-update-dot').getBoundingClientRect();return {chipWidth:q.width,dotWidth:d.width,within:d.left>=q.left&&d.right<=q.right,position:getComputedStyle(${SHADOW}.querySelector('.app-update-dot')).position}})()`);
-  assert.equal(rect.chipWidth, 36); assert.equal(rect.dotWidth, 5); assert.equal(rect.within, true); assert.equal(rect.position, 'absolute');
+  const rect = await b.client.evaluate(`(()=>{const root=document.getElementById('codex-quota-injector-root').getBoundingClientRect(),q=${SHADOW}.querySelector('.quota-chip').getBoundingClientRect(),d=${SHADOW}.querySelector('.app-update-dot').getBoundingClientRect();return {rootWidth:root.width,chipWidth:q.width,leftOverhang:root.left-q.left,rightOverhang:q.right-root.right,dotWidth:d.width,within:d.left>=q.left&&d.right<=q.right,position:getComputedStyle(${SHADOW}.querySelector('.app-update-dot')).position}})()`);
+  assert.deepEqual(rect, { rootWidth: 36, chipWidth: 44, leftOverhang: 4, rightOverhang: 4,
+    dotWidth: 5, within: true, position: 'absolute' });
   await b.update(fixtureData({ appUpdate: { available: false } }));
   assert.equal(await b.client.evaluate(`${SHADOW}.querySelector('.app-update-dot')`), null);
   assert.equal(await b.value('.app-update-open'), 'vtest');
