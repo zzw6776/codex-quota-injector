@@ -45,7 +45,14 @@ function createFormatting() {
     if (Number.isNaN(date.getTime())) return String(value);
     const days = Math.ceil((date.getTime() - Date.now()) / 86_400_000);
     const prefix = days < 0 ? "已到期" : days === 0 ? "今天到期" : `${days} 天后`;
-    return `${prefix}（${new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" }).format(date)}）`;
+    return `${prefix}（${new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(date)}）`;
   }
 
   function formatUpdatedAt(value) {
