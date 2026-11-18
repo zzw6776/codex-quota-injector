@@ -42,9 +42,12 @@ test("长上下文按单次请求分层，显式短上下文可以覆盖自动�
   );
 });
 
-test("GPT-6.1 Sol/Terra、GPT-6 Sol 和 Luna 按官方 Standard 短、长上下文价格计算缓存写入", () => {
+test("GPT-6、6.1 和 6.2 系列 按官方 Standard 短、长上下文价格计算缓存写入", () => {
   const pricing = new TokenPricingManager({ fetchImpl: null });
   for (const [model, shortRates, longRates] of [
+    ["gpt-6.2-astra", [8, 0.4, 10, 40], [16, 0.8, 20, 60]],
+    ["gpt-6.2-astra-law", [8, 0.4, 10, 40], [16, 0.8, 20, 60]],
+    ["gpt-6.2-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]],
     ["gpt-6.1-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]],
     ["gpt-6.1-terra", [1, 0.05, 1.25, 5], [2, 0.1, 2.5, 7.5]],
     ["gpt-6-sol", [2, 0.2, 2.5, 10], [4, 0.4, 5, 15]],

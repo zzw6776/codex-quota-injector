@@ -6,7 +6,10 @@ import { TokenUsageManager } from "../src/token-usage.mjs";
 import { useTempDir } from "./helpers.mjs";
 import { event, protocolUsage, pricing, createManager } from "./token-usage/support.mjs";
 
-for (const [model, expectedTotal] of [["gpt-6.1-sol", 0.42], ["gpt-6.1-terra", 0.21]]) {
+for (const [model, expectedTotal] of [
+  ["gpt-6.1-sol", 0.42], ["gpt-6.1-terra", 0.21],
+  ["gpt-6.2-astra", 1.68], ["gpt-6.2-sol", 0.42],
+]) {
 test(`原先无 ${model} 价格的持久化用量重新加载后重算费用，多个短请求不合并计长价`, async t => {
   const dataDir = await useTempDir(t);
   const codexHome = join(dataDir, "codex-home");

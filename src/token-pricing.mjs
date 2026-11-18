@@ -39,12 +39,22 @@ const DEEPSEEK_PRICES = Object.freeze({
   "deepseek-v4-pro": priceTier(9, 0.3, 9, 27),
 });
 
-// Standard API USD per 1M tokens; latest models checked 2026-11-02:
+// Standard API USD per 1M tokens; latest models checked 2026-11-18:
 // https://developers.openai.com/api/docs/pricing?latest-pricing=standard
-// https://developers.openai.com/api/docs/models/gpt-6.1-terra
+// https://developers.openai.com/api/docs/models/gpt-6.2-astra
 // Cache writes use 30-minute retention where the provider distinguishes it.
 // GPT-5.6 Sol promotional rates are published through at least 2026-11-21.
+const GPT_62_ASTRA_PRICE = modelPrice(
+  priceTier(8, 0.4, 10, 40),
+  priceTier(16, 0.8, 20, 60),
+);
 const OPENAI_PRICES = Object.freeze({
+  "gpt-6.2-astra": GPT_62_ASTRA_PRICE,
+  "gpt-6.2-astra-law": GPT_62_ASTRA_PRICE,
+  "gpt-6.2-sol": modelPrice(
+    priceTier(2, 0.1, 2.5, 10),
+    priceTier(4, 0.2, 5, 15),
+  ),
   "gpt-6.1-sol": modelPrice(
     priceTier(2, 0.1, 2.5, 10),
     priceTier(4, 0.2, 5, 15),

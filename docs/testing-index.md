@@ -88,6 +88,8 @@ macOS 定向启停补测使用 `npm run test:lifecycle -- --plan --task-tools-on
 
 ## 结果总表与证据来源
 
+2026-11-18，0.1.347 在 macOS arm64 的计价、历史用量重算和模拟唤醒选模定向验证 **22/22** 通过。[GPT-6.2 计价验证记录](test-reports/macos-native/2026-11-18-pricing-targeted.md)
+
 2026-11-02 的[Windows 报告替换修复](test-reports/macos-native/2026-11-02-windows-report-replace.md)保留远端 **731 通过、1 失败、1 取消、13 跳过**，本地 macOS / Node v26.7.0 故障注入最终 **23/23**。应用 0.1.344；Windows 原生恢复待新版 CI，未执行真实模型、日常启停或完整免费回归。
 
 2026-11-02 的[macOS CI 测试收尾修复](test-reports/macos-native/2026-11-02-ci-process-cleanup.md)保留远端 **738 通过、1 失败、2 跳过**及本地复现 **0/1**，修复后 Node v26.7.0 定向 **7/7**。应用 0.1.343，仅调整测试清理顺序；远端 Node 22.23.1 恢复待新版 CI 验证，不重复运行真实模型或启停。
