@@ -401,3 +401,214 @@ test("非当前 OAuth 账号遇到过期 Token 会先刷新，再读取额度", 
   assert.equal(refreshed.tokens.refreshToken, "refresh-once");
   assert.equal(refreshed.quota.windows[0].remainingPercent, 90);
 });
+
+test("当前 OAuth 会话可续期时写回官方凭据并请求重载，不切换账号", async (t) => {
+  const dataDir = await useTempDir(t, "codex-current-session-refresh-");
+  const cockpitDir = await useTempDir(t, "codex-current-session-cockpit-");
+  const codexHome = await useTempDir(t, "codex-current-session-home-");
+  const store = new AccountStore({ dataDir, cockpitDir });
+  await store.initialize();
+  const current = oauthAccount({
+    id: "current",
+    accountId: "workspace-current",
+    subscriptionUpdatedAt: Math.floor(Date.now() / 1000),
+    tokens: {
+      idToken: "current-id",
+      accessToken: "current-access-old",
+      refreshToken: "current-refresh-old",
+    },
+  });
+  const backup = oauthAccount({
+    id: "backup",
+    email: "backup@example.com",
+    accountId: "workspace-backup",
+    subscriptionUpdatedAt: Math.floor(Date.now() / 1000),
+    tokens: {
+      idToken: "backup-id",
+      accessToken: "backup-access",
+      refreshToken: "backup-refresh",
+    },
+  });
+  await store.upsert(current);
+  await store.upsert(backup);
+  await store.setCurrent(current.id);
+  await writeOfficialCredentials(codexHome, current, { syncKeychain: false });
+  await withMockFetch(t, async (url, options) => {
+    const target = String(url);
+    if (target.endsWith("/oauth/token")) {
+      assert.equal(JSON.parse(options.body).refresh_token, "current-refresh-old");
+      return response({ access_token: "current-access-new", refresh_token: "current-refresh-new" });
+    }
+    if (target.endsWith("/wham/usage")) {
+      if (options.headers.Authorization === "Bearer current-access-old") {
+        return response({ error: "unauthorized" }, { status: 401 });
+      }
+      return response({
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: { used_percent: 10, limit_window_seconds: 18_000, reset_at: 100 },
+        },
+      });
+    }
+    throw new Error(`非预期网络访问 ${target}`);
+  });
+  const manager = new AccountManager({ store, codexHome, syncOfficialKeychain: false });
+  t.after(() => manager.close());
+
+  const result = await manager.refreshAll({ recoverCurrentSession: true });
+
+  assert.deepEqual(result.authenticationRecovery, {
+    kind: "refreshed",
+    failedAccountId: null,
+    accountId: current.id,
+    message: "已恢复 owner@example.com 的登录会话",
+    restartRequired: true,
+  });
+  assert.equal(store.index.currentAccountId, current.id);
+  assert.equal(store.get(current.id).tokens.refreshToken, "current-refresh-new");
+  const official = JSON.parse(await readFile(join(codexHome, "auth.json"), "utf8"));
+  assert.equal(official.tokens.access_token, "current-access-new");
+  assert.equal(official.tokens.refresh_token, "current-refresh-new");
+});
+
+test("当前 OAuth 会话永久失效后自动切换到已验证的下一个账号", async (t) => {
+  const dataDir = await useTempDir(t, "codex-session-fallback-");
+  const cockpitDir = await useTempDir(t, "codex-session-fallback-cockpit-");
+  const codexHome = await useTempDir(t, "codex-session-fallback-home-");
+  const store = new AccountStore({ dataDir, cockpitDir });
+  await store.initialize();
+  const current = oauthAccount({
+    id: "expired",
+    accountId: "workspace-expired",
+    subscriptionUpdatedAt: Math.floor(Date.now() / 1000),
+    tokens: {
+      idToken: "expired-id",
+      accessToken: "expired-access",
+      refreshToken: "expired-refresh",
+    },
+  });
+  const fallback = oauthAccount({
+    id: "fallback",
+    email: "fallback@example.com",
+    accountId: "workspace-fallback",
+    subscriptionUpdatedAt: Math.floor(Date.now() / 1000),
+    tokens: {
+      idToken: "fallback-id",
+      accessToken: "fallback-access",
+      refreshToken: "fallback-refresh",
+    },
+  });
+  const unusable = oauthAccount({
+    id: "unusable",
+    email: "unusable@example.com",
+    accountId: "workspace-unusable",
+    lastUsed: 200,
+    subscriptionUpdatedAt: Math.floor(Date.now() / 1000),
+    tokens: {
+      idToken: "unusable-id",
+      accessToken: "unusable-access",
+      refreshToken: "unusable-refresh",
+    },
+  });
+  fallback.lastUsed = 100;
+  await store.upsert(current);
+  await store.upsert(unusable);
+  await store.upsert(fallback);
+  await store.setCurrent(current.id);
+  await writeOfficialCredentials(codexHome, current, { syncKeychain: false });
+  await withMockFetch(t, async (url, options) => {
+    const target = String(url);
+    if (target.endsWith("/oauth/token")) {
+      assert.ok(["expired-refresh", "unusable-refresh"].includes(
+        JSON.parse(options.body).refresh_token,
+      ));
+      return response({ error: { code: "invalid_grant" } }, { status: 401 });
+    }
+    if (target.endsWith("/wham/usage")) {
+      if (["Bearer expired-access", "Bearer unusable-access"].includes(
+        options.headers.Authorization,
+      )) {
+        return response({ error: "unauthorized" }, { status: 401 });
+      }
+      return response({
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: { used_percent: 20, limit_window_seconds: 18_000, reset_at: 100 },
+        },
+      });
+    }
+    throw new Error(`非预期网络访问 ${target}`);
+  });
+  const manager = new AccountManager({ store, codexHome, syncOfficialKeychain: false });
+  t.after(() => manager.close());
+
+  const result = await manager.refreshAll({ recoverCurrentSession: true });
+
+  assert.deepEqual(result.authenticationRecovery, {
+    kind: "switched",
+    failedAccountId: current.id,
+    accountId: fallback.id,
+    message: "当前登录已失效，已自动切换到 fallback@example.com",
+    restartRequired: true,
+  });
+  assert.equal(store.get(current.id).authStatus, "needsReauth");
+  assert.equal(store.get(unusable.id).authStatus, "needsReauth");
+  assert.equal(store.index.currentAccountId, fallback.id);
+  const official = JSON.parse(await readFile(join(codexHome, "auth.json"), "utf8"));
+  assert.equal(official.tokens.access_token, "fallback-access");
+  assert.equal(official.tokens.refresh_token, "fallback-refresh");
+});
+
+test("失效状态不会被同一份官方凭据重新激活，且无可用账号时请求官方登录", async (t) => {
+  const dataDir = await useTempDir(t, "codex-session-login-");
+  const cockpitDir = await useTempDir(t, "codex-session-login-cockpit-");
+  const codexHome = await useTempDir(t, "codex-session-login-home-");
+  const store = new AccountStore({ dataDir, cockpitDir });
+  await store.initialize();
+  const expired = oauthAccount({
+    id: "expired-only",
+    accountId: "workspace-expired-only",
+    authStatus: "needsReauth",
+    subscriptionUpdatedAt: Math.floor(Date.now() / 1000),
+    tokens: {
+      idToken: "expired-only-id",
+      accessToken: "expired-only-access",
+      refreshToken: "expired-only-refresh",
+    },
+  });
+  await store.upsert(expired);
+  await store.setCurrent(expired.id);
+  await writeOfficialCredentials(codexHome, expired, { syncKeychain: false });
+  await withMockFetch(t, async (url, options) => {
+    const target = String(url);
+    if (target.endsWith("/oauth/token")) {
+      assert.equal(JSON.parse(options.body).refresh_token, "expired-only-refresh");
+      return response({ error: { code: "refresh_token_reused" } }, { status: 401 });
+    }
+    if (target.endsWith("/wham/usage")) {
+      return response({ error: "unauthorized" }, { status: 401 });
+    }
+    throw new Error(`非预期网络访问 ${target}`);
+  });
+  const manager = new AccountManager({ store, codexHome, syncOfficialKeychain: false });
+  t.after(() => manager.close());
+
+  const synced = await manager.syncCurrentAccountFromOfficialCredentials();
+  assert.equal(synced.changed, false);
+  assert.equal(store.get(expired.id).authStatus, "needsReauth");
+
+  const result = await manager.refreshAll({ recoverCurrentSession: true });
+
+  assert.deepEqual(result.authenticationRecovery, {
+    kind: "login",
+    failedAccountId: expired.id,
+    accountId: null,
+    message: "所有已保存登录均已失效，正在打开 Codex 官方登录",
+    restartRequired: true,
+  });
+  assert.equal(store.get(expired.id).authStatus, "needsReauth");
+  assert.equal(store.index.currentAccountId, expired.id);
+  const official = JSON.parse(await readFile(join(codexHome, "auth.json"), "utf8"));
+  assert.equal(official.tokens.access_token, "expired-only-access");
+  assert.equal(official.tokens.refresh_token, "expired-only-refresh");
+});

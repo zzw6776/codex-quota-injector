@@ -62,6 +62,8 @@ async function runLauncher() {
   const { ExtraModelManager } = await import("./extra-model-manager.mjs");
   const { installFileLogger } = await import("./file-logger.mjs");
   const { runInjector } = await import("./injector.mjs");
+  const { recoverLauncherAuthentication } = await import("./launcher-authentication.mjs");
+  const { recoverWithOfficialCodexLogin } = await import("./official-login.mjs");
   const { ModelCatalogCoordinator } = await import("./model-catalog-coordinator.mjs");
   const { ModelRouterManager } = await import("./model-router.mjs");
   const {
@@ -202,6 +204,17 @@ async function runLauncher() {
     await contextManager.initialize();
     await extraModelManager.initialize();
     await codexRuntimeManager.initialize();
+    const startupAuthentication = await recoverLauncherAuthentication(accountManager);
+    if (startupAuthentication.refresh.authenticationRecovery) {
+      console.log(`[accounts] ${startupAuthentication.refresh.authenticationRecovery.message}`);
+    }
+    if (startupAuthentication.officialLoginRequired) {
+      console.log("[accounts] 已启动 Codex 官方登录，请在浏览器中完成授权");
+      const runtime = await codexRuntimeManager.getLaunchRuntime();
+      await recoverWithOfficialCodexLogin(accountManager, {
+        executable: runtime?.executable ?? null,
+      });
+    }
     launchOptions = await prepareCurrentLaunch();
     ({ options: launchOptions } = await launchWithRuntimeFallback(launchOptions));
     launchStatus.phase = "ready";

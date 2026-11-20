@@ -13,6 +13,7 @@ import {
   isRelayStateCurrent,
   restartCodex,
 } from "./platform.mjs";
+import { recoverWithOfficialCodexLogin } from "./official-login.mjs";
 import { TokenUsageProcessClient } from "./token-usage/process-client.mjs";
 import { isSea } from "node:sea";
 import * as initialWidget from "./widget.mjs";
@@ -109,6 +110,8 @@ export async function runInjector({
   let widgetReloading = false;
   let modelRouterClosePromise = null;
   let safeRestartCoordinator = null;
+  let accountRestartRecovery = null;
+  let officialLoginAbortController = null;
 
   const startupDeadline = Date.now() + STARTUP_GRACE_MS;
   const widgetSession = createWidgetSession({
@@ -175,7 +178,11 @@ export async function runInjector({
     getThreadId: () => hostHealthSession.selectedTask?.hostId === "local"
       ? hostHealthSession.selectedTask.threadId
       : null,
-    restart: restartForHostHealth,
+    restart: () => accountRestartRecovery
+      ? authenticationRecoveryUsesOfficialLogin(accountRestartRecovery)
+        ? restartForOfficialLogin()
+        : restartForAccountChange()
+      : restartForHostHealth(),
     onChange() {
       if (stopped) return;
       widgetSession.markWidgetDataDirty();
@@ -194,6 +201,8 @@ export async function runInjector({
 
   const stop = () => {
     stopped = true;
+    officialLoginAbortController?.abort();
+    officialLoginAbortController = null;
     safeRestartCoordinator?.close();
     widgetSession.reset();
     registerLaunchRecovery?.(null);
@@ -256,10 +265,23 @@ export async function runInjector({
       pendingWidgetReload = { widget: nextWidget, version };
   });
 
+  function requestSafeAccountRestart(recovery) {
+    accountRestartRecovery = recovery;
+    console.log(`[accounts] ${recovery.message}`);
+    void safeRestartCoordinator.request().catch((error) => {
+      if (!stopped) console.error(`[accounts] 自动恢复后的安全重启失败: ${error.message}`);
+    }).finally(() => {
+      if (accountRestartRecovery === recovery) accountRestartRecovery = null;
+    });
+  }
+
   async function refreshQuotas() {
     if (accountManager.store.list().length > 0) {
-      await accountManager.refreshAll();
+      const refresh = await accountManager.refreshAll({ recoverCurrentSession: true });
       widgetSession.markWidgetDataDirty();
+      if (refresh.authenticationRecovery?.restartRequired) {
+        requestSafeAccountRestart(refresh.authenticationRecovery);
+      }
     }
   }
 
@@ -495,7 +517,12 @@ export async function runInjector({
           await accountManager.restoreTransferredAccount(action.accountId);
           break;
         case "refresh-all":
-          await accountManager.refreshAllWithOperation();
+          {
+            const refresh = await accountManager.refreshAllWithOperation();
+            if (refresh?.authenticationRecovery?.restartRequired) {
+              requestSafeAccountRestart(refresh.authenticationRecovery);
+            }
+          }
           break;
         case "remove-account":
           await accountManager.removeAccount(action.accountId);
@@ -589,22 +616,46 @@ export async function runInjector({
   async function restartForAccountChange() {
     restartingCodex = true;
     try {
-      const options = await restartCodexWithRuntimeFallback(
-        await prepareLaunch(),
-      );
-      extraModelManager.markRestarted();
-      if (options.officialCatalogChanged) {
-        if (options.officialCatalogSource === "bundled") {
-          contextManager.markBundledCatalogCurrent({ restarted: true });
-        } else {
-          contextManager.markOfficialCatalogRestarted();
-        }
-      }
-      resetAfterCodexRestart();
-      scheduleQuotaRefresh(0);
+      await finishAccountChangeRestart();
     } finally {
       restartingCodex = false;
     }
+  }
+
+  async function restartForOfficialLogin() {
+    restartingCodex = true;
+    const abortController = new AbortController();
+    officialLoginAbortController = abortController;
+    try {
+      const executable = getLaunchOptions()?.codexRuntime?.executable ?? null;
+      console.log("[accounts] 已启动 Codex 官方登录，请在浏览器中完成授权");
+      await recoverWithOfficialCodexLogin(accountManager, {
+        executable,
+        signal: abortController.signal,
+      });
+      if (!stopped) await finishAccountChangeRestart();
+    } finally {
+      if (officialLoginAbortController === abortController) {
+        officialLoginAbortController = null;
+      }
+      restartingCodex = false;
+    }
+  }
+
+  async function finishAccountChangeRestart() {
+    const options = await restartCodexWithRuntimeFallback(
+      await prepareLaunch(),
+    );
+    extraModelManager.markRestarted();
+    if (options.officialCatalogChanged) {
+      if (options.officialCatalogSource === "bundled") {
+        contextManager.markBundledCatalogCurrent({ restarted: true });
+      } else {
+        contextManager.markOfficialCatalogRestarted();
+      }
+    }
+    resetAfterCodexRestart();
+    scheduleQuotaRefresh(0);
   }
 
   async function restartForHostHealth() {
@@ -913,4 +964,8 @@ export async function runInjector({
   await modelRouterClosePromise;
 }
 
-export { DEFAULT_PORT };
+function authenticationRecoveryUsesOfficialLogin(recovery) {
+  return recovery?.kind === "login";
+}
+
+export { DEFAULT_PORT, authenticationRecoveryUsesOfficialLogin };

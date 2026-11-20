@@ -53,8 +53,16 @@ function isPermanentRefreshError(error) {
   return code === "refresh_token_reused" ||
     code === "invalid_grant" ||
     code === "refresh_token_missing" ||
+    code === "session_expired" ||
     code === "temporary_token_expired" ||
     (error?.status === 401 && String(error?.message ?? "").startsWith("Token 刷新失败"));
+}
+
+function createSessionExpiredError(account) {
+  const error = new Error(`${account.email} 的登录会话已失效，需要重新授权`);
+  error.code = "session_expired";
+  error.status = 401;
+  return error;
 }
 
 function createTemporaryTokenExpiredError(account) {
@@ -126,4 +134,4 @@ async function refreshStoredTokens(store, account) {
     }));
   }
 
-export { refreshTokens, jwtExpiration, sameTokens, isPermanentRefreshError, createTemporaryTokenExpiredError, createOAuthCancelledError, ensureFreshTokens, refreshStoredTokens, createHttpError, decodeJwt, isAuthenticationError };
+export { refreshTokens, jwtExpiration, sameTokens, isPermanentRefreshError, createSessionExpiredError, createTemporaryTokenExpiredError, createOAuthCancelledError, ensureFreshTokens, refreshStoredTokens, createHttpError, decodeJwt, isAuthenticationError };

@@ -7,12 +7,14 @@ import { join } from "node:path";
 import { AccountStore } from "./account-store.mjs";
 import { CLIENT_ID, AUTH_ENDPOINT, OAUTH_CALLBACK_PORT, OAUTH_TIMEOUT_MS, SUBSCRIPTION_REFRESH_MS, OFFICIAL_SYNC_DEBOUNCE_MS, sha256, resolveCodexHome } from "./account-manager/contract.mjs";
 import { fetchQuota, fetchSubscription, normalizeUsageWindow, parseAccountCheck } from "./account-manager/api.mjs";
-import { refreshTokens, jwtExpiration, sameTokens, isPermanentRefreshError, createTemporaryTokenExpiredError, createOAuthCancelledError, ensureFreshTokens, refreshStoredTokens, decodeJwt } from "./account-manager/tokens.mjs";
+import { refreshTokens, jwtExpiration, sameTokens, isPermanentRefreshError, createSessionExpiredError, createTemporaryTokenExpiredError, createOAuthCancelledError, ensureFreshTokens, refreshStoredTokens, decodeJwt } from "./account-manager/tokens.mjs";
 import { exchangeAuthorizationCode, waitForOAuthCallback, listen, closeServer, openExternal, base64Url } from "./account-manager/oauth.mjs";
-import { writeOfficialCredentials, matchOfficialAccount } from "./account-manager/credentials.mjs";
+import { writeOfficialCredentials, matchOfficialAccount, clearOfficialCredentials } from "./account-manager/credentials.mjs";
 import { toPublicAccount, upsertOAuthTokens, upsertApiKey } from "./account-manager/accounts.mjs";
 import { transferAccounts } from "./account-manager/transfer.mjs";
 import { parseCredentialInput, parseTokenInput } from "./account-manager/credential-input.mjs";
+
+const CURRENT_AUTH_RECOVERY = Symbol("currentAuthRecovery");
 
 export class AccountManager {
   constructor({ store = new AccountStore(), codexHome = resolveCodexHome(),
@@ -117,20 +119,47 @@ export class AccountManager {
     return account?.authMode === "oauth" && account.tokens?.accessToken ? account : null;
   }
 
-  async refreshAll({ forceSubscription = false } = {}) {
+  async refreshAll({ forceSubscription = false, recoverCurrentSession = false } = {}) {
     await this.syncCurrentAccountFromOfficialCredentials();
+    const currentAccountId = this.store.index.currentAccountId;
     const accounts = this.store.list().filter((account) =>
       account.authMode === "oauth" && account.authStatus !== "transferred"
     );
     const results = await Promise.allSettled(
-      accounts.map((account) => this.refreshAccount(account.id, { forceSubscription })),
+      accounts.map((account) => this.refreshAccount(account.id, {
+        forceSubscription,
+        recoverCurrentSession,
+      })),
     );
-    return { viewModel: this.getViewModel(), results };
+    let authenticationRecovery = results
+      .find((result) => result.status === "fulfilled" && result.value?.[CURRENT_AUTH_RECOVERY])
+      ?.value?.[CURRENT_AUTH_RECOVERY] ?? null;
+    const currentResult = results[accounts.findIndex((account) => account.id === currentAccountId)];
+    if (recoverCurrentSession && !authenticationRecovery &&
+      currentResult?.status === "rejected" &&
+      this.store.get(currentAccountId)?.authStatus === "needsReauth") {
+      const successfulAccountIds = new Set(results.flatMap((result, index) =>
+        result.status === "fulfilled" ? [accounts[index].id] : []));
+      authenticationRecovery = await this.#recoverInvalidCurrentAccount(
+        currentAccountId,
+        successfulAccountIds,
+      );
+    }
+    return { viewModel: this.getViewModel(), results, authenticationRecovery };
   }
 
   async refreshAllWithOperation() {
     return this.#withOperation("正在刷新全部账号…", async () => {
-      const { results } = await this.refreshAll({ forceSubscription: true });
+      const { results, authenticationRecovery } = await this.refreshAll({
+        forceSubscription: true,
+        recoverCurrentSession: true,
+      });
+      if (authenticationRecovery) {
+        return {
+          message: authenticationRecovery.message,
+          authenticationRecovery,
+        };
+      }
       const failures = results.filter((result) => result.status === "rejected");
       if (failures.length > 0) {
         const messages = [...new Set(failures
@@ -144,10 +173,16 @@ export class AccountManager {
     });
   }
 
-  async refreshAccount(accountId, { forceSubscription = false } = {}) {
+  async refreshAccount(accountId, {
+    forceSubscription = false,
+    recoverCurrentSession = false,
+  } = {}) {
     return this.#withAccountLock(
       accountId,
-      () => this.#refreshAccountOnce(accountId, { forceSubscription }),
+      () => this.#refreshAccountOnce(accountId, {
+        forceSubscription,
+        recoverCurrentSession,
+      }),
     );
   }
 
@@ -434,7 +469,7 @@ export class AccountManager {
     }, ms);
   }
 
-  async #refreshAccountOnce(accountId, { forceSubscription }) {
+  async #refreshAccountOnce(accountId, { forceSubscription, recoverCurrentSession }) {
     let account = this.store.get(accountId);
     if (!account) throw new Error(`账号不存在: ${accountId}`);
     if (account.authStatus === "transferred") {
@@ -455,6 +490,7 @@ export class AccountManager {
       if (!isCurrent) account = await this.#ensureFreshTokens(account);
 
       let quota;
+      let authenticationRecovery = null;
       try {
         quota = await fetchQuota(account);
       } catch (error) {
@@ -462,16 +498,37 @@ export class AccountManager {
         if (account.authStatus === "temporary") throw createTemporaryTokenExpiredError(account);
         if (!isCurrent) {
           account = await this.#refreshStoredTokens(account);
-          quota = await fetchQuota(account);
+          try {
+            quota = await fetchQuota(account);
+          } catch (retryError) {
+            if (retryError?.status === 401) throw createSessionExpiredError(account);
+            throw retryError;
+          }
         } else {
           const previousAccessToken = account.tokens.accessToken;
           await this.syncCurrentAccountFromOfficialCredentials();
           const synced = this.store.get(accountId);
-          if (!synced || synced.tokens.accessToken === previousAccessToken) {
-            throw new Error(`${account.email} 的 Codex 登录尚未完成 Token 续期`);
+          if (synced && synced.tokens.accessToken !== previousAccessToken) {
+            account = synced;
+          } else {
+            if (!recoverCurrentSession) {
+              throw new Error(`${account.email} 的 Codex 登录尚未完成 Token 续期`);
+            }
+            account = await this.#refreshCurrentOfficialCredentials(account);
+            authenticationRecovery = {
+              kind: "refreshed",
+              failedAccountId: null,
+              accountId: account.id,
+              message: `已恢复 ${account.email} 的登录会话`,
+              restartRequired: true,
+            };
           }
-          account = synced;
-          quota = await fetchQuota(account);
+          try {
+            quota = await fetchQuota(account);
+          } catch (retryError) {
+            if (retryError?.status === 401) throw createSessionExpiredError(account);
+            throw retryError;
+          }
         }
       }
       const updates = {
@@ -503,10 +560,16 @@ export class AccountManager {
           console.error(`[subscription] ${account.email}: ${error.message}`);
         }
       }
-      return await this.store.update(accountId, updates);
+      const updated = await this.store.update(accountId, updates);
+      if (authenticationRecovery) {
+        Object.defineProperty(updated, CURRENT_AUTH_RECOVERY, {
+          value: authenticationRecovery,
+        });
+      }
+      return updated;
     } catch (error) {
       const updates = {};
-      if ((!isCurrent || account.authStatus === "temporary") && isPermanentRefreshError(error)) {
+      if (isPermanentRefreshError(error)) {
         updates.authStatus = "needsReauth";
         updates.quotaError = `登录凭证已失效，需要重新授权（${error.code ?? error.message}）`;
       } else {
@@ -523,6 +586,64 @@ export class AccountManager {
 
   async #refreshStoredTokens(account) {
     return refreshStoredTokens(this.store, account);
+  }
+
+  async #refreshCurrentOfficialCredentials(account) {
+    if (!account.tokens.refreshToken) {
+      const error = new Error(`${account.email} 的登录已过期，需要重新添加或授权`);
+      error.code = "refresh_token_missing";
+      throw error;
+    }
+    const tokens = await refreshTokens(account.tokens.refreshToken, account.tokens.idToken);
+    const refreshed = { ...account, tokens };
+    await writeOfficialCredentials(this.codexHome, refreshed, {
+      syncKeychain: this.syncOfficialKeychain,
+      strictKeychain: this.syncOfficialKeychain,
+    });
+    return this.store.update(account.id, (latest) => ({
+      tokens,
+      authStatus: "active",
+      tokenGeneration: (latest.tokenGeneration ?? 0) + 1,
+    }));
+  }
+
+  async #recoverInvalidCurrentAccount(accountId, successfulAccountIds) {
+    if (!accountId || this.store.index.currentAccountId !== accountId ||
+      this.store.get(accountId)?.authStatus !== "needsReauth") return null;
+
+    const fallback = this.store.list().find((account) => {
+      if (account.id === accountId || !["active", "temporary"].includes(account.authStatus)) {
+        return false;
+      }
+      if (account.authMode === "apiKey") return Boolean(account.openaiApiKey);
+      return Boolean(account.tokens.accessToken) && successfulAccountIds.has(account.id);
+    }) ?? null;
+
+    if (fallback) {
+      if (fallback.authMode === "apiKey" && this.syncOfficialKeychain) {
+        await clearOfficialCredentials(this.codexHome, { syncKeychain: true });
+      }
+      await writeOfficialCredentials(this.codexHome, fallback, {
+        syncKeychain: this.syncOfficialKeychain,
+        strictKeychain: this.syncOfficialKeychain,
+      });
+      await this.store.setCurrent(fallback.id);
+      return {
+        kind: "switched",
+        failedAccountId: accountId,
+        accountId: fallback.id,
+        message: `当前登录已失效，已自动切换到 ${fallback.email}`,
+        restartRequired: true,
+      };
+    }
+
+    return {
+      kind: "login",
+      failedAccountId: accountId,
+      accountId: null,
+      message: "所有已保存登录均已失效，正在打开 Codex 官方登录",
+      restartRequired: true,
+    };
   }
 
   async #importOfficialAccountIfStoreEmpty() {
@@ -619,7 +740,7 @@ export class AccountManager {
           !account ||
           !sameTokens(account.tokens, nextTokens) ||
           (candidate.accountId && candidate.accountId !== account.accountId) ||
-          ["needsReauth", "transferred"].includes(account.authStatus) ||
+          account.authStatus === "transferred" ||
           (account.authStatus === "temporary" && candidate.refreshToken)
         ) {
           account = await this.#upsertOAuthTokens(nextTokens, account);

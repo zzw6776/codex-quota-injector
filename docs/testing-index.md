@@ -88,6 +88,8 @@ macOS 定向启停补测使用 `npm run test:lifecycle -- --plan --task-tools-on
 
 ## 结果总表与证据来源
 
+2026-11-21，0.1.348 在 Windows 原生完成 Session 过期自动恢复定向验证：相关自动化 **28/28**、实机故障注入 **1/1** 通过。覆盖续期、备用账号切换、无可用账号时的官方浏览器登录及凭据落盘后单次受控启动；原账号列表与当前注入状态已恢复。[Windows Session 恢复验证记录](test-reports/windows-native/2026-11-21-session-expiry-recovery.md)
+
 2026-11-18，0.1.347 在 macOS arm64 的计价、历史用量重算和模拟唤醒选模定向验证 **22/22** 通过。[GPT-6.2 计价验证记录](test-reports/macos-native/2026-11-18-pricing-targeted.md)
 
 2026-11-02 的[Windows 报告替换修复](test-reports/macos-native/2026-11-02-windows-report-replace.md)保留远端 **731 通过、1 失败、1 取消、13 跳过**，本地 macOS / Node v26.7.0 故障注入最终 **23/23**。应用 0.1.344；Windows 原生恢复待新版 CI，未执行真实模型、日常启停或完整免费回归。
