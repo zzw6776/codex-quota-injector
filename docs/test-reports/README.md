@@ -1,5 +1,7 @@
 # 测试报告归档
 
+2026-11-21，0.1.349 修复 macOS 并发开发日志窗口归属竞态：保留远端 Node 22.23.1 **763 通过、1 失败、2 跳过**及打包 skipped；旧实现压力复现第 2 轮失败，修复后 Node 26 与 Node 22.23.1 定向均为 **7/7**，Node 26 压力验证 **500/500** 通过。远端恢复待新 CI 确认。[macOS 开发日志窗口归属竞态修复](macos-native/2026-11-21-dev-console-owner-race.md)
+
 2026-11-21，0.1.348 在 Windows 原生完成 Session 过期自动恢复定向验证：相关自动化 **28/28**、实机故障注入 **1/1** 通过；官方浏览器登录成功后才启动桌面，原账号列表已恢复。[Windows Session 恢复验证记录](windows-native/2026-11-21-session-expiry-recovery.md)
 
 2026-11-18，0.1.347 在 macOS arm64 的计价、历史用量重算和模拟唤醒选模定向验证 **22/22** 通过。[GPT-6.2 计价验证记录](macos-native/2026-11-18-pricing-targeted.md)

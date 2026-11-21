@@ -180,20 +180,24 @@ if (process.platform !== 'win32') {
   });
 
   test('并发打开日志观察器最终只留一个归属；已关闭的登记不会阻挡下次打开', async t => {
-    const directory = await useTempDir(t, 'dev-console-owners-');
-    const replaced = new Set(), errors = [];
-    const owners = await Promise.all([0, 1, 2].map(id => claimConsole(directory, {
-      onReplaced: () => replaced.add(id), onError: error => errors.push(error),
-    })));
-    t.after(() => owners.forEach(owner => owner.close()));
-    await waitFor(() => replaced.size === 2);
-    assert.deepEqual(errors, []);
-    owners.forEach(owner => owner.close());
-    const next = await claimConsole(directory, {
-      onReplaced: () => { throw new Error('新观察器不应退出'); }, onError: error => errors.push(error),
-    });
-    t.after(() => next.close());
-    assert.deepEqual(errors, []);
+    const rootDirectory = await useTempDir(t, 'dev-console-owners-');
+    for (let round = 0; round < 20; round += 1) {
+      const directory = join(rootDirectory, String(round));
+      await mkdir(directory);
+      const replaced = new Set(), errors = [];
+      const owners = await Promise.all([0, 1, 2].map(id => claimConsole(directory, {
+        onReplaced: () => replaced.add(id), onError: error => errors.push(error),
+      })));
+      t.after(() => owners.forEach(owner => owner.close()));
+      await waitFor(() => replaced.size === 2);
+      assert.deepEqual(errors, []);
+      owners.forEach(owner => owner.close());
+      const next = await claimConsole(directory, {
+        onReplaced: () => { throw new Error('新观察器不应退出'); }, onError: error => errors.push(error),
+      });
+      t.after(() => next.close());
+      assert.deepEqual(errors, []);
+    }
   });
 
   for (const code of [0, 7]) test(`command Shell 隔离启动器退出 ${code}：${code ? '保留完整错误' : '复用后继续日志输出'}`, async t => {

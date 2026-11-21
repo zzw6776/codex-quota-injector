@@ -9,8 +9,13 @@ export async function claimConsole(logRoot, { onReplaced, onError } = {}) {
   const path = join(logRoot, name);
   const token = randomUUID();
   const temporary = `${path}.${token}.tmp`;
-  let registered = false, closed = false, tail = Promise.resolve();
-  const close = () => { if (closed) return; closed = true; watcher.close(); };
+  let registered = false, closed = false, reconcileTimer = null, tail = Promise.resolve();
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (reconcileTimer) clearTimeout(reconcileTimer);
+    watcher.close();
+  };
   const check = () => {
     tail = tail.then(async () => {
       if (!registered || closed) return;
@@ -26,6 +31,14 @@ export async function claimConsole(logRoot, { onReplaced, onError } = {}) {
     await rename(temporary, path);
     registered = true;
     check();
+    // fs.watch may coalesce concurrent atomic replacements before every owner
+    // has registered. Reconcile once after the registration burst so an older
+    // console cannot remain alive after missing that edge-triggered event.
+    reconcileTimer = setTimeout(() => {
+      reconcileTimer = null;
+      check();
+    }, 50);
+    reconcileTimer.unref?.();
   } catch (error) { close(); throw error; }
   finally { await rm(temporary, { force: true }); }
   return { close };
